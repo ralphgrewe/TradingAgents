@@ -153,7 +153,7 @@ def main() -> int:
     #    saved reports) keep working.
     checks = [
         ("Research Manager", investment_plan, ["**Recommendation**:"]),
-        ("Trader",           trader_plan,     ["**Action**:", "FINAL TRANSACTION PROPOSAL:"]),
+        ("Trader",           trader_plan,     ["**Action**:"]),
         ("Portfolio Manager", final_decision, ["**Rating**:", "**Executive Summary**:", "**Investment Thesis**:"]),
     ]
     print("\n" + "=" * 70 + "\nStructure checks\n" + "=" * 70)

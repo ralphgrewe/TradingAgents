@@ -640,6 +640,47 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
     """Save complete analysis report to disk with organized subfolders."""
     save_path.mkdir(parents=True, exist_ok=True)
     sections = []
+    
+    # Extract structured data for trading recommendation
+    structured_data = {
+        "ticker": ticker,
+        "rating": "N/A",
+        "executive_summary": "N/A",
+        "investment_thesis": "N/A",
+        "price_target": None,
+        "time_horizon": None,
+        "action": "N/A",
+        "reasoning": "N/A",
+        "entry_price": None,
+        "stop_loss": None,
+        "position_sizing": None,
+    }
+    
+    # Try to extract structured data if available
+    if final_state.get("portfolio_structured_data"):
+        pm_data = final_state["portfolio_structured_data"]
+        structured_data.update({
+            "rating": pm_data.get("rating", "N/A"),
+            "executive_summary": pm_data.get("executive_summary", "N/A"),
+            "investment_thesis": pm_data.get("investment_thesis", "N/A"),
+            "price_target": pm_data.get("price_target"),
+            "time_horizon": pm_data.get("time_horizon"),
+        })
+    
+    if final_state.get("trader_structured_data"):
+        trader_data = final_state["trader_structured_data"]
+        structured_data.update({
+            "action": trader_data.get("action", "N/A"),
+            "reasoning": trader_data.get("reasoning", "N/A"),
+            "entry_price": trader_data.get("entry_price"),
+            "stop_loss": trader_data.get("stop_loss"),
+            "position_sizing": trader_data.get("position_sizing"),
+        })
+    
+    # Save structured JSON for backtesting
+    import json
+    json_file = save_path / "trading_recommendation.json"
+    json_file.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
 
     # 1. Analysts
     analysts_dir = save_path / "1_analysts"
@@ -723,7 +764,7 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
-    return save_path / "complete_report.md"
+    return save_path / "complete_report.md", structured_data
 
 
 def display_complete_report(final_state):
@@ -1185,9 +1226,10 @@ def run_analysis(checkpoint: bool = False):
         ).strip()
         save_path = Path(save_path_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            report_file, structured_data = save_report_to_disk(final_state, selections["ticker"], save_path)
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            console.print(f"  [dim]Trading recommendation:[/dim] {save_path / 'trading_recommendation.json'}")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
 

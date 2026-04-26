@@ -63,14 +63,36 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 
-        final_trade_decision = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            prompt,
-            render_pm_decision,
-            "Portfolio Manager",
-        )
+        # Try structured output first
+        if structured_llm is not None:
+            try:
+                structured_result = structured_llm.invoke(prompt)
+                final_trade_decision = render_pm_decision(structured_result)
+                # Store both the rendered markdown and the structured data
+                new_risk_debate_state = {
+                    "judge_decision": final_trade_decision,
+                    "history": risk_debate_state["history"],
+                    "aggressive_history": risk_debate_state["aggressive_history"],
+                    "conservative_history": risk_debate_state["conservative_history"],
+                    "neutral_history": risk_debate_state["neutral_history"],
+                    "latest_speaker": "Judge",
+                    "current_aggressive_response": risk_debate_state["current_aggressive_response"],
+                    "current_conservative_response": risk_debate_state["current_conservative_response"],
+                    "current_neutral_response": risk_debate_state["current_neutral_response"],
+                    "count": risk_debate_state["count"],
+                }
 
+                return {
+                    "risk_debate_state": new_risk_debate_state,
+                    "final_trade_decision": final_trade_decision,
+                    "portfolio_structured_data": structured_result.dict(),
+                }
+            except Exception:
+                # Fall back to free-text generation
+                pass
+        
+        # Free-text fallback
+        final_trade_decision = llm.invoke(prompt).content
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
             "history": risk_debate_state["history"],

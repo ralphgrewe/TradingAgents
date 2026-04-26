@@ -44,14 +44,24 @@ def create_trader(llm):
             },
         ]
 
-        trader_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            messages,
-            render_trader_proposal,
-            "Trader",
-        )
-
+        # Try structured output first
+        if structured_llm is not None:
+            try:
+                structured_result = structured_llm.invoke(messages)
+                trader_plan = render_trader_proposal(structured_result)
+                # Store both the rendered markdown and the structured data
+                return {
+                    "messages": [AIMessage(content=trader_plan)],
+                    "trader_investment_plan": trader_plan,
+                    "trader_structured_data": structured_result.dict(),
+                    "sender": name,
+                }
+            except Exception:
+                # Fall back to free-text generation
+                pass
+        
+        # Free-text fallback
+        trader_plan = llm.invoke(messages).content
         return {
             "messages": [AIMessage(content=trader_plan)],
             "trader_investment_plan": trader_plan,
