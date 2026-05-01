@@ -38,6 +38,7 @@ class NormalizedChatOpenAI(ChatOpenAI):
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "reasoning_effort",
     "api_key", "callbacks", "http_client", "http_async_client",
+    "temperature",
 )
 
 # Provider base URLs and API key env vars
@@ -48,6 +49,7 @@ _PROVIDER_CONFIG = {
     "glm": ("https://api.z.ai/api/paas/v4/", "ZHIPU_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "ollama": ("http://localhost:11434/v1", None),
+    "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
 }
 
 

@@ -99,6 +99,20 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
+    "mistral": {
+        "quick": [
+            ("Mistral Large - Most capable", "mistral-large"),
+            ("Mistral Small - Fast and efficient", "mistral-small"),
+            ("Mistral Tiny - Low cost", "mistral-tiny"),
+            ("Codestral - Code specialized", "codestral"),
+        ],
+        "deep": [
+            ("Mistral Large - Most capable", "mistral-large"),
+            ("Mistral Medium - Balanced", "mistral-medium"),
+            ("Mistral Small - Fast and efficient", "mistral-small"),
+            ("Codestral - Code specialized", "codestral"),
+        ],
+    },
     # OpenRouter: fetched dynamically. Azure: any deployed model name.
     "ollama": {
         "quick": [

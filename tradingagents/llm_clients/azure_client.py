@@ -9,6 +9,7 @@ from .validators import validate_model
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "api_key", "reasoning_effort",
     "callbacks", "http_client", "http_async_client",
+    "temperature",
 )
 
 

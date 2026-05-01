@@ -149,6 +149,11 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
+        # Temperature is supported by all providers
+        temperature = self.config.get("temperature")
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
