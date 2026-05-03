@@ -128,6 +128,19 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Qwen3:latest (8B, local)", "qwen3:latest"),
         ],
     },
+    "perplexity": {
+        "quick": [
+            ("Sonar Small - Fast, cost-effective", "sonar-small-online"),
+            ("Sonar - Balanced performance", "sonar-online"),
+            ("Sonar Pro - Most capable", "sonar-pro"),
+        ],
+        "deep": [
+            ("Sonar Pro - Most capable", "sonar-pro"),
+            ("Sonar - Balanced performance", "sonar-online"),
+            ("Llama 3.1 Sonar Large 128K - Online", "llama-3.1-sonar-large-128k-online"),
+            ("Llama 3.1 70B - Instruct", "llama-3.1-70b-instruct"),
+        ],
+    },
 }
 
 

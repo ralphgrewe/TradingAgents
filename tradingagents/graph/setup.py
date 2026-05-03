@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from tradingagents.agents import *
+from tradingagents.agents.analysts.perplexity_news_analyst import create_perplexity_news_analyst
 from tradingagents.agents.utils.agent_states import AgentState
 
 from .conditional_logic import ConditionalLogic
@@ -37,6 +38,7 @@ class GraphSetup:
                 - "social": Social media analyst
                 - "news": News analyst
                 - "fundamentals": Fundamentals analyst
+                - "perplexity_news": Perplexity-based news analyst (uses Agent API)
         """
         if len(selected_analysts) == 0:
             raise ValueError("Trading Agents Graph Setup Error: no analysts selected!")
@@ -73,6 +75,13 @@ class GraphSetup:
             )
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
+
+        if "perplexity_news" in selected_analysts:
+            analyst_nodes["perplexity_news"] = create_perplexity_news_analyst(
+                self.quick_thinking_llm
+            )
+            delete_nodes["perplexity_news"] = create_msg_delete()
+            tool_nodes["perplexity_news"] = self.tool_nodes["perplexity_news"]
 
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
