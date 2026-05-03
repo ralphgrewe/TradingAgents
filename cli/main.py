@@ -596,6 +596,15 @@ def get_user_selections():
         )
         anthropic_effort = ask_anthropic_effort()
 
+    # Step 9: Temperature configuration (applies to all providers)
+    console.print(
+        create_question_box(
+            "Step 9: Temperature",
+            "Configure output randomness/creativity"
+        )
+    )
+    temperature = ask_temperature()
+
     return {
         "ticker": selected_ticker,
         "analysis_date": analysis_date,
@@ -608,6 +617,7 @@ def get_user_selections():
         "google_thinking_level": thinking_level,
         "openai_reasoning_effort": reasoning_effort,
         "anthropic_effort": anthropic_effort,
+        "temperature": temperature,
         "output_language": output_language,
     }
 
@@ -983,6 +993,8 @@ def run_analysis(checkpoint: bool = False):
     config["google_thinking_level"] = selections.get("google_thinking_level")
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
     config["anthropic_effort"] = selections.get("anthropic_effort")
+    # Temperature configuration (applies to all providers)
+    config["temperature"] = selections.get("temperature", 0.7)
     config["output_language"] = selections.get("output_language", "English")
     config["checkpoint_enabled"] = checkpoint
 

@@ -16,6 +16,7 @@ from langgraph.prebuilt import ToolNode
 from tradingagents.llm_clients import create_llm_client
 
 from tradingagents.agents import *
+from tradingagents.agents.analysts.perplexity_news_analyst import create_perplexity_news_analyst
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.agent_states import (
@@ -59,7 +60,12 @@ class TradingAgentsGraph:
         """Initialize the trading agents graph and components.
 
         Args:
-            selected_analysts: List of analyst types to include
+            selected_analysts: List of analyst types to include. Options:
+                - "market": Market/technical analysis
+                - "social": Social media sentiment analysis
+                - "news": Traditional news analysis (yfinance/alpha_vantage)
+                - "fundamentals": Fundamental data analysis
+                - "perplexity_news": Perplexity Agent API-based news analysis
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
@@ -125,6 +131,9 @@ class TradingAgentsGraph:
         self.log_states_dict = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
+        # Register the perplexity_news_analyst creator with the module
+        # This allows it to be imported via create_perplexity_news_analyst
+        
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
@@ -148,6 +157,11 @@ class TradingAgentsGraph:
             effort = self.config.get("anthropic_effort")
             if effort:
                 kwargs["effort"] = effort
+
+        # Temperature is supported by all providers
+        temperature = self.config.get("temperature")
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         return kwargs
 
@@ -183,6 +197,13 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                ]
+            ),
+            "perplexity_news": ToolNode(
+                [
+                    # Perplexity news analyst uses its own tools internally
+                    # via the Agent API (web_search, fetch_url)
+                    # No external tools needed here
                 ]
             ),
         }
@@ -351,10 +372,11 @@ class TradingAgentsGraph:
         self.log_states_dict[str(trade_date)] = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
-            "market_report": final_state["market_report"],
-            "sentiment_report": final_state["sentiment_report"],
-            "news_report": final_state["news_report"],
-            "fundamentals_report": final_state["fundamentals_report"],
+            "market_report": final_state.get("market_report", ""),
+            "sentiment_report": final_state.get("sentiment_report", ""),
+            "news_report": final_state.get("news_report", ""),
+            "perplexity_news_report": final_state.get("perplexity_news_report", ""),
+            "fundamentals_report": final_state.get("fundamentals_report", ""),
             "investment_debate_state": {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],

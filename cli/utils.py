@@ -239,6 +239,7 @@ def select_llm_provider() -> tuple[str, str | None]:
         ("DeepSeek", "deepseek", "https://api.deepseek.com"),
         ("Qwen", "qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         ("GLM", "glm", "https://open.bigmodel.cn/api/paas/v4/"),
+        ("Mistral", "mistral", "https://api.mistral.ai/v1"),
         ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
         ("Azure OpenAI", "azure", None),
         ("Ollama", "ollama", "http://localhost:11434/v1"),
@@ -324,6 +325,56 @@ def ask_gemini_thinking_config() -> str | None:
             ("pointer", "fg:green noinherit"),
         ]),
     ).ask()
+
+
+def ask_temperature() -> float:
+    """Ask for temperature configuration.
+
+    Temperature controls randomness in LLM sampling.
+    Lower values (closer to 0) produce more deterministic outputs.
+    Higher values (closer to 2) produce more creative/random outputs.
+    Returns temperature as a float.
+    """
+    choice = questionary.select(
+        "Select Temperature (creativity level):",
+        choices=[
+            questionary.Choice("Low (0.3) - More deterministic, consistent", 0.3),
+            questionary.Choice("Medium (0.7) - Balanced creativity (default)", 0.7),
+            questionary.Choice("High (1.0) - More creative, diverse outputs", 1.0),
+            questionary.Choice("Very High (1.5) - Very creative, more random", 1.5),
+            questionary.Choice("Custom temperature", "custom"),
+        ],
+        style=questionary.Style([
+            ("selected", "fg:cyan noinherit"),
+            ("highlighted", "fg:cyan noinherit"),
+            ("pointer", "fg:cyan noinherit"),
+        ]),
+    ).ask()
+
+    if choice == "custom":
+        while True:
+            custom_temp = questionary.text(
+                "Enter temperature value (0.0 to 2.0):",
+                validate=lambda x: validate_temperature(x) or "Please enter a valid number between 0.0 and 2.0",
+            ).ask()
+            if custom_temp is not None:
+                try:
+                    temp = float(custom_temp)
+                    if 0.0 <= temp <= 2.0:
+                        return temp
+                except ValueError:
+                    pass
+    
+    return float(choice) if choice != "custom" else 0.7
+
+
+def validate_temperature(value: str) -> bool:
+    """Validate that a temperature value is a float between 0.0 and 2.0."""
+    try:
+        temp = float(value)
+        return 0.0 <= temp <= 2.0
+    except ValueError:
+        return False
 
 
 def ask_output_language() -> str:
