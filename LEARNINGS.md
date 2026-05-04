@@ -1,0 +1,5 @@
+## May 2nd, 2026
+Trying to implement some agent as skills for perplexity, as there is a good basis for finance data. Simple conversion using an LLM lead to complex skills which arent reliably called in perplexity. If calling skills isn't reliable this might still be an argument for a multi-agent implementation as in TradingAgents.
+
+## May 1st, 2026
+Trading Agents sometimes gave quite different results when running the same analysis several times. One reason might be the stochasticity (which might be pronounced by high temperature). Other factors might be "computations" done by the LLM which might have different results between runs (can be addressed by pre-computing values in python and just giving the results in the prompt). Also, explicitly outputing decision and confidence might make the system more stable in borderline cases. Generally shortening the prompts made the system more unstable because critical context tokens might be missing. Removing redundancy and forcing a structured output (e.g., summarize as json) might still help to reduce the amount of output tokens.
