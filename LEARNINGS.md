@@ -1,3 +1,10 @@
+## May 14th, 2026
+Design decisions on agent selection:
+- Beyond fundamentals + news, the highest-value agents are a technical/quant analyst (orthogonal price/volume signal), a trader (decision aggregator), and a risk manager (position sizing / risk-adjusted returns). Social media analyst is a weaker, noisier signal.
+- Bull/bear researchers + debate: per the paper they add value by surfacing disconfirming evidence, but the ablation effect is modest and it's the most expensive component. Leaner alternative: a single research-synthesis agent producing a balanced pro/con thesis in one pass. Only add the full debate if it can be measured beating the single synthesizer.
+- Proposed first working pipeline: fundamentals + news + technical analysts -> research synthesis (single agent) -> trader -> risk manager.
+- Portfolio manager: redundant in a single-stock setup (decision collapses to position sizing, which the risk manager already does). It only earns its place with a selection + allocation problem. Decision: define a stock universe/watchlist and have the portfolio manager build a weighted portfolio across candidates. This is a change from the paper (which runs per-ticker): analyst/trader stages run per stock, the portfolio manager operates one level up across all of them.
+
 ## May 2nd, 2026
 Trying to implement some agent as skills for perplexity, as there is a good basis for finance data. Simple conversion using an LLM lead to complex skills which arent reliably called in perplexity. If calling skills isn't reliable this might still be an argument for a multi-agent implementation as in TradingAgents.
 

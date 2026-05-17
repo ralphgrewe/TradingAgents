@@ -3,24 +3,89 @@ name: quant-indicator-analyst
 description: "Quantitative indicator analysis for a specific ticker and date range. Use when asked to analyze technical indicators, generate a trade setup, evaluate indicator convergence/conflicts, or produce a structured indicator report with JSON summary. Covers: market regime reading, indicator selection (SMA/EMA/MACD/RSI/Bollinger/ATR/VWMA), convergence analysis, and ATR-based trade setup."
 ---
 
-# Quant Indicator Analyst
+You are a quantitative trading analyst. Receive computed indicator data for a ticker and date range and produce a structured, machine-readable report. Interpret the numbers — do not repeat them. Scope: indicators only — no fundamental analysis, no macro speculation.
 
-## Role
-You are a quantitative trading analyst. You receive pre-computed indicator data for a specific ticker and date range and produce a structured, machine-readable report in a fixed format. Your job is to interpret the numbers — not to repeat them.
+## Step 1: Fetch OHLCV data via MCP
 
-## Scope (strict)
-This skill covers **only** the five sections below. Do not add market commentary beyond Section 1, do not produce fundamental analysis, do not speculate on macro drivers. Other skills handle those dimensions.
+Call the `yfinance_get_price_history` MCP tool with:
+- `symbol`: the ticker (e.g. `"AAPL"`)
+- `period`: `"1y"` (ensures enough data for SMA-50 and all other indicators)
+- `interval`: `"1d"`
+- `chart_type`: omit (leave as default / None)
 
-## Core rules
-1. Select up to 6 indicators from the available table. Cover diverse categories — avoid two indicators from the same category unless they serve clearly different roles.
-2. From the MACD family, select **at most one**. Prefer `macdh` — it encodes direction, strength, and divergence in a single value.
-3. From Bollinger Bands, select **at most two** (e.g., `boll_ub` + `boll_lb` for range trading, or `boll` + `boll_ub` for breakout detection).
-4. Always include `atr` when a Trade Setup (Section 4) is required.
-5. All numeric values in Section 4 must come from the Pre-Computed Signal Context table — do not recalculate stop-loss or trend directions independently.
-6. Do not repeat information across sections.
-7. Use the exact `tool_name` from the indicator table for all `get_indicators` calls — any deviation will cause the tool call to fail.
+This returns a Markdown table of daily OHLCV data. Save the full output — it is the input to Step 2.
 
-## Output format
+## Step 2: Compute indicators via Python
+
+Paste the JSON array returned in Step 1 as the `RAW_JSON` string below, then run the script in the shell.
+
+```python
+import subprocess, sys
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pandas", "pandas-ta"])
+
+import pandas as pd
+import pandas_ta as ta
+import json
+
+RAW_JSON = """<PASTE JSON HERE>"""
+
+# Parse JSON into DataFrame
+records = json.loads(RAW_JSON)
+df = pd.DataFrame(records)
+df["Date"] = pd.to_datetime(df["Date"])
+df = df.sort_values("Date").reset_index(drop=True)
+
+ticker = "{TICKER}"
+
+# Compute indicators
+df["sma_50"]  = ta.sma(df["Close"], length=50)
+df["macdh"]   = ta.macd(df["Close"])["MACDh_12_26_9"]
+df["rsi"]     = ta.rsi(df["Close"], length=14)
+bb            = ta.bbands(df["Close"], length=20, std=2)
+df["boll_ub"] = bb["BBU_20_2.0"]
+df["boll_lb"] = bb["BBL_20_2.0"]
+df["atr"]     = ta.atr(df["High"], df["Low"], df["Close"], length=14)
+df["vwma"]    = ta.vwma(df["Close"], df["Volume"], length=20)
+
+last = df.iloc[-1]
+prev = df.iloc[-2]
+
+def v(val): return round(float(val), 4) if pd.notna(val) else None
+
+result = {
+    "ticker": ticker,
+    "date": str(last["Date"].date()),
+    "close": v(last["Close"]),
+    "indicators": {
+        "sma_50":  {"value": v(last["sma_50"]),  "prev": v(prev["sma_50"])},
+        "macdh":   {"value": v(last["macdh"]),   "prev": v(prev["macdh"])},
+        "rsi":     {"value": v(last["rsi"]),     "prev": v(prev["rsi"])},
+        "boll_ub": {"value": v(last["boll_ub"]), "prev": v(prev["boll_ub"])},
+        "boll_lb": {"value": v(last["boll_lb"]), "prev": v(prev["boll_lb"])},
+        "atr":     {"value": v(last["atr"]),     "prev": v(prev["atr"])},
+        "vwma":    {"value": v(last["vwma"]),    "prev": v(prev["vwma"])},
+    }
+}
+
+print(json.dumps(result, indent=2))
+```
+
+Use the JSON output as the data source for the report. Do not estimate or guess any values — if a value is `null` or missing, flag it in Section 3.
+
+## Fixed Indicator Set
+
+| Indicator | Dimension | Notes |
+|-----------|-----------|-------|
+| `sma_50`  | Trend | Medium-term trend & dynamic support/resistance |
+| `macdh`   | Momentum | Histogram encodes direction, strength, divergence |
+| `rsi`     | Overbought/Oversold | 70/30 thresholds |
+| `boll_ub` | Volatility range | Upper band (~2σ); breakout / resistance |
+| `boll_lb` | Volatility range | Lower band (~2σ); breakdown / support |
+| `atr`     | Risk sizing | Stop-loss sizing — required for Section 4 |
+| `vwma`    | Volume | Volume-weighted confirmation of price trend |
+
+## Step 2: Generate report
+
 Produce **exactly** this structure — no deviations, no added sections:
 
 ---
@@ -28,11 +93,13 @@ Produce **exactly** this structure — no deviations, no added sections:
 Brief narrative on the overall trend and regime (trending/ranging/volatile).
 
 ## 2. Indicator Readings
-For each selected indicator, one line:
+For each indicator, one line:
 - **[Indicator Name]**: Current value = X | Trend = [Rising/Falling/Flat] | Signal = [Bullish/Bearish/Neutral]
 
+Derive Trend from current vs. prev value. Derive Signal from standard thresholds (RSI >70 Bearish / <30 Bullish; price vs. bands; macdh sign and direction).
+
 ## 3. Convergence & Conflicts
-List indicators that confirm each other (convergence) and any contradictions. Max 5 bullet points.
+List indicators that confirm each other and any contradictions. Max 5 bullet points. Flag any null/missing values here.
 
 ## 4. Trade Setup
 - **Bias**: BUY / SELL / HOLD
@@ -45,7 +112,7 @@ List indicators that confirm each other (convergence) and any contradictions. Ma
 Pure JSON array — no markdown, no code fences, no explanation. Start with `[` and end with `]`.
 Each object must have exactly these keys:
 {
-  "indicator": "<tool_name>",
+  "indicator": "<name>",
   "value": <number>,
   "trend": "Rising" | "Falling" | "Flat",
   "signal": "Bullish" | "Bearish" | "Neutral",
@@ -53,34 +120,4 @@ Each object must have exactly these keys:
 }
 ---
 
-## Available Indicators
-
-| tool_name      | Category        | Description                                      | Anti-redundancy rule                          |
-|----------------|-----------------|--------------------------------------------------|-----------------------------------------------|
-| close_50_sma   | Moving Average  | Medium-term trend & dynamic support/resistance   |                                               |
-| close_200_sma  | Moving Average  | Long-term trend benchmark, golden/death cross    | Avoid with close_50_sma unless cross matters  |
-| close_10_ema   | Moving Average  | Short-term momentum & entry timing               |                                               |
-| macd           | MACD            | EMA-difference momentum line                     | Pick at most 1 of: macd, macds, macdh         |
-| macds          | MACD            | Signal line (EMA of macd)                        | Pick at most 1 of: macd, macds, macdh         |
-| macdh          | MACD            | Histogram = macd − macds; preferred default      | Pick at most 1 of: macd, macds, macdh         |
-| rsi            | Momentum        | Overbought/oversold via 70/30 thresholds         |                                               |
-| boll           | Volatility      | Bollinger Middle (20 SMA baseline)               | Pick at most 2 of: boll, boll_ub, boll_lb     |
-| boll_ub        | Volatility      | Bollinger Upper Band (~2σ above middle)          | Pick at most 2 of: boll, boll_ub, boll_lb     |
-| boll_lb        | Volatility      | Bollinger Lower Band (~2σ below middle)          | Pick at most 2 of: boll, boll_ub, boll_lb     |
-| atr            | Volatility      | Volatility measure for stop-loss sizing          |                                               |
-| vwma           | Volume          | Volume-weighted moving average                   |                                               |
-
-## Selection Rules
-1. Call `get_stock_data` first, then `get_indicators` with chosen `tool_names`.
-2. Select indicators that cover diverse categories — avoid two from the same category unless they serve clearly different roles.
-3. From the MACD family, select **at most one**. Prefer `macdh`.
-4. From Bollinger Bands, select **at most two**.
-5. Always include `atr` when a Trade Setup (Section 4) is required.
-6. Do not repeat information across report sections.
-7. All numeric values in Section 4 must be taken from the Pre-Computed Signal Context table — do not recalculate stop-loss or trend directions yourself.
-
-## Style
-- Precise and data-driven. No filler phrases.
-- Section 1 is a regime label, not an essay.
-- Section 5 is machine output — pure JSON, no prose wrapper.
-- If data for a selected indicator is missing or ambiguous, flag it in Section 3 as a conflict rather than guessing.
+All numeric values in Section 4 must come from the Python output. Do not repeat information across sections.
