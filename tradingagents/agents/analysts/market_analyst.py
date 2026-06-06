@@ -108,18 +108,18 @@ def create_market_analyst(llm):
         Output this section as a **pure JSON array** — no markdown, no code fences, no explanation. Start with `[` and end with `]`.
 
         Each object must have exactly these keys:
-        {
+        {{
         "indicator": "<tool_name>",
         "value": <number>,
         "trend": "Rising" | "Falling" | "Flat",
         "signal": "Bullish" | "Bearish" | "Neutral",
         "role": "<one sentence>"
-        }
+        }}
 
         Example (do not copy values — use real data):
         [
-        {"indicator": "close_50_sma", "value": 28.42, "trend": "Rising", "signal": "Bullish", "role": "Confirms medium-term uptrend and acts as dynamic support."},
-        {"indicator": "rsi", "value": 60.03, "trend": "Flat", "signal": "Neutral", "role": "No overbought/oversold extreme; trend remains healthy."}
+        {{"indicator": "close_50_sma", "value": 28.42, "trend": "Rising", "signal": "Bullish", "role": "Confirms medium-term uptrend and acts as dynamic support."}},
+        {{"indicator": "rsi", "value": 60.03, "trend": "Flat", "signal": "Neutral", "role": "No overbought/oversold extreme; trend remains healthy."}}
         ]
         ...
 
