@@ -9,6 +9,12 @@ Manage a simulated portfolio in a named depot. Given a universe of tickers and a
 
 **No narrative to chat. Final chat output is exactly one line (see Step 9).**
 
+> **Execution environment — never use computer control.** All work runs through the file tools,
+> the trading-simulation MCP, and the **bash shell sandbox** (Linux). Never request
+> desktop/computer access, the desktop Terminal, or a browser app. If a shell command fails with
+> a `C:\...` "file not found", re-run it with the **Linux mount path** — do not escalate to
+> computer-use.
+
 ---
 
 ## Inputs
@@ -80,12 +86,19 @@ Call `mcp__trading-simulation__get_portfolio` with `depot_id`. Record:
 
 ---
 
-## Step 2 — Run trader skills
+## Step 2 — Dispatch trader subagents
 
 For each ticker in the universe:
 
 1. Check if `C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\<YYYYMMDD>\<TICKER>\trader.json` exists (use `Read` — if it errors, file is absent).
-2. If absent **or** `mode = fresh`: invoke the `trader` skill for `<TICKER>`. Wait for it to complete and verify the file exists before moving to the next ticker.
+2. If absent **or** `mode = fresh`: dispatch a **trader subagent** via the `Agent` tool (model: **haiku**) using this prompt:
+   ```
+   Run the trader skill for ticker <TICKER> on date <YYYYMMDD>.
+   The skill writes its output to:
+   C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\<YYYYMMDD>\<TICKER>\trader.json
+   Verify the file exists before finishing.
+   ```
+   Wait for the subagent to complete and verify `trader.json` exists before dispatching the next ticker.
 3. `Read` the `trader.json`. Extract:
    - `signal` ∈ `{BUY, HOLD, SELL}`
    - `confidence` ∈ `{HIGH, MEDIUM, LOW}`
@@ -102,40 +115,37 @@ For tickers already in `pre_positions`, use the portfolio's recorded price as a 
 
 ---
 
-## Step 4 — Compute target allocation
+## Step 4 — Compute target allocation (run script, part 1)
 
-**4a. Raw weights**
+Build a `params.json` file (see schema in `rebalance.py` header) with:
+- `style`, `depot_id`, `universe`, `mode`, `date`
+- `signals` map from Step 2
+- `prices` map from Step 3
+- `pre_snapshot` from Step 1
+- `trades_executed`: leave as `[]` for now (will be filled after Step 5)
+- `post_snapshot`: leave as `{}` for now
 
-For each ticker apply the style table to get `raw_weight`. Tickers not in the universe but present in the portfolio: see Step 4d.
+Write this file to `<run_dir>/rebalance_params.json`.
 
-**4b. HOLD handling**
-- Aggressive: set `raw_weight = 0` for any HOLD ticker.
-- Conservative: for HOLD tickers, set `raw_weight = min(current_weight, slot)` where `current_weight = pre_positions[ticker].market_value / pre_equity`. If ticker is not currently held, `raw_weight = 0` (no new buys on HOLD).
+Run the script to get the allocation:
 
-**4c. Normalise**
+> **Shell path note (important).** The shell is a Linux sandbox, **not** Windows. Do not pass
+> `C:\...` paths to bash — they fail, and a failed script run must **not** be worked around with
+> computer-use / "use my computer". The project folder
+> `C:\Users\ralph\Documents\Claude\Projects\trading-skills` is mounted at the Linux path given in
+> your environment (e.g. `/sessions/<id>/mnt/trading-skills`). `cd` into that mount; `<run_dir>`
+> is `runs/<YYYYMMDD>` relative to it.
 
-Sum all non-zero raw weights → `total_raw`. Scale each: `target_weight[ticker] = raw_weight / total_raw × (1 - cash_reserve)`. Clamp each to the single-position cap. Re-normalise after clamping if any cap was hit (iterate once).
-
-**4d. Tickers in portfolio but NOT in universe**
-
-Leave them untouched — this portfolio manager only manages tickers it knows about. Do not place orders for out-of-universe positions.
-
-**4e. Target shares**
-
-```
-target_dollars[ticker] = pre_equity × target_weight[ticker]
-target_shares[ticker]  = floor(target_dollars[ticker] / price[ticker])
-```
-
-**4f. Deltas**
-
-```
-delta[ticker] = target_shares[ticker] - pre_positions.get(ticker, 0)
+```bash
+cd <trading-skills-mount>   # Linux mount of the project folder (see environment)
+python TradingAgents/skills/portfolio-manager/rebalance.py <run_dir>/rebalance_params.json
 ```
 
-Positive = buy, negative = sell, zero = no action.
+Parse the `details.allocation` map from the output — each ticker entry has
+`raw_weight`, `target_weight`, `target_shares`, `current_shares`, `delta`, `price`.
+Use `delta` values for Step 5.
 
-Apply min trade size filter: if `|delta| < min_trade_size`, set `delta = 0`.
+Tickers in portfolio but NOT in universe: leave untouched — do not place orders.
 
 ---
 
@@ -158,27 +168,20 @@ Call `mcp__trading-simulation__get_trades` with `limit = len(universe) * 2` and 
 
 ---
 
-## Step 7 — Append performance log
+## Steps 7–8 — Envelope (run script, part 2)
 
-Append one CSV row to `C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\performance-<depot_id>.csv`.
+After Step 6, update `rebalance_params.json` with the actual `trades_executed` and
+`post_snapshot` (from the get_portfolio and get_trades calls in Step 6), then re-run
+the script (same `cd` into the Linux mount as above — never pass `C:\...` paths to bash):
 
-If the file does not exist yet, write the header first:
-```
-date,equity,cash,num_positions,tickers_held
-```
-
-Row format:
-```
-<YYYY-MM-DD>,<post_equity>,<post_cash>,<count of post_positions>,<space-separated list of held tickers>
+```bash
+cd <trading-skills-mount>   # Linux mount of the project folder (see environment)
+python TradingAgents/skills/portfolio-manager/rebalance.py <run_dir>/rebalance_params.json
 ```
 
-Use the `Edit` tool to append (read the file first, then append the row). If the file is new, use `Write`.
+The script prints the full envelope JSON.
 
----
-
-## Step 8 — Write portfolio-manager envelope
-
-Write to `C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\<YYYYMMDD>\portfolio-manager-<depot_id>.json` using the `Write` tool.
+Write the printed JSON to `C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\<YYYYMMDD>\portfolio-manager-<depot_id>.json` using the `Write` tool.
 
 ```json
 {
@@ -234,8 +237,7 @@ Write to `C:\Users\ralph\Documents\Claude\Projects\trading-skills\runs\<YYYYMMDD
       "cash": 0.0,
       "positions": {}
     },
-    "equity_change": 0.0,
-    "performance_log": "computer://C:\\Users\\ralph\\Documents\\Claude\\Projects\\trading-skills\\runs\\performance-<depot_id>.csv"
+    "equity_change": 0.0
   }
 }
 ```
