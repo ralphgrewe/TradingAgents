@@ -78,26 +78,72 @@ def pick(d, *keys):
     return None
 
 
+# ── memory wiring (issue #9) ─────────────────────────────────────────────────
+#
+# The fundamental skill is wired into the shared memory core in issue #9,
+# mechanically repeating the pattern validated by the quant pilot (issue
+# #8). Unlike quant, value/growth `signal`/`confidence` are not produced by
+# this script — they are the model's own judgment (SKILL.md Steps 2-3)
+# applied to the ratio table `compute()` below computes. Keeping the
+# `memory_store_decision` payload construction here as pure functions of
+# the already-written envelope `details` (no I/O, no memory-context
+# parameter) mirrors quant's `confidence_to_score`/`build_key_drivers`: it
+# guarantees these helpers are structurally incapable of feeding Past
+# Context back into the value/growth signals, and keeps them exercised by
+# the same unit tests as the rest of this module.
+
+# Same HIGH/MEDIUM/LOW -> numeric convention as skills/quant/compute_indicators.py's
+# `confidence_to_score` and skills/trader/score_trader.py's `conf_weight` (also
+# documented in tradingagents/memory/stats.py's confidence bucket derivation) —
+# reused here rather than inventing a second mapping.
+CONFIDENCE_SCORE = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
+
+
+def confidence_to_score(confidence):
+    """Map a HIGH/MEDIUM/LOW confidence to the numeric score
+    `memory_store_decision`'s `confidence` argument expects. Unknown/missing
+    values fall back to 0.3 (LOW), matching `conf_weight`'s default."""
+    return CONFIDENCE_SCORE.get(str(confidence).upper(), 0.3)
+
+
+def build_key_drivers(details):
+    """Build the `key_drivers` payload for `memory_store_decision` from the
+    envelope's `details`: the `value`/`growth` sub-signals (`signal`,
+    `confidence`, `key_ratios`) and `insider_sentiment`, verbatim (issue
+    #9). No new derivation — every value here already exists in `details`,
+    written by the model in SKILL.md Steps 2-4."""
+    value = details.get("value") or {}
+    growth = details.get("growth") or {}
+    return {
+        "value": {
+            "signal": value.get("signal"),
+            "confidence": value.get("confidence"),
+            "key_ratios": value.get("key_ratios", []),
+        },
+        "growth": {
+            "signal": growth.get("signal"),
+            "confidence": growth.get("confidence"),
+            "key_ratios": growth.get("key_ratios", []),
+        },
+        "insider_sentiment": details.get("insider_sentiment"),
+    }
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    if len(sys.argv) < 5:
-        print(
-            "Usage: compute_ratios.py <ticker_info.json> <income.json> "
-            "<balance.json> <cashflow.json> [<holders.json>]",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def compute(info_raw, income_raw, balance_raw, cashflow_raw, holders_raw=None):
+    """Compute the fundamental ratio table (`context`, `annual`,
+    `insider_sentiment`, `forecast`) from raw yfinance MCP tool output.
 
-    try:
-        info_raw     = load(sys.argv[1])
-        income_raw   = load(sys.argv[2])
-        balance_raw  = load(sys.argv[3])
-        cashflow_raw = load(sys.argv[4])
-        holders_raw  = load(sys.argv[5]) if len(sys.argv) > 5 else {}
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    Pure function of its arguments only — deliberately takes no memory /
+    past-context input, so the deterministic ratio table computed here can
+    never be influenced by injected lessons (issue #9's "Verify"
+    requirement, mirroring issue #8's `compute()`). `main()` is a thin CLI
+    wrapper around this. The model then evaluates `value`/`growth` signals
+    from this table in SKILL.md Steps 2-3.
+    """
+    if holders_raw is None:
+        holders_raw = {}
 
     # yfinance_get_ticker_info may return the dict directly or wrapped
     info = info_raw if isinstance(info_raw, dict) else {}
@@ -269,6 +315,29 @@ def main():
         "forecast":          {},
     }
 
+    return result
+
+
+def main():
+    if len(sys.argv) < 5:
+        print(
+            "Usage: compute_ratios.py <ticker_info.json> <income.json> "
+            "<balance.json> <cashflow.json> [<holders.json>]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        info_raw     = load(sys.argv[1])
+        income_raw   = load(sys.argv[2])
+        balance_raw  = load(sys.argv[3])
+        cashflow_raw = load(sys.argv[4])
+        holders_raw  = load(sys.argv[5]) if len(sys.argv) > 5 else {}
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    result = compute(info_raw, income_raw, balance_raw, cashflow_raw, holders_raw)
     print(json.dumps(result, indent=2))
 
 
