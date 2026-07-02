@@ -132,22 +132,55 @@ def interpret_signal(indicator, val, prv, close):
     return "Neutral"
 
 
+# ── memory wiring (issue #8) ─────────────────────────────────────────────────
+#
+# The quant skill is the memory-system pilot (issue #8): SKILL.md calls the
+# memory_* MCP tools directly, but the payloads it sends to
+# memory_store_decision must be built from this script's deterministic
+# output, not re-derived by the model. Keeping that construction here (pure
+# functions of the already-computed `result`/`details` dict, no I/O) means
+# it is exercised by the same unit tests as the rest of the indicator math
+# and can never itself introduce non-determinism into `signal`/`confidence`.
+
+# Same HIGH/MEDIUM/LOW -> numeric convention as skills/trader/score_trader.py's
+# `conf_weight` (also documented in tradingagents/memory/stats.py's confidence
+# bucket derivation) — reused here rather than inventing a second mapping.
+CONFIDENCE_SCORE = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
+
+
+def confidence_to_score(confidence):
+    """Map the envelope's HIGH/MEDIUM/LOW confidence to the numeric score
+    `memory_store_decision`'s `confidence` argument expects. Unknown/missing
+    values fall back to 0.3 (LOW), matching `conf_weight`'s default."""
+    return CONFIDENCE_SCORE.get(str(confidence).upper(), 0.3)
+
+
+def build_key_drivers(details):
+    """Build the `key_drivers` payload for `memory_store_decision` from this
+    script's `details` output: `market_regime`, `convergence.confirms` +
+    `.conflicts`, and `trade_setup`, verbatim (issue #8). No new derivation —
+    every value here already exists in `details`."""
+    convergence = details.get("convergence") or {}
+    return {
+        "market_regime": details.get("market_regime"),
+        "confirms": convergence.get("confirms", []),
+        "conflicts": convergence.get("conflicts", []),
+        "trade_setup": details.get("trade_setup"),
+    }
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: compute_indicators.py <price_history.json> <TICKER>",
-              file=sys.stderr)
-        sys.exit(1)
+def compute(records, ticker):
+    """Compute the quant envelope (`signal`, `confidence`, `summary`,
+    `details`) for `ticker` from raw OHLCV `records`
+    (`yfinance_get_price_history`-shaped list of dicts).
 
-    try:
-        raw_json = Path(sys.argv[1]).read_text()
-        ticker   = sys.argv[2].upper()
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    records = json.loads(raw_json)
+    Pure function of `records`/`ticker` only — deliberately takes no memory
+    / past-context input, so the deterministic signal/confidence computed
+    here can never be influenced by injected lessons (issue #8's "Verify"
+    requirement). `main()` is a thin CLI wrapper around this.
+    """
     df = pd.DataFrame(records)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
@@ -283,6 +316,24 @@ def main():
         },
     }
 
+    return result
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: compute_indicators.py <price_history.json> <TICKER>",
+              file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        raw_json = Path(sys.argv[1]).read_text()
+        ticker   = sys.argv[2].upper()
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    records = json.loads(raw_json)
+    result = compute(records, ticker)
     print(json.dumps(result, indent=2))
 
 
