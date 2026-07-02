@@ -217,3 +217,7 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# Skill run outputs (runs/<YYYYMMDD>/<TICKER>/...) and the shared memory
+# SQLite DB (runs/memory/memory.db) — runtime artifacts, not source.
+runs/
