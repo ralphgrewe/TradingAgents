@@ -535,6 +535,27 @@ class TestDeferredReflection:
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
 
+    def test_fetch_returns_normalizes_broker_symbol(self):
+        """A broker/CFD symbol (e.g. XAUUSD) must be normalized to the Yahoo
+        symbol (GC=F) before querying, so the realized-return lookup hits the
+        same instrument the price path priced (ported from upstream 7c8fe2f,
+        issue #4). The benchmark is left untouched — it is already canonical."""
+        stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        spy_prices   = [400.0, 402.0, 404.0, 403.0, 405.0, 406.0]
+        queried = []
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            def _make_ticker(sym):
+                queried.append(sym)
+                m = MagicMock()
+                m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
+                return m
+            mock_ticker_cls.side_effect = _make_ticker
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "XAUUSD", "2026-01-05")
+        assert queried[0] == "GC=F"  # stock symbol normalized
+        assert queried[1] == "SPY"   # benchmark left as the canonical symbol
+        assert raw is not None and alpha is not None and days is not None
+
     # TradingAgentsGraph._resolve_benchmark — picks index for alpha calc
 
     def test_resolve_benchmark_explicit_override(self):
