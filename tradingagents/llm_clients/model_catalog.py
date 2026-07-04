@@ -7,6 +7,13 @@ from typing import Dict, List, Tuple
 ModelOption = Tuple[str, str]
 ProviderModeOptions = Dict[str, Dict[str, List[ModelOption]]]
 
+# Providers that serve many / frequently-changing models: offer only "Custom
+# model ID" rather than a list that goes stale.
+_CUSTOM_ONLY: Dict[str, List[ModelOption]] = {
+    "quick": [("Custom model ID", "custom")],
+    "deep": [("Custom model ID", "custom")],
+}
+
 
 # Shared model list for GLM via Z.AI (international) and BigModel (China).
 # Source: docs.z.ai (GLM Coding Plan supported models + LLM guides).
@@ -204,6 +211,19 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Llama 3.1 70B - Instruct", "llama-3.1-70b-instruct"),
         ],
     },
+    # Generic OpenAI-compatible endpoint: the model is whatever the user's
+    # server serves, so only "Custom model ID" is offered.
+    "openai_compatible": _CUSTOM_ONLY,
+    # Hosted OpenAI-compatible providers that serve many (and frequently
+    # changing) models — offer "Custom model ID" rather than a list that goes
+    # stale. The endpoint + key are wired by the provider; the user picks the
+    # model their account has access to. Mistral keeps its own curated list
+    # above (see "mistral") since our fork already maintains one.
+    "kimi": _CUSTOM_ONLY,
+    "groq": _CUSTOM_ONLY,
+    "nvidia": _CUSTOM_ONLY,
+    # Bedrock model IDs / cross-region inference profile IDs are user-specified.
+    "bedrock": _CUSTOM_ONLY,
 }
 
 
