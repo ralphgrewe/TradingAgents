@@ -162,10 +162,13 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
-        # Temperature is supported by all providers
+        # Temperature is supported by all providers. Cast through float() so a
+        # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config
+        # default is None, so default_config.py's type-driven coercion can't
+        # infer float and passes the raw string through untouched.
         temperature = self.config.get("temperature")
         if temperature is not None:
-            kwargs["temperature"] = temperature
+            kwargs["temperature"] = float(temperature)
 
         return kwargs
 
