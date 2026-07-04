@@ -221,3 +221,7 @@ __marimo__/
 # Skill run outputs (runs/<YYYYMMDD>/<TICKER>/...) and the shared memory
 # SQLite DB (runs/memory/memory.db) — runtime artifacts, not source.
 runs/
+
+# Enterprise env file (secrets) and generated run reports
+.env.enterprise
+reports/

@@ -1,5 +1,6 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,41 @@ _API_KEY_ENV_VARS = (
 def _dummy_api_keys(monkeypatch):
     for env_var in _API_KEY_ENV_VARS:
         monkeypatch.setenv(env_var, os.environ.get(env_var, "placeholder"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config():
+    """Reset the global dataflows config before and after each test.
+
+    ``set_config`` merges (it never clears keys absent from the override), so a
+    test that sets e.g. ``tool_vendors`` would otherwise leak into later tests
+    and make routing behavior order-dependent. Replace the global outright so
+    every test starts from a clean DEFAULT_CONFIG.
+    """
+    import copy
+
+    import tradingagents.dataflows.config as config_module
+    import tradingagents.default_config as default_config
+
+    config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+    yield
+    config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_disable():
+    """Undo ``logging.disable(...)`` leakage across tests.
+
+    ``mcp_server.py`` calls ``logging.disable(logging.CRITICAL)`` at import
+    time (stdio transport: any stray log line would corrupt the JSON-RPC
+    stream). That call is process-global and, because pytest imports every
+    test module during collection (before any test runs), it takes effect
+    before the first test even starts once anything pulls that module in
+    (e.g. ``test_mcp_server_memory.py``). Reset it before every test so
+    ``assertLogs``/``caplog`` keep working regardless of collection order.
+    """
+    logging.disable(logging.NOTSET)
+    yield
 
 
 @pytest.fixture()

@@ -1,4 +1,4 @@
-"""Symbol normalization for yfinance calls.
+"""Symbol normalization and market-data error types for vendor calls.
 
 Yahoo Finance (the default vendor) uses specific ticker conventions that
 differ from the broker / TradingView / MT5 style symbols users often type:
@@ -11,24 +11,21 @@ differ from the broker / TradingView / MT5 style symbols users often type:
     BTCUSD            BTC-USD           crypto pairs use a ``-`` separator
     SPX500, US500     ^GSPC             index CFDs map to Yahoo index symbols
 
-Passing the raw broker symbol to Yahoo returns an empty result, which can
-otherwise be mistaken for "no data" on the wrong instrument.
-
-Ported (scoped) from upstream commit 7c8fe2f "fix(data): normalize symbols on
-the identity and reflection paths", for use by
-``TradingAgentsGraph._fetch_returns`` only (issue #4). Upstream's full
-``symbol_utils`` module also backs the price-fetch path (``y_finance.py``,
-``interface.py``, ``stockstats_utils.py``) and instrument-identity resolution
-(``agent_utils.resolve_instrument_identity``) via commits #781 and #814/#983,
-none of which are merged into this fork yet — this port intentionally omits
-the pieces (``NoMarketDataError``, ``is_yahoo_safe``) that only those
-call sites use, to avoid pulling in unrelated surface area. See LEARNINGS.md
-and issue #4 for the rationale.
+Passing the raw broker symbol to Yahoo returns an empty result, which the
+agents previously received as free text and could hallucinate a price
+around (see issue #781). Centralizing the mapping here means every yfinance
+entry point resolves symbols the same way, and new instruments are added by
+appending a table row rather than editing call sites.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+
+# NoMarketDataError lives in the vendor-error taxonomy (errors.py); re-exported
+# here for the many call sites that import it alongside normalize_symbol.
+from .errors import NoMarketDataError as NoMarketDataError
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +69,40 @@ _ALIASES = {
     "FRA40": "^FCHI", "EU50": "^STOXX50E", "HK50": "^HSI",
 }
 
+# Yahoo symbols may contain letters, digits, and these structural characters.
+_YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
+
+
+# Crypto quote currencies that all map to Yahoo's USD pair. Yahoo lists only
+# ``<BASE>-USD`` (not the USDT/USDC stablecoin pairs), so a broker symbol quoted
+# in any of these resolves to ``-USD`` (#982). Longest first so ``USDT``/``USDC``
+# match before the ``USD`` substring.
+_CRYPTO_QUOTES = ("USDT", "USDC", "USD")
+
+
+def _normalize_crypto(s: str) -> str | None:
+    """Return ``<BASE>-USD`` if ``s`` is a known crypto quoted in USD/USDT/USDC.
+
+    Accepts dashed or undashed forms: ``BTCUSD``, ``BTCUSDT``, ``BTC-USDT``,
+    ``BTC-USDC`` all resolve to ``BTC-USD``. Returns None otherwise.
+    """
+    compact = s.replace("-", "")
+    for quote in _CRYPTO_QUOTES:
+        if compact.endswith(quote):
+            base = compact[: -len(quote)]
+            if base in _CRYPTO_BASES:
+                return f"{base}-USD"
+            break
+    return None
+
 
 def normalize_symbol(raw: str) -> str:
     """Map a user/broker symbol to its canonical Yahoo Finance symbol.
 
     Resolution order (first match wins):
       1. Explicit alias table (metals, energy, index CFDs).
-      2. Crypto rule: ``<BASE>USD`` where BASE is a known crypto -> ``BASE-USD``.
+      2. Crypto rule: a known crypto base quoted in USD/USDT/USDC (dashed or
+         not) -> ``BASE-USD``.
       3. Forex rule: six letters that are two ISO currency codes -> ``PAIR=X``.
       4. Otherwise the upper-cased symbol is returned unchanged (plain
          equities, ETFs, Yahoo-native symbols like ``GC=F`` or ``^GSPC``).
@@ -94,12 +118,11 @@ def normalize_symbol(raw: str) -> str:
     # Broker CFD/qualifier suffixes Yahoo never uses.
     s = s.rstrip("+")
 
+    crypto = _normalize_crypto(s)
     if s in _ALIASES:
         canonical = _ALIASES[s]
-    elif len(s) == 6 and s[:3] in _CRYPTO_BASES and s[3:] == "USD":
-        canonical = f"{s[:3]}-USD"
-    elif s[:-3] in _CRYPTO_BASES and s.endswith("USD") and "-" not in s:
-        canonical = f"{s[:-3]}-USD"
+    elif crypto is not None:
+        canonical = crypto
     elif len(s) == 6 and s[:3] in _FOREX_CURRENCIES and s[3:] in _FOREX_CURRENCIES:
         canonical = f"{s}=X"
     else:
@@ -108,3 +131,8 @@ def normalize_symbol(raw: str) -> str:
     if canonical != raw.strip().upper():
         logger.info("Resolved symbol %r to Yahoo symbol %r", raw, canonical)
     return canonical
+
+
+def is_yahoo_safe(symbol: str) -> bool:
+    """True when ``symbol`` only contains characters Yahoo symbols use."""
+    return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
