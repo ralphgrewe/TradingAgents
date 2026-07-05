@@ -18,6 +18,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_SIMULATION_SERVER_COMMAND": "simulation_server_command",
+    "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
 }
 
 
@@ -29,6 +31,9 @@ def _coerce(value: str, reference):
         return int(value)
     if isinstance(reference, float):
         return float(value)
+    if isinstance(reference, list):
+        # For lists, parse as space/comma-separated values
+        return [x.strip() for x in value.replace(",", " ").split() if x.strip()]
     return value
 
 
@@ -130,4 +135,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
         ".AX":  "^AXJO",    # Australia (ASX 200)
         "":     "SPY",      # default for US-listed tickers (no suffix)
     },
+    # McpTradingSimulation client configuration (issue #34)
+    # When not set, SimulationClient auto-detects from sibling ../McpTradingSimulation checkout.
+    # Override via TRADINGAGENTS_SIMULATION_SERVER_COMMAND and TRADINGAGENTS_SIMULATION_SERVER_ARGS
+    # env vars if running on a different machine/checkout layout.
+    "simulation_server_command": None,   # Path to Python interpreter (e.g. /path/to/venv/bin/python)
+    "simulation_server_args": None,      # List of args: ["/path/to/mcp_server.py"]
 })
