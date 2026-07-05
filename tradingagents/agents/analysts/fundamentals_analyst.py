@@ -74,9 +74,7 @@ For each, provide:
 
 Return ONLY a JSON object (no markdown, no prose):
 ```json
-PLACEHOLDER_START
 {{"value": {{"signal": "BUY|HOLD|SELL", "confidence": "HIGH|MEDIUM|LOW", "data_confidence": "HIGH|MEDIUM|LOW", "key_ratios": []}}, "growth": {{"signal": "BUY|HOLD|SELL", "confidence": "HIGH|MEDIUM|LOW", "data_confidence": "HIGH|MEDIUM|LOW", "key_ratios": []}}}}
-PLACEHOLDER_END
 ```
 
 Do NOT call any tools. Do NOT invent data. Evaluate only from the ratio table provided.
