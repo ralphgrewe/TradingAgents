@@ -1,5 +1,7 @@
 import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from stockstats import wrap
+
 from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_instrument_context_from_state,
@@ -7,9 +9,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
-from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
-from stockstats import wrap
+
 
 def compute_signal_context(df: pd.DataFrame) -> str:
     latest = df.iloc[-1]
@@ -32,8 +33,10 @@ def compute_signal_context(df: pd.DataFrame) -> str:
     rsi_dist_os = round(rsi - 30, 2)   # positive = distance to oversold
 
     def trend(now, before):
-        if now > before * 1.001: return "Rising"
-        if now < before * 0.999: return "Falling"
+        if now > before * 1.001:
+            return "Rising"
+        if now < before * 0.999:
+            return "Falling"
         return "Flat"
 
     return f"""
@@ -83,7 +86,7 @@ def create_market_analyst(llm):
                 signal_context = compute_signal_context(df)
             else:
                 signal_context = ""
-        except Exception as e:
+        except Exception:
             signal_context = ""
 
         system_message = ("""You are a quantitative trading analyst. Analyze the provided indicator data for {ticker} ({date_range}) and produce a structured report in **exactly** the following format — no deviations:
@@ -125,7 +128,7 @@ def create_market_analyst(llm):
         ]
         ...
 
-                                                    
+
 
         ---
         ## Available Indicators
@@ -148,7 +151,7 @@ def create_market_analyst(llm):
 
         {signal_context}
 
-                          
+
         ## Selection Rules
         1. Call get_stock_data first, then get_indicators with chosen tool_names.
         2. Select indicators that cover diverse categories — avoid two indicators from the same category unless they serve clearly different roles.

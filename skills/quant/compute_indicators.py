@@ -17,12 +17,14 @@ Prints JSON with keys:
 Exit 0 on success, 1 on error.
 """
 
-import json, sys, math
+import json
+import math
+import sys
 from pathlib import Path
 
 try:
+    import numpy  # noqa: F401 — not used directly; pandas needs it installed
     import pandas as pd
-    import numpy as np
 except ImportError:
     import subprocess
     subprocess.check_call(
@@ -31,7 +33,6 @@ except ImportError:
         stdout=subprocess.DEVNULL,
     )
     import pandas as pd
-    import numpy as np
 
 
 # ── indicator functions ────────────────────────────────────────────────────────
@@ -111,24 +112,35 @@ def interpret_signal(indicator, val, prv, close):
     """Return Bullish / Bearish / Neutral for a given indicator."""
     tr = trend(val, prv)
     if indicator == "sma_50":
-        if val and close > val:  return "Bullish"
-        if val and close < val:  return "Bearish"
+        if val and close > val:
+            return "Bullish"
+        if val and close < val:
+            return "Bearish"
     elif indicator == "macdh":
-        if val and val > 0 and tr == "Rising":  return "Bullish"
-        if val and val < 0 and tr == "Falling": return "Bearish"
+        if val and val > 0 and tr == "Rising":
+            return "Bullish"
+        if val and val < 0 and tr == "Falling":
+            return "Bearish"
     elif indicator == "rsi":
-        if val and val < 30: return "Bullish"
-        if val and val > 70: return "Bearish"
+        if val and val < 30:
+            return "Bullish"
+        if val and val > 70:
+            return "Bearish"
     elif indicator == "boll_ub":
-        if val and close >= val: return "Bearish"
+        if val and close >= val:
+            return "Bearish"
     elif indicator == "boll_lb":
-        if val and close <= val: return "Bearish"
-        if val and close > val * 1.02: return "Bullish"
+        if val and close <= val:
+            return "Bearish"
+        if val and close > val * 1.02:
+            return "Bullish"
     elif indicator == "atr":
         return "Neutral"   # sizing only
     elif indicator == "vwma":
-        if val and close > val: return "Bullish"
-        if val and close < val: return "Bearish"
+        if val and close > val:
+            return "Bullish"
+        if val and close < val:
+            return "Bearish"
     return "Neutral"
 
 

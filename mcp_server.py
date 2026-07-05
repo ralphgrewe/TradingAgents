@@ -65,45 +65,40 @@ def _run_analysis(ticker: str, date: str) -> tuple[str, dict]:
     Run TradingAgents and return (report_markdown, structured_data).
     All intermediate output is suppressed (stdout + stderr → /dev/null).
     """
-    devnull = open(os.devnull, "w")
-    try:
-        with redirect_stdout(devnull), redirect_stderr(devnull):
-            from dotenv import load_dotenv
+    with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
+        from dotenv import load_dotenv
 
-            load_dotenv()
+        load_dotenv()
 
-            from tradingagents.default_config import DEFAULT_CONFIG
-            from tradingagents.graph.trading_graph import TradingAgentsGraph
-            from tradingagents.report_generator import save_report_to_disk
+        from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+        from tradingagents.report_generator import save_report_to_disk
 
-            config = DEFAULT_CONFIG.copy()
-            config["llm_provider"] = "ollama"
-            config["quick_think_llm"] = "ministral-3:3b"
-            config["deep_think_llm"] = "ministral-3:8b"
-            config["max_debate_rounds"] = 1
-            config["max_risk_discuss_rounds"] = 1
-            config["debug"] = False
+        config = DEFAULT_CONFIG.copy()
+        config["llm_provider"] = "ollama"
+        config["quick_think_llm"] = "ministral-3:3b"
+        config["deep_think_llm"] = "ministral-3:8b"
+        config["max_debate_rounds"] = 1
+        config["max_risk_discuss_rounds"] = 1
+        config["debug"] = False
 
-            ta = TradingAgentsGraph(
-                selected_analysts=["market", "news", "fundamentals"],
-                debug=False,
-                config=config,
-            )
+        ta = TradingAgentsGraph(
+            selected_analysts=["market", "news", "fundamentals"],
+            debug=False,
+            config=config,
+        )
 
-            final_state, decision = ta.propagate(ticker, date)
+        final_state, decision = ta.propagate(ticker, date)
 
-        # Build the report in a temp dir (cleaned up automatically)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            report_dir = Path(tmpdir) / f"{ticker}_{date}"
-            report_file, structured_data = save_report_to_disk(
-                final_state, ticker, report_dir
-            )
-            report_md = report_file.read_text(encoding="utf-8")
+    # Build the report in a temp dir (cleaned up automatically)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        report_dir = Path(tmpdir) / f"{ticker}_{date}"
+        report_file, structured_data = save_report_to_disk(
+            final_state, ticker, report_dir
+        )
+        report_md = report_file.read_text(encoding="utf-8")
 
-        return report_md, structured_data, decision
-
-    finally:
-        devnull.close()
+    return report_md, structured_data, decision
 
 
 @mcp.tool()

@@ -26,9 +26,10 @@ Prints the full portfolio-manager envelope JSON.
 Exit 0 on success, 1 on error.
 """
 
-import json, math, sys
+import json
+import math
+import sys
 from pathlib import Path
-
 
 # ── Style tables ──────────────────────────────────────────────────────────────
 
@@ -89,7 +90,7 @@ def normalise(weights: dict, cash_reserve: float, position_cap: float) -> dict:
     """Scale to (1 - cash_reserve), clamp to position_cap, re-normalise once."""
     total = sum(weights.values())
     if total == 0:
-        return {k: 0.0 for k in weights}
+        return dict.fromkeys(weights, 0.0)
 
     target = 1.0 - cash_reserve
     scaled = {k: v / total * target for k, v in weights.items()}
@@ -181,8 +182,6 @@ def main():
 
     # ── Step 7: Envelope assembly ─────────────────────────────────────────────
     post_equity    = post["equity"]
-    post_cash      = post["cash"]
-    post_positions = post.get("positions", {})
     n_buys  = sum(1 for t in trades if t.get("side") == "buy"  and t.get("status") != "rejected")
     n_sells = sum(1 for t in trades if t.get("side") == "sell" and t.get("status") != "rejected")
     rejected = [t for t in trades if t.get("status") == "rejected"]

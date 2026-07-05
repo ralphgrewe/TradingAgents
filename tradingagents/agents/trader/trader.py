@@ -13,7 +13,6 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
-    invoke_structured_or_freetext,
 )
 
 
@@ -64,7 +63,7 @@ def create_trader(llm):
             except Exception:
                 # Fall back to free-text generation
                 pass
-        
+
         # Free-text fallback
         trader_plan = llm.invoke(messages).content
         return {

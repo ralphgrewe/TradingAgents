@@ -1,6 +1,6 @@
 # TradingAgents/graph/reflection.py
 
-from typing import Any, Optional
+from typing import Any
 
 
 class Reflector:
@@ -53,9 +53,9 @@ class Reflector:
     def reflect_on_decision(
         self,
         signal: str,
-        confidence: Optional[float],
-        key_drivers: Optional[Any],
-        thesis: Optional[str],
+        confidence: float | None,
+        key_drivers: Any | None,
+        thesis: str | None,
         forward_return: float,
     ) -> str:
         """Single reflection call on one resolved memory-core decision row (issue #6).

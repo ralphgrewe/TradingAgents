@@ -15,9 +15,8 @@ The model then reads this table and evaluates value/growth signal + confidence.
 Exit 0 on success, 1 on error.
 """
 
-import json, sys
-from pathlib import Path
-
+import json
+import sys
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

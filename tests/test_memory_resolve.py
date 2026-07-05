@@ -32,12 +32,12 @@ def _row(conn, row_id):
 
 
 def _seed(db_path, agent="trader", ticker="AAPL", date=BACKDATED, **kwargs):
-    defaults = dict(
-        signal="Buy",
-        confidence=0.7,
-        key_drivers=["strong earnings"],
-        thesis="Momentum plus fundamentals align.",
-    )
+    defaults = {
+        "signal": "Buy",
+        "confidence": 0.7,
+        "key_drivers": ["strong earnings"],
+        "thesis": "Momentum plus fundamentals align.",
+    }
     defaults.update(kwargs)
     store_decision(agent=agent, ticker=ticker, date=date, db_path=db_path, **defaults)
 

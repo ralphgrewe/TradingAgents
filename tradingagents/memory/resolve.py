@@ -54,7 +54,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any
 
 import numpy as np
 import yfinance as yf
@@ -88,7 +88,7 @@ def _trading_days_elapsed(decision_date: str, as_of: str) -> int:
 
 def _fetch_forward_return(
     ticker: str, decision_date: str, holding_days: int
-) -> Optional[float]:
+) -> float | None:
     """Fetch the raw forward return for ``ticker`` over ``holding_days`` trading days.
 
     Mirrors the yfinance start/end-window approach used by
@@ -146,9 +146,9 @@ def _build_reflector():
 
 def _generate_lesson(
     signal: str,
-    confidence: Optional[float],
-    key_drivers: Optional[Any],
-    thesis: Optional[str],
+    confidence: float | None,
+    key_drivers: Any | None,
+    thesis: str | None,
     forward_return: float,
 ) -> str:
     """Produce a 2-4 sentence lesson for one resolved decision row.
@@ -171,10 +171,10 @@ def _generate_lesson(
 
 
 def resolve_pending(
-    agent: Optional[str] = None,
-    ticker: Optional[str] = None,
-    db_path: Union[str, Path, None] = None,
-) -> List[int]:
+    agent: str | None = None,
+    ticker: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[int]:
     """Resolve pending decisions whose N-trading-day window has elapsed.
 
     Selects rows from ``decisions`` where ``resolved_at IS NULL``

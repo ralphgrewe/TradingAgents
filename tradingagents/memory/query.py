@@ -98,7 +98,7 @@ want to reuse or extend this shape):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Union
+from typing import Any
 
 from tradingagents.memory.store import get_connection
 
@@ -136,7 +136,7 @@ def get_past_context(
     ticker: str,
     n_same: int = 5,
     n_cross: int = 3,
-    db_path: Union[str, Path, None] = None,
+    db_path: str | Path | None = None,
 ) -> str:
     """Render past resolved lessons for ``agent``/``ticker`` as prompt-ready markdown.
 
@@ -200,7 +200,7 @@ def get_past_context(
     if not same_rows and not cross_rows:
         return f"## Past context: {ticker}\n\n{_NO_LESSONS_MESSAGE}"
 
-    parts: List[str] = [f"## Past context: {ticker}"]
+    parts: list[str] = [f"## Past context: {ticker}"]
 
     if same_rows:
         parts.append(f"### Same-ticker lessons ({ticker})")

@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
-
 # ---- openai_client side: OPENAI_COMPATIBLE_PROVIDERS registry -------------
 #
 # The standalone ``_resolve_provider_base_url`` helper was replaced by

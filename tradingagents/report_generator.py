@@ -11,12 +11,12 @@ the richer JSON/summary export (``mcp_server.py``, ``run_trading_agents.py``);
 """
 
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 from tradingagents.reporting import write_report_tree
 
 
-def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Path) -> tuple[Path, dict]:
+def save_report_to_disk(final_state: dict[str, Any], ticker: str, save_path: Path) -> tuple[Path, dict]:
     """
     Save complete analysis report to disk with organized subfolders.
 
@@ -34,7 +34,7 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
     if final_state.get("portfolio_structured_data"):
         # Use structured data from Portfolio Manager
         pm_data = final_state["portfolio_structured_data"]
-        
+
         # Create structured JSON for backtesting
         structured_data = {
             "ticker": ticker,
@@ -44,7 +44,7 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
             "price_target": pm_data.get("price_target"),
             "time_horizon": pm_data.get("time_horizon"),
         }
-        
+
         # Add trader data if available
         if final_state.get("trader_structured_data"):
             trader_data = final_state["trader_structured_data"]
@@ -55,18 +55,18 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
                 "stop_loss": trader_data.get("stop_loss"),
                 "position_sizing": trader_data.get("position_sizing"),
             })
-        
+
         # Save structured JSON for backtesting
         import json
         json_file = save_path / "trading_recommendation.json"
         json_file.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
-        
+
         # Create summary.txt with key trading information
         summary_content = f"Trading Recommendation Summary for {ticker}\n{'='*50}\n"
         summary_content += f"Rating: {pm_data.get('rating', 'N/A')}\n"
         summary_content += f"Executive Summary: {pm_data.get('executive_summary', 'N/A')}\n\n"
         summary_content += f"Investment Thesis:\n{pm_data.get('investment_thesis', 'N/A')}\n"
-        
+
         if final_state.get("trader_structured_data"):
             trader_data = final_state["trader_structured_data"]
             summary_content += f"\n{'='*50}\n"
@@ -78,33 +78,33 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
             if trader_data.get("position_sizing"):
                 summary_content += f"Position Sizing: {trader_data['position_sizing']}\n"
             summary_content += f"\nReasoning:\n{trader_data.get('reasoning', 'N/A')}\n"
-        
+
         summary_file = save_path / "summary.txt"
         summary_file.write_text(summary_content, encoding="utf-8")
     else:
         # Fallback: Try to parse from markdown if structured data not available
         trade_decision = final_state.get("final_trade_decision", "")
         trader_plan = final_state.get("trader_investment_plan", "")
-        
+
         # Simple parsing for key fields
         import re
-        
+
         def extract_field(text, pattern):
             match = re.search(pattern, text, re.DOTALL)
             return match.group(1).strip() if match else None
-        
+
         # Try to extract from trader plan first (more likely to have action/stop loss)
         action = extract_field(trader_plan, r'\*\*Action\*\*:\s*(.+?)(?=\n\*\*|$)')
         reasoning = extract_field(trader_plan, r'\*\*Reasoning\*\*:\s*(.+?)(?=\n\*\*|$)')
         stop_loss = extract_field(trader_plan, r'\*\*Stop Loss\*\*:\s*([\d.]+)')
         position_sizing = extract_field(trader_plan, r'\*\*Position Sizing\*\*:\s*(.+?)(?=\n\*\*|$)')
         entry_price = extract_field(trader_plan, r'\*\*Entry Price\*\*:\s*([\d.]+)')
-        
+
         # Try to extract from final trade decision
         rating = extract_field(trade_decision, r'\*\*Rating\*\*:\s*(.+?)(?=\n\*\*|$)')
         executive_summary = extract_field(trade_decision, r'\*\*Executive Summary\*\*:\s*(.+?)(?=\n\*\*|$)')
         investment_thesis = extract_field(trade_decision, r'\*\*Investment Thesis\*\*:\s*(.+?)(?=\n\*\*|$)')
-        
+
         # Create structured data from parsed fields
         structured_data = {
             "ticker": ticker,
@@ -119,12 +119,12 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
             "stop_loss": float(stop_loss) if stop_loss else None,
             "position_sizing": position_sizing or None,
         }
-        
+
         # Save structured JSON for backtesting
         import json
         json_file = save_path / "trading_recommendation.json"
         json_file.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
-        
+
         # Create summary.txt with key trading information
         summary_content = f"Trading Recommendation Summary for {ticker}\n{'='*50}\n"
         if rating:
@@ -133,7 +133,7 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
             summary_content += f"Executive Summary: {executive_summary}\n\n"
         if investment_thesis:
             summary_content += f"Investment Thesis:\n{investment_thesis}\n"
-        
+
         if action:
             summary_content += f"\n{'='*50}\n"
             summary_content += f"Trader Action: {action}\n"
@@ -145,7 +145,7 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
                 summary_content += f"Position Sizing: {position_sizing}\n"
             if reasoning:
                 summary_content += f"\nReasoning:\n{reasoning}\n"
-        
+
         summary_file = save_path / "summary.txt"
         summary_file.write_text(summary_content, encoding="utf-8")
 

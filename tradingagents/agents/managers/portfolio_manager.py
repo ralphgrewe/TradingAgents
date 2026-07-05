@@ -17,7 +17,6 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
-    invoke_structured_or_freetext,
 )
 
 
@@ -90,7 +89,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             except Exception:
                 # Fall back to free-text generation
                 pass
-        
+
         # Free-text fallback
         final_trade_decision = llm.invoke(prompt).content
         new_risk_debate_state = {

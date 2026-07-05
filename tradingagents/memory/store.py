@@ -62,9 +62,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence, Union
+from typing import Any
 
 DEFAULT_DB_PATH = Path("runs") / "memory" / "memory.db"
 _ENV_VAR = "TRADINGAGENTS_MEMORY_DB_PATH"
@@ -90,7 +91,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 """
 
 
-def resolve_db_path(db_path: Union[str, Path, None] = None) -> Path:
+def resolve_db_path(db_path: str | Path | None = None) -> Path:
     """Resolve the effective DB path.
 
     Precedence: explicit ``db_path`` argument > ``TRADINGAGENTS_MEMORY_DB_PATH``
@@ -104,7 +105,7 @@ def resolve_db_path(db_path: Union[str, Path, None] = None) -> Path:
     return DEFAULT_DB_PATH
 
 
-def get_connection(db_path: Union[str, Path, None] = None) -> sqlite3.Connection:
+def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     """Open a new connection to the memory DB, creating the schema if needed.
 
     Creates parent directories (e.g. ``runs/memory/``) as needed. One
@@ -127,9 +128,9 @@ def store_decision(
     date: str,
     signal: str,
     confidence: float | None,
-    key_drivers: Union[Sequence[Any], Mapping[str, Any], None],
+    key_drivers: Sequence[Any] | Mapping[str, Any] | None,
     thesis: str | None,
-    db_path: Union[str, Path, None] = None,
+    db_path: str | Path | None = None,
 ) -> bool:
     """Insert a pending decision row.
 

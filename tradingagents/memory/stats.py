@@ -91,7 +91,7 @@ from __future__ import annotations
 import argparse
 import json as json_module
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from tradingagents.memory.store import get_connection
 
@@ -115,7 +115,7 @@ _BEARISH_SIGNALS = {"sell", "underweight"}
 _NEUTRAL_SIGNALS = {"hold"}
 
 
-def _normalize_signal(signal: Optional[str]) -> Optional[str]:
+def _normalize_signal(signal: str | None) -> str | None:
     """Map a raw ``decisions.signal`` value onto ``BUY``/``HOLD``/``SELL``.
 
     Case-insensitive; accepts both the 3-tier skills vocabulary
@@ -149,7 +149,7 @@ def _is_correct(norm_signal: str, forward_return: float) -> bool:
     return abs(forward_return) <= HOLD_CORRECT_THRESHOLD
 
 
-def _confidence_bucket(confidence: Optional[float]) -> Optional[str]:
+def _confidence_bucket(confidence: float | None) -> str | None:
     """Bucket a numeric ``confidence`` value onto HIGH/MEDIUM/LOW, or ``None``."""
     if confidence is None:
         return None
@@ -160,17 +160,17 @@ def _confidence_bucket(confidence: Optional[float]) -> Optional[str]:
     return "HIGH"
 
 
-def _empty_signal_breakdown() -> Dict[str, Dict[str, Any]]:
+def _empty_signal_breakdown() -> dict[str, dict[str, Any]]:
     return {
         sig: {"n": 0, "hit_rate": None, "avg_forward_return": None} for sig in SIGNALS
     }
 
 
-def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate a list of scored rows (each with ``norm_signal``/``correct``/
     ``forward_return``) into ``{n, hit_rate, by_signal}``.
     """
-    by_signal_rows: Dict[str, List[Dict[str, Any]]] = {sig: [] for sig in SIGNALS}
+    by_signal_rows: dict[str, list[dict[str, Any]]] = {sig: [] for sig in SIGNALS}
     for row in rows:
         by_signal_rows[row["norm_signal"]].append(row)
 
@@ -193,11 +193,11 @@ def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def get_statistics(
-    agent: Optional[str] = None,
-    ticker: Optional[str] = None,
-    since: Optional[str] = None,
-    db_path: Union[str, Path, None] = None,
-) -> Dict[str, Any]:
+    agent: str | None = None,
+    ticker: str | None = None,
+    since: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Compute hit-rate / average-return / calibration statistics from resolved decisions.
 
     Only resolved rows (``resolved_at IS NOT NULL``) are considered. Rows
@@ -248,7 +248,7 @@ def get_statistics(
     finally:
         conn.close()
 
-    scored_rows: List[Dict[str, Any]] = []
+    scored_rows: list[dict[str, Any]] = []
     for row in raw_rows:
         norm_signal = _normalize_signal(row["signal"])
         if norm_signal is None:
@@ -268,7 +268,7 @@ def get_statistics(
         )
 
     # --- per (agent, ticker) ---
-    by_agent_ticker_rows: Dict[tuple, List[Dict[str, Any]]] = {}
+    by_agent_ticker_rows: dict[tuple, list[dict[str, Any]]] = {}
     for row in scored_rows:
         key = (row["agent"], row["ticker"])
         by_agent_ticker_rows.setdefault(key, []).append(row)
@@ -279,7 +279,7 @@ def get_statistics(
     ]
 
     # --- per agent overall ---
-    by_agent_rows: Dict[str, List[Dict[str, Any]]] = {}
+    by_agent_rows: dict[str, list[dict[str, Any]]] = {}
     for row in scored_rows:
         by_agent_rows.setdefault(row["agent"], []).append(row)
 
@@ -288,7 +288,7 @@ def get_statistics(
     ]
 
     # --- calibration: per agent, per confidence bucket ---
-    by_agent_bucket_rows: Dict[tuple, List[Dict[str, Any]]] = {}
+    by_agent_bucket_rows: dict[tuple, list[dict[str, Any]]] = {}
     for row in scored_rows:
         bucket = row["confidence_bucket"]
         if bucket is None:
@@ -324,15 +324,15 @@ def get_statistics(
 _NO_DATA_MESSAGE = "*No resolved decisions match these filters yet.*"
 
 
-def _fmt_pct(value: Optional[float]) -> str:
+def _fmt_pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.1f}%"
 
 
-def _fmt_return(value: Optional[float]) -> str:
+def _fmt_return(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:+.2f}%"
 
 
-def _hit_rate_table_rows(records: List[Dict[str, Any]], key_cols: List[str]) -> List[str]:
+def _hit_rate_table_rows(records: list[dict[str, Any]], key_cols: list[str]) -> list[str]:
     lines = []
     for rec in records:
         key_values = [str(rec[k]) for k in key_cols]
@@ -348,7 +348,7 @@ def _hit_rate_table_rows(records: List[Dict[str, Any]], key_cols: List[str]) -> 
     return lines
 
 
-def format_statistics_markdown(stats: Dict[str, Any]) -> str:
+def format_statistics_markdown(stats: dict[str, Any]) -> str:
     """Render the ``get_statistics`` dict as a prompt-ready markdown block.
 
     Always returns a well-formed, non-empty markdown string — safe to
@@ -359,7 +359,7 @@ def format_statistics_markdown(stats: Dict[str, Any]) -> str:
     filter_desc = ", ".join(
         f"{k}={v if v is not None else 'any'}" for k, v in filters.items()
     )
-    parts: List[str] = ["## Memory statistics", f"**Filters:** {filter_desc}"]
+    parts: list[str] = ["## Memory statistics", f"**Filters:** {filter_desc}"]
 
     if not stats["per_agent_ticker"] and not stats["per_agent"]:
         parts.append(_NO_DATA_MESSAGE)
@@ -419,7 +419,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     args = _build_arg_parser().parse_args(argv)
     stats = get_statistics(
         agent=args.agent, ticker=args.ticker, since=args.since, db_path=args.db_path

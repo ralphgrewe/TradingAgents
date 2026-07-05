@@ -23,12 +23,13 @@ The script now produces the same quality output as the CLI application:
 """
 
 import argparse
+import datetime
 import json
 import sys
-import datetime
 from pathlib import Path
-from tradingagents.graph.trading_graph import TradingAgentsGraph
+
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.report_generator import save_report_to_disk
 
 
@@ -37,7 +38,7 @@ def display_summary(final_state, ticker):
     print(f"\n{'='*60}")
     print(f"ANALYSIS SUMMARY FOR {ticker}")
     print(f"{'='*60}")
-    
+
     # Analyst Reports
     if any(final_state.get(f"{analyst}_report") for analyst in ["market", "sentiment", "news", "fundamentals"]):
         print("\n📊 ANALYST TEAM REPORTS:")
@@ -49,26 +50,26 @@ def display_summary(final_state, ticker):
             print(f"• News Analyst: {final_state['news_report'][:150]}...")
         if final_state.get("fundamentals_report"):
             print(f"• Fundamentals Analyst: {final_state['fundamentals_report'][:150]}...")
-    
+
     # Research Team
     if final_state.get("investment_debate_state"):
         debate = final_state["investment_debate_state"]
         print("\n🔍 RESEARCH TEAM DECISION:")
         if debate.get("judge_decision"):
             print(f"• Research Manager: {debate['judge_decision'][:200]}...")
-    
+
     # Trading Team
     if final_state.get("trader_investment_plan"):
         print("\n💼 TRADING TEAM PLAN:")
         print(f"• Trader: {final_state['trader_investment_plan'][:200]}...")
-    
+
     # Risk Management
     if final_state.get("risk_debate_state"):
         risk = final_state["risk_debate_state"]
         print("\n🛡️  RISK MANAGEMENT DECISION:")
         if risk.get("judge_decision"):
             print(f"• Portfolio Manager: {risk['judge_decision'][:200]}...")
-    
+
     print(f"\n{'='*60}")
     print(f"FINAL DECISION: {final_state.get('final_trade_decision', 'N/A')}")
     print(f"{'='*60}\n")
@@ -80,10 +81,10 @@ def main():
     parser.add_argument('--report-dir', help='Directory to save analysis reports', default='./reports')
     parser.add_argument('--show-summary', action='store_true', help='Display formatted analysis summary')
     args = parser.parse_args()
-    
+
     # Read stock list from JSON file
     try:
-        with open(args.json_file, 'r') as f:
+        with open(args.json_file) as f:
             stocks = json.load(f)
     except FileNotFoundError:
         print(f"Error: File '{args.json_file}' not found")
@@ -91,17 +92,17 @@ def main():
     except json.JSONDecodeError:
         print(f"Error: Invalid JSON format in '{args.json_file}'")
         sys.exit(1)
-    
+
     # Validate stock list format
     if not isinstance(stocks, list):
         print("Error: JSON should contain an array of stock objects")
         sys.exit(1)
-        
+
     for stock in stocks:
         if not isinstance(stock, dict) or 'ticker' not in stock or 'date' not in stock:
             print("Error: Each stock should have 'ticker' and 'date' fields")
             sys.exit(1)
-    
+
     # Configure Trading Agents with Ollama provider (similar to CLI defaults)
     config = DEFAULT_CONFIG.copy()
     # Ensure we're using Ollama provider
@@ -112,39 +113,39 @@ def main():
     # Use same research depth as CLI default, Medium research depth
     config["max_debate_rounds"] = 3
     config["max_risk_discuss_rounds"] = 3
-    
+
     # Initialize Trading Agents with explicit analyst selection (same as CLI)
     # These are the same analysts that CLI uses by default
     selected_analysts = ["market", "social", "news", "fundamentals"]
     ta = TradingAgentsGraph(selected_analysts, debug=True, config=config)
-    
+
     # Initialize list to collect structured data for consolidated summary
     all_structured_data = []
-    
+
     # Process each stock
     for stock in stocks:
         ticker = stock['ticker']
         date = stock['date']
         print(f"\nProcessing {ticker} for date {date}...")
-        
+
         try:
             final_state, decision = ta.propagate(ticker, date)
             print(f"Decision for {ticker}: {decision}")
-            
+
             # Display formatted summary if requested
             if args.show_summary:
                 display_summary(final_state, ticker)
-            
+
             # Generate and save report if report directory is specified
             if args.report_dir:
                 report_dir = Path(args.report_dir)
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 stock_report_dir = report_dir / f"{ticker}_{date}_{timestamp}"
-                
+
                 try:
                     report_file, structured_data = save_report_to_disk(final_state, ticker, stock_report_dir)
                     print(f"Report saved to: {report_file}")
-                    
+
                     # Collect structured data for consolidated summary
                     all_structured_data.append({
                         "ticker": ticker,
@@ -175,7 +176,7 @@ def main():
                     } for item in all_structured_data]
                 }
             }
-            
+
             summary_file = report_dir / "trading_summary.json"
             summary_file.write_text(json.dumps(consolidated_summary, indent=2), encoding="utf-8")
             print(f"\nConsolidated trading summary saved to: {summary_file}")

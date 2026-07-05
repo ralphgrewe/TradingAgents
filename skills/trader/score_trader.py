@@ -24,7 +24,8 @@ helper (issue #11) used by `SKILL.md`'s memory wiring to build the
 `result` plus the `rationale`/`risk_note` prose written afterward.
 """
 
-import json, sys
+import json
+import sys
 from pathlib import Path
 
 

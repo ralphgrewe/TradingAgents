@@ -73,7 +73,7 @@ import json as json_module
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 # Unlike the other skills/*.py scripts (compute_indicators.py, score_trader.py, ...), this module
 # intentionally depends on tradingagents.memory — it needs the exact same schema/correctness-rule
@@ -86,8 +86,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tradingagents.memory.stats import _is_correct, _normalize_signal, get_statistics
-from tradingagents.memory.store import get_connection
+from tradingagents.memory.stats import _is_correct, _normalize_signal, get_statistics  # noqa: E402
+from tradingagents.memory.store import get_connection  # noqa: E402
 
 # --- Pattern-detection knobs (see module docstring) -------------------------
 DEFAULT_MIN_SAMPLE = 3
@@ -101,7 +101,7 @@ DEFAULT_HEURISTICS_DIR = Path("runs") / "memory" / "heuristics"
 _HEURISTICS_ENV_VAR = "TRADINGAGENTS_HEURISTICS_DIR"
 
 
-def resolve_heuristics_dir(heuristics_dir: Union[str, Path, None] = None) -> Path:
+def resolve_heuristics_dir(heuristics_dir: str | Path | None = None) -> Path:
     """Resolve the effective heuristics directory.
 
     Precedence: explicit ``heuristics_dir`` argument > ``TRADINGAGENTS_HEURISTICS_DIR`` env var >
@@ -116,7 +116,7 @@ def resolve_heuristics_dir(heuristics_dir: Union[str, Path, None] = None) -> Pat
     return DEFAULT_HEURISTICS_DIR
 
 
-def heuristics_path(agent: str, heuristics_dir: Union[str, Path, None] = None) -> Path:
+def heuristics_path(agent: str, heuristics_dir: str | Path | None = None) -> Path:
     """Path to one agent's curated heuristics file: ``<heuristics_dir>/<agent>.md``."""
     return resolve_heuristics_dir(heuristics_dir) / f"{agent}.md"
 
@@ -127,13 +127,13 @@ def heuristics_path(agent: str, heuristics_dir: Union[str, Path, None] = None) -
 
 
 def find_patterns(
-    agent: Optional[str] = None,
-    ticker: Optional[str] = None,
-    since: Optional[str] = None,
+    agent: str | None = None,
+    ticker: str | None = None,
+    since: str | None = None,
     min_n: int = DEFAULT_MIN_SAMPLE,
     divergence_threshold: float = DEFAULT_DIVERGENCE_THRESHOLD,
-    db_path: Union[str, Path, None] = None,
-) -> List[Dict[str, Any]]:
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
     """Flag ``(agent, ticker)`` cells whose hit-rate diverges from that agent's other tickers.
 
     Built on top of ``tradingagents.memory.stats.get_statistics`` — this function adds no new SQL,
@@ -157,11 +157,11 @@ def find_patterns(
     """
     stats = get_statistics(agent=agent, ticker=ticker, since=since, db_path=db_path)
 
-    by_agent: Dict[str, List[Dict[str, Any]]] = {}
+    by_agent: dict[str, list[dict[str, Any]]] = {}
     for cell in stats["per_agent_ticker"]:
         by_agent.setdefault(cell["agent"], []).append(cell)
 
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     for agent_id, cells in by_agent.items():
         for cell in cells:
             if cell["n"] < min_n or cell["hit_rate"] is None:
@@ -200,10 +200,10 @@ def find_patterns(
 def gather_context_rows(
     agent: str,
     ticker: str,
-    db_path: Union[str, Path, None] = None,
+    db_path: str | Path | None = None,
     limit: int = DEFAULT_CONTEXT_LIMIT,
     misses_only: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Fetch resolved decision rows for ``(agent, ticker)`` with their key_drivers/thesis/lesson.
 
     This is the raw material the memory-review skill's LLM step reasons over to explain *why* a
@@ -239,10 +239,10 @@ def gather_context_rows(
     finally:
         conn.close()
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for row in rows:
         norm_signal = _normalize_signal(row["signal"])
-        correct: Optional[bool] = None
+        correct: bool | None = None
         if norm_signal is not None and row["forward_return"] is not None:
             correct = _is_correct(norm_signal, row["forward_return"])
         if misses_only and correct is not False:
@@ -262,15 +262,15 @@ def gather_context_rows(
     return out
 
 
-def _context_key(finding: Dict[str, Any]) -> Tuple[str, str]:
+def _context_key(finding: dict[str, Any]) -> tuple[str, str]:
     return (finding["agent"], finding["ticker"])
 
 
 def gather_all_context(
-    findings: List[Dict[str, Any]],
-    db_path: Union[str, Path, None] = None,
+    findings: list[dict[str, Any]],
+    db_path: str | Path | None = None,
     limit: int = DEFAULT_CONTEXT_LIMIT,
-) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """Convenience: ``gather_context_rows`` for every ``(agent, ticker)`` in ``findings``."""
     return {
         _context_key(f): gather_context_rows(f["agent"], f["ticker"], db_path=db_path, limit=limit)
@@ -286,8 +286,8 @@ _NO_FINDINGS_MESSAGE = "*No divergent per-(agent, ticker) patterns found.*"
 
 
 def format_findings_markdown(
-    findings: List[Dict[str, Any]],
-    context_by_key: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]] = None,
+    findings: list[dict[str, Any]],
+    context_by_key: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
 ) -> str:
     """Render ``find_patterns`` output (+ optional gathered context) as prompt-ready markdown.
 
@@ -298,7 +298,7 @@ def format_findings_markdown(
     if not findings:
         return "## Memory review findings\n\n" + _NO_FINDINGS_MESSAGE
 
-    parts: List[str] = ["## Memory review findings"]
+    parts: list[str] = ["## Memory review findings"]
     for finding in findings:
         hits = round(finding["hit_rate"] * finding["n"])
         pct = f"{finding['hit_rate'] * 100:.0f}%"
@@ -329,7 +329,7 @@ def format_findings_markdown(
 # ---------------------------------------------------------------------------
 
 
-def default_heuristic_line(finding: Dict[str, Any]) -> str:
+def default_heuristic_line(finding: dict[str, Any]) -> str:
     """Mechanically-derived, one-line draft heuristic for a finding — see module docstring.
 
     This is a template, not a substitute for the skill's live reasoning about *why* the pattern
@@ -345,7 +345,7 @@ def default_heuristic_line(finding: Dict[str, Any]) -> str:
     )
 
 
-def draft_heuristics_markdown(agent: str, findings: List[Dict[str, Any]]) -> str:
+def draft_heuristics_markdown(agent: str, findings: list[dict[str, Any]]) -> str:
     """Render a full draft heuristics.md body for one agent from ``find_patterns`` output.
 
     Mechanical distillation only (see ``default_heuristic_line``) — the memory-review skill is
@@ -371,7 +371,7 @@ def draft_heuristics_markdown(agent: str, findings: List[Dict[str, Any]]) -> str
 def write_heuristics_md(
     agent: str,
     body_markdown: str,
-    heuristics_dir: Union[str, Path, None] = None,
+    heuristics_dir: str | Path | None = None,
 ) -> Path:
     """Persist one agent's curated heuristics file (overwrite, not append — see module docstring).
 
@@ -422,7 +422,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     args = _build_arg_parser().parse_args(argv)
     findings = find_patterns(
         agent=args.agent,

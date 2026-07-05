@@ -2,8 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
-
 from tradingagents.memory.query import get_past_context
 from tradingagents.memory.store import get_connection, store_decision
 
@@ -13,12 +11,12 @@ def _db_path(tmp_path):
 
 
 def _seed_pending(db_path, agent="trader", ticker="AAPL", date="2026-01-01", **kwargs):
-    defaults = dict(
-        signal="Buy",
-        confidence=0.7,
-        key_drivers=["strong earnings"],
-        thesis="Momentum plus fundamentals align.",
-    )
+    defaults = {
+        "signal": "Buy",
+        "confidence": 0.7,
+        "key_drivers": ["strong earnings"],
+        "thesis": "Momentum plus fundamentals align.",
+    }
     defaults.update(kwargs)
     store_decision(agent=agent, ticker=ticker, date=date, db_path=db_path, **defaults)
 

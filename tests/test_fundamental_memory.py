@@ -43,8 +43,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tradingagents.memory.resolve import DEFAULT_HORIZON_DAYS, resolve_pending
 from tradingagents.memory.query import get_past_context
+from tradingagents.memory.resolve import DEFAULT_HORIZON_DAYS, resolve_pending
 from tradingagents.memory.store import get_connection, store_decision
 
 # ---------------------------------------------------------------------------
