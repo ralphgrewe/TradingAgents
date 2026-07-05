@@ -1,10 +1,12 @@
-"""Tests for the market analyst node (issue #18): the fork's structured-JSON
-indicator output must survive the merge with upstream's instrument-identity /
-verified-market-snapshot anti-hallucination grounding.
+"""Tests for the market analyst node (issue #30): deterministic indicator
+computation with JSON envelope output.
 """
 
+import json
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from tradingagents.agents.analysts.market_analyst import create_market_analyst
@@ -20,110 +22,197 @@ def _make_state(**overrides):
     return state
 
 
-def _invoke_node_and_capture_prompt(state, response=None):
-    """Run market_analyst_node with a fully-mocked LLM and capture the
-    rendered ChatPromptValue passed to the (mocked) tool-bound LLM, plus the
-    node's return value.
-    """
-    if response is None:
-        response = MagicMock(tool_calls=[], content="report text")
-
-    captured = {}
-
-    def fake_bound_call(prompt_value):
-        captured["prompt_value"] = prompt_value
-        return response
-
-    bound = MagicMock(side_effect=fake_bound_call)
-    llm = MagicMock()
-    llm.bind_tools.return_value = bound
-
-    node = create_market_analyst(llm)
-    result = node(state)
-    return result, captured["prompt_value"], llm
+def _make_sample_ohlcv():
+    """Create sample OHLCV data for testing."""
+    base_date = datetime(2024, 1, 1)
+    records = []
+    price = 100.0
+    for i in range(100):
+        date = base_date + timedelta(days=i)
+        price += 0.1 + (0.05 if i % 3 == 0 else -0.02)
+        records.append({
+            "Date": date.strftime("%Y-%m-%d"),
+            "Open": price - 0.5,
+            "High": price + 0.75,
+            "Low": price - 0.75,
+            "Close": price,
+            "Volume": 1000000 + (i * 1000),
+        })
+    return pd.DataFrame(records)
 
 
 @pytest.mark.unit
-class TestMarketAnalystStructuredJsonContract:
-    """The fork's downstream stages parse a strict JSON array of indicators
-    out of the report — that contract must be untouched by the merge."""
+class TestMarketAnalystJsonEnvelope:
+    """Tests for JSON envelope output per issue #30."""
 
-    def test_prompt_still_requires_pure_json_indicator_array(self):
-        _, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        text = prompt_value.to_string()
-        assert "pure JSON array" in text
-        assert '"indicator": "<tool_name>"' in text
-        assert '"trend": "Rising" | "Falling" | "Flat"' in text
-        assert '"signal": "Bullish" | "Bearish" | "Neutral"' in text
+    def test_market_report_is_json_string(self):
+        """market_report should contain JSON envelope, not markdown."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Test summary"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
 
-    def test_report_passthrough_when_no_tool_calls(self):
-        response = MagicMock(tool_calls=[], content="## 1. Market Context\n...")
-        result, _, _ = _invoke_node_and_capture_prompt(_make_state(), response=response)
-        assert result["market_report"] == "## 1. Market Context\n..."
-
-    def test_report_empty_when_tool_calls_pending(self):
-        response = MagicMock(tool_calls=[{"name": "get_stock_data", "args": {}, "id": "1"}])
-        result, _, _ = _invoke_node_and_capture_prompt(_make_state(), response=response)
-        assert result["market_report"] == ""
-
-    def test_prompt_renders_without_format_collision(self):
-        """Regression guard: the JSON example's literal `{`/`}` braces used to
-        break the old str.format()-based substitution (KeyError on the first
-        JSON key) whenever the node actually ran."""
-        result, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        assert result["market_report"] == "report text"
-        assert "AAPL" in prompt_value.to_string()
-
-
-@pytest.mark.unit
-class TestMarketAnalystGrounding:
-    """Anti-hallucination grounding grafted in from upstream d7b40a2/47cbb32."""
-
-    def test_verified_snapshot_tool_is_bound(self):
-        _, _, llm = _invoke_node_and_capture_prompt(_make_state())
-        bound_tools = llm.bind_tools.call_args[0][0]
-        tool_names = {t.name for t in bound_tools}
-        assert "get_verified_market_snapshot" in tool_names
-        assert {"get_stock_data", "get_indicators"} <= tool_names
-
-    def test_prompt_instructs_verified_snapshot_as_source_of_truth(self):
-        _, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        text = prompt_value.to_string()
-        assert "get_verified_market_snapshot" in text
-        assert "source of truth" in text
-        assert "flag the discrepancy" in text
-
-    def test_prompt_forbids_unsupported_historical_claims(self):
-        _, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        text = prompt_value.to_string()
-        assert "historical validation" in text
-        assert "Never substitute a different company" in text
-
-    def test_instrument_context_uses_resolved_identity(self):
-        with patch("tradingagents.agents.utils.agent_utils.yf.Ticker") as mock_ticker:
-            mock_ticker.return_value.info = {
-                "longName": "Apple Inc.",
-                "sector": "Technology",
-            }
-            _, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        text = prompt_value.to_string()
-        assert "Apple Inc." in text
-        assert "Do not substitute a different company" in text
-
-    def test_instrument_context_falls_back_gracefully_offline(self):
-        # yfinance failing must never break the analyst (fail-open).
         with patch(
-            "tradingagents.agents.utils.agent_utils.yf.Ticker",
-            side_effect=RuntimeError("offline"),
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=_make_sample_ohlcv(),
         ):
-            result, prompt_value, _ = _invoke_node_and_capture_prompt(_make_state())
-        assert result["market_report"] == "report text"
-        assert "AAPL" in prompt_value.to_string()
+            node = create_market_analyst(llm)
+            result = node(_make_state())
 
-    def test_prefers_precomputed_instrument_context(self):
-        with patch("tradingagents.agents.utils.agent_utils.yf.Ticker") as mock_ticker:
-            _, prompt_value, _ = _invoke_node_and_capture_prompt(
-                _make_state(instrument_context="PRECOMPUTED CONTEXT MARKER")
-            )
-        mock_ticker.assert_not_called()
-        assert "PRECOMPUTED CONTEXT MARKER" in prompt_value.to_string()
+        assert "market_report" in result
+        report_str = result["market_report"]
+
+        # Should be valid JSON
+        envelope = json.loads(report_str)
+        assert isinstance(envelope, dict)
+
+    def test_envelope_has_required_fields(self):
+        """JSON envelope must have skill, ticker, date, signal, confidence, summary, details."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Test summary"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=_make_sample_ohlcv(),
+        ):
+            node = create_market_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["market_report"])
+        assert envelope["skill"] == "market-analyst"
+        assert envelope["ticker"] == "AAPL"
+        assert envelope["date"] == "2026-05-13"
+        assert "signal" in envelope
+        assert "confidence" in envelope
+        assert "summary" in envelope
+        assert "details" in envelope
+
+    def test_envelope_details_has_indicators_list(self):
+        """details should contain indicators list with all 7 indicators."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Test summary"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=_make_sample_ohlcv(),
+        ):
+            node = create_market_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["market_report"])
+        indicators = envelope["details"]["indicators"]
+        assert len(indicators) == 7
+
+        # Check indicator structure
+        ind_names = {ind["indicator"] for ind in indicators}
+        expected = {"sma_50", "macdh", "rsi", "boll_ub", "boll_lb", "atr", "vwma"}
+        assert ind_names == expected
+
+    def test_signal_confidence_deterministic(self):
+        """Signal and confidence should be deterministic (same for same data)."""
+        ohlcv = _make_sample_ohlcv()
+
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Test summary"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        def load_ohlcv_patched(*args, **kwargs):
+            return ohlcv.copy()
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            side_effect=load_ohlcv_patched,
+        ):
+            node = create_market_analyst(llm)
+            result1 = node(_make_state())
+            result2 = node(_make_state())
+
+        envelope1 = json.loads(result1["market_report"])
+        envelope2 = json.loads(result2["market_report"])
+
+        assert envelope1["signal"] == envelope2["signal"]
+        assert envelope1["confidence"] == envelope2["confidence"]
+        assert envelope1["details"] == envelope2["details"]
+
+    def test_missing_ohlcv_degradation(self):
+        """Should degrade gracefully when OHLCV unavailable."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "No data available"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=pd.DataFrame(),  # Empty DataFrame
+        ):
+            node = create_market_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["market_report"])
+        assert envelope["signal"] is None
+        assert envelope["confidence"] is None
+        assert envelope["details"]["close"] is None
+        # When empty DataFrame, compute_indicators still runs and returns proper structure
+        assert isinstance(envelope["details"]["convergence"]["missing"], list)
+
+    def test_llm_writes_summary_only(self):
+        """LLM should write summary; signal/confidence from computation."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Custom summary from LLM"
+
+        # Make the mock callable so it works with the pipe operator
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=_make_sample_ohlcv(),
+        ):
+            node = create_market_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["market_report"])
+        # Summary should be LLM's output
+        assert envelope["summary"] == "Custom summary from LLM"
+        # Signal and confidence should come from computation (not None)
+        assert envelope["signal"] in ("BUY", "HOLD", "SELL")
+        assert envelope["confidence"] in ("HIGH", "MEDIUM", "LOW")
+
+    def test_convergence_and_trade_setup_present(self):
+        """details should include convergence and trade_setup."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Test summary"
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.get_llm.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.market_analyst.load_ohlcv",
+            return_value=_make_sample_ohlcv(),
+        ):
+            node = create_market_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["market_report"])
+        details = envelope["details"]
+
+        assert "convergence" in details
+        assert "confirms" in details["convergence"]
+        assert "conflicts" in details["convergence"]
+        assert "missing" in details["convergence"]
+
+        assert "trade_setup" in details
+        if details["trade_setup"]:
+            assert "bias" in details["trade_setup"]
+            assert "entry_trigger" in details["trade_setup"]
