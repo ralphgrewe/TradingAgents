@@ -4,6 +4,7 @@ Script to run Trading Agents with Ollama provider for a list of stocks from JSON
 
 Usage:
     python run_trading_agents.py stocks.json [--report-dir REPORT_DIR] [--show-summary]
+    python run_trading_agents.py stocks.json --portfolio --style aggressive --depot-id my-depot
 
 Expected JSON format:
     [
@@ -14,12 +15,24 @@ Expected JSON format:
 Optional arguments:
     --report-dir REPORT_DIR  Directory to save analysis reports (default: ./reports)
     --show-summary           Display formatted analysis summary for each stock
+    --portfolio               Opt-in portfolio mode (see below). Requires --style and --depot-id.
+    --style {aggressive,conservative}  Portfolio style-table to use.
+    --depot-id DEPOT_ID       Named simulated depot to get-or-create and rebalance.
 
 The script now produces the same quality output as the CLI application:
 - Uses explicit analyst selection (market, social, news, fundamentals)
 - Configures proper research depth settings
 - Generates comprehensive reports with --report-dir
 - Displays formatted summaries with --show-summary
+
+Portfolio mode (--portfolio): without it, behavior is unchanged (per-ticker
+reports only). With it, the stock-list JSON is treated as the investment
+universe: the full pipeline still runs for every ticker, but afterwards the
+final 5-tier rating from each run is mapped to a style-table signal
+(tradingagents.portfolio.rebalance), a target allocation is computed, and
+rebalancing trades are executed against the simulator (tradingagents.simulation
+.SimulationClient) in the named depot. A JSON run report is written to
+--report-dir alongside the per-ticker reports.
 """
 
 import argparse
@@ -30,7 +43,9 @@ from pathlib import Path
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.portfolio.runner import extract_rating, run_portfolio_mode
 from tradingagents.report_generator import save_report_to_disk
+from tradingagents.simulation import SimulationClientError
 
 
 def display_summary(final_state, ticker):
@@ -80,7 +95,19 @@ def main():
     parser.add_argument('json_file', help='Path to JSON file containing stock list')
     parser.add_argument('--report-dir', help='Directory to save analysis reports', default='./reports')
     parser.add_argument('--show-summary', action='store_true', help='Display formatted analysis summary')
+    parser.add_argument('--portfolio', action='store_true',
+                         help='Opt-in portfolio mode: after running the full pipeline for every '
+                              'ticker, compute a style-table allocation and execute rebalancing '
+                              'trades in a simulated depot. The stock-list JSON is the universe.')
+    parser.add_argument('--style', choices=['aggressive', 'conservative'],
+                         help='Portfolio style (required with --portfolio).')
+    parser.add_argument('--depot-id', help='Named simulated depot to get-or-create and trade in '
+                                            '(required with --portfolio).')
     args = parser.parse_args()
+
+    if args.portfolio and (not args.style or not args.depot_id):
+        print("Error: --portfolio requires both --style and --depot-id")
+        sys.exit(1)
 
     # Read stock list from JSON file
     try:
@@ -121,6 +148,8 @@ def main():
 
     # Initialize list to collect structured data for consolidated summary
     all_structured_data = []
+    # Ratings collected for portfolio mode (only tickers whose run succeeded)
+    portfolio_ratings = {}
 
     # Process each stock
     for stock in stocks:
@@ -131,6 +160,9 @@ def main():
         try:
             final_state, decision = ta.propagate(ticker, date)
             print(f"Decision for {ticker}: {decision}")
+
+            if args.portfolio:
+                portfolio_ratings[ticker] = extract_rating(final_state)
 
             # Display formatted summary if requested
             if args.show_summary:
@@ -182,6 +214,26 @@ def main():
             print(f"\nConsolidated trading summary saved to: {summary_file}")
         except Exception as e:
             print(f"Warning: Failed to create consolidated summary: {str(e)}")
+
+    # Portfolio mode: turn per-ticker ratings into a style-table allocation and
+    # execute simulated rebalancing trades in the named depot.
+    if args.portfolio:
+        universe = [stock['ticker'] for stock in stocks]
+        print(f"\nRunning portfolio mode ({args.style}, depot '{args.depot_id}')...")
+        try:
+            envelope, report_file = run_portfolio_mode(
+                universe=universe,
+                ratings=portfolio_ratings,
+                style=args.style,
+                depot_id=args.depot_id,
+                report_dir=Path(args.report_dir),
+            )
+            print(envelope["summary"])
+            print(f"Portfolio report saved to: {report_file}")
+        except SimulationClientError as e:
+            print(f"Error: portfolio mode failed to reach the simulator: {str(e)}")
+        except Exception as e:
+            print(f"Error: portfolio mode failed: {str(e)}")
 
 if __name__ == "__main__":
     main()
