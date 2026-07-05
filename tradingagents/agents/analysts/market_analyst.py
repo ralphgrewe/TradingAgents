@@ -1,10 +1,11 @@
 import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
-    build_instrument_context,
     get_indicators,
+    get_instrument_context_from_state,
     get_language_instruction,
     get_stock_data,
+    get_verified_market_snapshot,
 )
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
@@ -58,12 +59,12 @@ def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        asset_type = state.get("asset_type", "stock")
-        instrument_context = build_instrument_context(ticker, asset_type)
+        instrument_context = get_instrument_context_from_state(state)
 
         tools = [
             get_stock_data,
             get_indicators,
+            get_verified_market_snapshot,
         ]
 
         # Fetch data and compute signal context
@@ -156,10 +157,21 @@ def create_market_analyst(llm):
         5. Always include atr when a Trade Setup (Section 4) is required.
         6. Do not repeat information across report sections.
         7. All numeric values in Section 4 (Trade Setup) must be taken from the Pre-Computed Signal Context table above — do not recalculate stop-loss or trend directions yourself.
-        """    
+
+        ## Grounding & Anti-Hallucination Rules
+        8. Before writing the final report, call get_verified_market_snapshot for {ticker} on {date_range} and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If get_indicators or another tool's output conflicts with the verified snapshot, flag the discrepancy in Section 3 (Convergence & Conflicts) rather than inventing a reconciled number.
+        9. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless directly supported by tool output with concrete dates and prices. Never substitute a different company, ticker, or asset than the one given in the instrument context below — do not pattern-match the price chart to a different, more familiar company.
+        """
         + get_language_instruction()
         )
-        system_message = system_message.format(signal_context=signal_context, ticker=ticker, date_range=current_date)
+        # Plain substitution rather than str.format(): the JSON example in
+        # Section 5 contains literal `{`/`}` braces (object literals) that
+        # str.format() would otherwise try to parse as format fields.
+        system_message = (
+            system_message.replace("{signal_context}", signal_context)
+            .replace("{ticker}", ticker)
+            .replace("{date_range}", current_date)
+        )
 
         prompt = ChatPromptTemplate.from_messages(
             [
