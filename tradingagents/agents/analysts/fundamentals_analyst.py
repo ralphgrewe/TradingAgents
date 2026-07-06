@@ -98,7 +98,7 @@ Context: {context_info}"""
 
         prompt = ChatPromptTemplate.from_messages(prompt_messages)
 
-        chain = prompt | llm.get_llm()
+        chain = prompt | llm
 
         try:
             result = chain.invoke({"messages": state["messages"]})
@@ -156,7 +156,7 @@ Write only the one-line summary, nothing else."""
 
         summary_prompt_obj = ChatPromptTemplate.from_messages(summary_messages)
 
-        summary_chain = summary_prompt_obj | llm.get_llm()
+        summary_chain = summary_prompt_obj | llm
 
         try:
             summary_result = summary_chain.invoke({"messages": state["messages"]})

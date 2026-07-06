@@ -86,7 +86,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(_make_sample_news_output())
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Sample summary"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -111,7 +110,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(_make_sample_news_output())
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Sample summary"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -151,7 +149,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Mixed signals"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -176,7 +173,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="High confidence"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -199,7 +195,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Medium confidence"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -222,7 +217,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Low confidence"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -263,7 +257,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(_make_sample_news_output())
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Sample summary"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -290,7 +283,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(_make_sample_news_output())
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Sample summary"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -312,7 +304,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Sample summary"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -336,7 +327,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Boundary test"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
@@ -361,7 +351,6 @@ class TestNewsAnalystJsonEnvelope:
         mock_response.content = json.dumps(news_output)
         mock_llm = MagicMock(return_value=mock_response)
         llm.bind_tools.return_value = mock_llm
-        llm.get_llm.return_value = MagicMock(return_value=MagicMock(content="Boundary test"))
 
         with patch(
             "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",

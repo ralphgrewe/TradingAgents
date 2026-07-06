@@ -163,7 +163,7 @@ Write only the one-line summary, nothing else."""
                 ]
             )
 
-            summary_chain = summary_prompt | llm.get_llm()
+            summary_chain = summary_prompt | llm
 
             try:
                 summary_result = summary_chain.invoke({"messages": state["messages"]})

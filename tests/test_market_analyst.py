@@ -50,8 +50,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "Test summary"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",
@@ -72,8 +71,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "Test summary"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",
@@ -96,8 +94,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "Test summary"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",
@@ -122,8 +119,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "Test summary"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         def load_ohlcv_patched(*args, **kwargs):
             return ohlcv.copy()
@@ -148,8 +144,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "No data available"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",
@@ -172,8 +167,7 @@ class TestMarketAnalystJsonEnvelope:
         mock_response.content = "Custom summary from LLM"
 
         # Make the mock callable so it works with the pipe operator
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",
@@ -194,8 +188,7 @@ class TestMarketAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "Test summary"
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.market_analyst.load_ohlcv",

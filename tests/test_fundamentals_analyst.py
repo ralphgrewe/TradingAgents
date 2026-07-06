@@ -120,8 +120,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = '{"value": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": ["pe"]}, "growth": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": ["gross_margin"]}}'
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -142,8 +141,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = '{"value": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": []}, "growth": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": []}}'
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -166,8 +164,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = '{"value": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": ["pe"]}, "growth": {"signal": "BUY", "confidence": "HIGH", "data_confidence": "HIGH", "key_ratios": ["gross_margin"]}}'
-        mock_llm = MagicMock(return_value=mock_response)
-        llm.get_llm.return_value = mock_llm
+        llm.return_value = mock_response
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -194,8 +191,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Strong growth and value"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -215,8 +211,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Mixed signals"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -236,8 +231,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "BUY"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -257,8 +251,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Conflicting analysis"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -278,8 +271,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Insufficient data"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -302,8 +294,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Strong fundamentals"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",
@@ -326,8 +317,7 @@ class TestFundamentalsAnalystJsonEnvelope:
         mock_summary = MagicMock()
         mock_summary.content = "Fairly valued"
 
-        mock_llm = MagicMock(side_effect=[mock_response, mock_summary])
-        llm.get_llm.return_value = mock_llm
+        llm.side_effect = [mock_response, mock_summary]
 
         with patch(
             "tradingagents.agents.analysts.fundamentals_analyst.compute",

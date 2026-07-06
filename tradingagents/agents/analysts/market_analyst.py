@@ -96,7 +96,7 @@ Write only the one-line summary, nothing else."""
             ]
         )
 
-        chain = prompt | llm.get_llm()
+        chain = prompt | llm
 
         try:
             result = chain.invoke({"messages": state["messages"]})
