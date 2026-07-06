@@ -46,7 +46,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.reporting import write_report_tree
+from tradingagents.reporting import format_report_markdown, write_report_tree
 
 console = Console()
 
@@ -196,7 +196,7 @@ class MessageBuffer:
                 "final_trade_decision": "Portfolio Management Decision",
             }
             self.current_report = (
-                f"### {section_titles[latest_section]}\n{latest_content}"
+                f"### {section_titles[latest_section]}\n{format_report_markdown(latest_content)}"
             )
 
         # Update the final complete report
@@ -211,7 +211,7 @@ class MessageBuffer:
             report_parts.append("## Analyst Team Reports")
             if self.report_sections.get("market_report"):
                 report_parts.append(
-                    f"### Market Analysis\n{self.report_sections['market_report']}"
+                    f"### Market Analysis\n{format_report_markdown(self.report_sections['market_report'])}"
                 )
             if self.report_sections.get("sentiment_report"):
                 report_parts.append(
@@ -219,11 +219,11 @@ class MessageBuffer:
                 )
             if self.report_sections.get("news_report"):
                 report_parts.append(
-                    f"### News Analysis\n{self.report_sections['news_report']}"
+                    f"### News Analysis\n{format_report_markdown(self.report_sections['news_report'])}"
                 )
             if self.report_sections.get("fundamentals_report"):
                 report_parts.append(
-                    f"### Fundamentals Analysis\n{self.report_sections['fundamentals_report']}"
+                    f"### Fundamentals Analysis\n{format_report_markdown(self.report_sections['fundamentals_report'])}"
                 )
 
         # Research Team Reports
@@ -778,7 +778,7 @@ def display_complete_report(final_state):
     if analysts:
         console.print(Panel("[bold]I. Analyst Team Reports[/bold]", border_style="cyan"))
         for title, content in analysts:
-            console.print(Panel(Markdown(content), title=title, border_style="blue", padding=(1, 2)))
+            console.print(Panel(Markdown(format_report_markdown(content)), title=title, border_style="blue", padding=(1, 2)))
 
     # II. Research Team Reports
     if final_state.get("investment_debate_state"):

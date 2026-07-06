@@ -21,12 +21,12 @@ def create_aggressive_debator(llm):
 
 {trader_decision}
 
-Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. Incorporate insights from the following sources into your arguments:
+Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. Incorporate insights from the following sources into your arguments. The market, news, and fundamentals reports are structured JSON envelopes (fields: `signal`, `confidence`, `summary`, `details`) — read the `summary` for the headline takeaway and cite specific `details` fields (technical indicators and `trade_setup`, news ratings and headline counts, fundamentals value/growth sub-signals) as evidence rather than restating the raw JSON. The sentiment report remains free-form prose:
 
-Market Research Report: {market_research_report}
-Social Media Sentiment Report: {sentiment_report}
-Latest World Affairs Report: {news_report}
-Company Fundamentals Report: {fundamentals_report}
+Market Research Report (JSON envelope): {market_research_report}
+Social Media Sentiment Report (prose): {sentiment_report}
+Latest World Affairs Report (JSON envelope): {news_report}
+Company Fundamentals Report (JSON envelope): {fundamentals_report}
 Here is the current conversation history: {history} Here are the last arguments from the conservative analyst: {current_conservative_response} Here are the last arguments from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 
 Engage actively by addressing any specific concerns raised, refuting the weaknesses in their logic, and asserting the benefits of risk-taking to outpace market norms. Maintain a focus on debating and persuading, not just presenting data. Challenge each counterpoint to underscore why a high-risk approach is optimal. Output conversationally as if you are speaking without any special formatting.""" + get_language_instruction()

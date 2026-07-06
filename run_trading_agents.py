@@ -45,6 +45,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.portfolio.runner import extract_rating, run_portfolio_mode
 from tradingagents.report_generator import save_report_to_disk
+from tradingagents.reporting import format_report_preview
 from tradingagents.simulation import SimulationClientError
 
 
@@ -54,17 +55,19 @@ def display_summary(final_state, ticker):
     print(f"ANALYSIS SUMMARY FOR {ticker}")
     print(f"{'='*60}")
 
-    # Analyst Reports
+    # Analyst Reports. market/news/fundamentals are JSON envelopes (#30-#32);
+    # format_report_preview prefers the envelope's signal/confidence/summary
+    # over a truncated raw-JSON snippet. sentiment_report stays prose.
     if any(final_state.get(f"{analyst}_report") for analyst in ["market", "sentiment", "news", "fundamentals"]):
         print("\n📊 ANALYST TEAM REPORTS:")
         if final_state.get("market_report"):
-            print(f"• Market Analyst: {final_state['market_report'][:150]}...")
+            print(f"• Market Analyst: {format_report_preview(final_state['market_report'])}")
         if final_state.get("sentiment_report"):
-            print(f"• Social Analyst: {final_state['sentiment_report'][:150]}...")
+            print(f"• Social Analyst: {format_report_preview(final_state['sentiment_report'])}")
         if final_state.get("news_report"):
-            print(f"• News Analyst: {final_state['news_report'][:150]}...")
+            print(f"• News Analyst: {format_report_preview(final_state['news_report'])}")
         if final_state.get("fundamentals_report"):
-            print(f"• Fundamentals Analyst: {final_state['fundamentals_report'][:150]}...")
+            print(f"• Fundamentals Analyst: {format_report_preview(final_state['fundamentals_report'])}")
 
     # Research Team
     if final_state.get("investment_debate_state"):
