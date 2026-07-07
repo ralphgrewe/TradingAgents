@@ -10,19 +10,16 @@ from typing import Any
 import yfinance as yf
 from langgraph.prebuilt import ToolNode
 
-# Import the new abstract tool methods from agent_utils
-from tradingagents.agents.utils.agent_utils import (
-    get_balance_sheet,
-    get_cashflow,
-    get_fundamentals,
-    get_global_news,
-    get_income_statement,
-    get_indicators,
-    get_insider_transactions,
-    get_news,
-    get_stock_data,
-    get_verified_market_snapshot,
-)
+# Import the new abstract tool methods from agent_utils.
+#
+# Only get_news is imported here: it's the one tool still wired to a live
+# ToolNode ("social" — see _create_tool_nodes below). market/news/
+# fundamentals compute deterministically and never call tools (#37), so
+# their former ToolNode tool lists (get_stock_data, get_indicators,
+# get_verified_market_snapshot, get_global_news, get_insider_transactions,
+# get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement)
+# were dropped along with the dead ToolNodes they backed.
+from tradingagents.agents.utils.agent_utils import get_news
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.config import set_config
@@ -167,42 +164,18 @@ class TradingAgentsGraph:
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:
-        """Create tool nodes for different data sources using abstract methods."""
+        """Create tool nodes for different data sources using abstract methods.
+
+        market/news/fundamentals have no entries here: those analysts compute
+        deterministically and never call tools, so `GraphSetup.setup_graph()`
+        wires them straight to their "Msg Clear" node with no ToolNode round
+        trip (#37). Only "social" (sentiment) still makes real tool calls.
+        """
         return {
-            "market": ToolNode(
-                [
-                    # Core stock data tools
-                    get_stock_data,
-                    # Technical indicators
-                    get_indicators,
-                    # Deterministic verification snapshot (bound to the
-                    # analyst LLM and required by its prompt; must be
-                    # executable here or the call fails and the model
-                    # reports it "unavailable").
-                    get_verified_market_snapshot,
-                ]
-            ),
             "social": ToolNode(
                 [
                     # News tools for social media analysis
                     get_news,
-                ]
-            ),
-            "news": ToolNode(
-                [
-                    # News and insider information
-                    get_news,
-                    get_global_news,
-                    get_insider_transactions,
-                ]
-            ),
-            "fundamentals": ToolNode(
-                [
-                    # Fundamental analysis tools
-                    get_fundamentals,
-                    get_balance_sheet,
-                    get_cashflow,
-                    get_income_statement,
                 ]
             ),
             "perplexity_news": ToolNode(

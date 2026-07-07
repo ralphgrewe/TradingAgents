@@ -8,7 +8,14 @@ class AnalystNodeSpec:
     key: str
     agent_node: str
     clear_node: str
-    tool_node: str
+    # ``None`` means this analyst has no tool round-trip: it's wired straight
+    # to its ``clear_node`` with no conditional edge / ToolNode (see #37 —
+    # market/news/fundamentals compute deterministically and never call
+    # tools, so they return no new message and there is nothing for a
+    # ``should_continue_*`` check to route on). ``social`` is the only
+    # analyst that still makes real tool calls, so it's the only one with a
+    # non-``None`` value here.
+    tool_node: str | None
     report_key: str
 
 
@@ -23,7 +30,7 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         key="market",
         agent_node="Market Analyst",
         clear_node="Msg Clear Market",
-        tool_node="tools_market",
+        tool_node=None,
         report_key="market_report",
     ),
     "social": AnalystNodeSpec(
@@ -41,14 +48,14 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         key="news",
         agent_node="News Analyst",
         clear_node="Msg Clear News",
-        tool_node="tools_news",
+        tool_node=None,
         report_key="news_report",
     ),
     "fundamentals": AnalystNodeSpec(
         key="fundamentals",
         agent_node="Fundamentals Analyst",
         clear_node="Msg Clear Fundamentals",
-        tool_node="tools_fundamentals",
+        tool_node=None,
         report_key="fundamentals_report",
     ),
 }

@@ -98,7 +98,8 @@ class GraphSetup:
         for spec in plan.specs:
             workflow.add_node(spec.agent_node, analyst_factories[spec.key]())
             workflow.add_node(spec.clear_node, create_msg_delete())
-            workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
+            if spec.tool_node is not None:
+                workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
 
         # Add other nodes
         workflow.add_node("Bull Researcher", bull_researcher_node)
@@ -117,16 +118,27 @@ class GraphSetup:
         # Connect analysts in sequence
         for i, spec in enumerate(plan.specs):
             current_analyst = spec.agent_node
-            current_tools = spec.tool_node
             current_clear = spec.clear_node
 
-            # Add conditional edges for current analyst
-            workflow.add_conditional_edges(
-                current_analyst,
-                getattr(self.conditional_logic, f"should_continue_{spec.key}"),
-                [current_tools, current_clear],
-            )
-            workflow.add_edge(current_tools, current_analyst)
+            if spec.tool_node is not None:
+                # This analyst still makes real tool calls (currently only
+                # "social"): keep the conditional round trip through its
+                # ToolNode.
+                current_tools = spec.tool_node
+                workflow.add_conditional_edges(
+                    current_analyst,
+                    getattr(self.conditional_logic, f"should_continue_{spec.key}"),
+                    [current_tools, current_clear],
+                )
+                workflow.add_edge(current_tools, current_analyst)
+            else:
+                # No tool round trip (market/news/fundamentals compute
+                # deterministically and never call tools, so they add no new
+                # message — see #37). Wire straight to the clear node
+                # instead of routing through a `tool_calls`-checking
+                # conditional edge, which would crash on the stale
+                # HumanMessage left over from the previous node.
+                workflow.add_edge(current_analyst, current_clear)
 
             # Connect to next analyst or to Bull Researcher if this is the last analyst
             if i < len(plan.specs) - 1:
