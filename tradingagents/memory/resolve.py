@@ -251,13 +251,21 @@ def resolve_pending(
             continue  # price data not available yet — retry on a future call
 
         key_drivers = json.loads(row["key_drivers"]) if row["key_drivers"] else None
-        lesson = _generate_lesson(
-            signal=row["signal"],
-            confidence=row["confidence"],
-            key_drivers=key_drivers,
-            thesis=row["thesis"],
-            forward_return=forward_return,
-        )
+        try:
+            lesson = _generate_lesson(
+                signal=row["signal"],
+                confidence=row["confidence"],
+                key_drivers=key_drivers,
+                thesis=row["thesis"],
+                forward_return=forward_return,
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not generate lesson for %s on %s (will retry next run): %s",
+                row["ticker"], row["decision_date"], e,
+            )
+            continue  # leave row pending, do not add to updates
+
         updates.append(
             {
                 "id": row["id"],

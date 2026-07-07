@@ -225,3 +225,49 @@ def test_no_pending_rows_returns_empty_list(tmp_path, _stub_lesson, _stub_forwar
     assert resolved_ids == []
     _stub_forward_return.assert_not_called()
     _stub_lesson.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-row lesson generation failure -> other rows still resolved
+# ---------------------------------------------------------------------------
+
+def test_lesson_generation_failure_does_not_abort_batch(tmp_path, _stub_forward_return):
+    """When lesson generation fails for one row, other rows in the same
+    resolve_pending() call should still be resolved and written."""
+    db_path = _db_path(tmp_path)
+    _seed(db_path, agent="trader", ticker="AAPL", date=BACKDATED)
+    _seed(db_path, agent="trader", ticker="MSFT", date=BACKDATED)
+
+    # Mock _generate_lesson to raise an exception only for the second call
+    call_count = [0]
+
+    def lesson_side_effect(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 2:  # fail on second call (MSFT)
+            raise ConnectionError("Connection error.")
+        return "Lesson for the successful row."
+
+    with patch("tradingagents.memory.resolve._generate_lesson", side_effect=lesson_side_effect) as mock_lesson:
+        resolved_ids = resolve_pending(db_path=db_path)
+
+    # Only one row should be resolved (the first one succeeded, second failed)
+    assert len(resolved_ids) == 1
+    assert mock_lesson.call_count == 2
+
+    conn = get_connection(db_path)
+    try:
+        rows = {row["ticker"]: row for row in conn.execute("SELECT * FROM decisions").fetchall()}
+    finally:
+        conn.close()
+
+    # The first row (AAPL) should be resolved
+    assert rows["AAPL"]["resolved_at"] is not None
+    assert rows["AAPL"]["forward_return"] == pytest.approx(0.05)
+    assert rows["AAPL"]["lesson"] == "Lesson for the successful row."
+    assert rows["AAPL"]["horizon_days"] == DEFAULT_HORIZON_DAYS
+
+    # The second row (MSFT) should remain pending (not resolved)
+    assert rows["MSFT"]["resolved_at"] is None
+    assert rows["MSFT"]["forward_return"] is None
+    assert rows["MSFT"]["lesson"] is None
+    assert rows["MSFT"]["horizon_days"] is None
