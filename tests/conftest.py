@@ -88,7 +88,11 @@ def mock_llm_client():
 def mock_torch_xpu():
     """Mock torch and transformers modules for Intel XPU client tests.
 
-    Sets up both available and unavailable XPU scenarios depending on the test.
+    XPU is available in this fixture (for the "unavailable" scenario, tests
+    build their own minimal mock — see test_xpu_unavailable_raises_at_construction).
+    ``transformers.Mistral3ForConditionalGeneration`` / ``AutoTokenizer`` are
+    MagicMocks so tests can assert on the real IntelXPUClient loading path
+    (which class got called, with what args) without needing real weights.
     """
     import sys
     import types
@@ -109,8 +113,15 @@ def mock_torch_xpu():
 
     mock_torch.no_grad = lambda: MockNoGrad()
 
-    # Create mock transformers module
+    # Create mock transformers module with stub loader classes so the real
+    # IntelXPUClient._load_model_and_tokenizer() path is exercisable without
+    # real weights. from_pretrained() returns a fresh MagicMock per call so
+    # tests can inspect call args (which class, which kwargs) directly.
     mock_transformers = types.ModuleType("transformers")
+    mock_transformers.Mistral3ForConditionalGeneration = MagicMock()
+    mock_transformers.Mistral3ForConditionalGeneration.from_pretrained.return_value = MagicMock()
+    mock_transformers.AutoTokenizer = MagicMock()
+    mock_transformers.AutoTokenizer.from_pretrained.return_value = MagicMock()
 
     # Store original modules
     original_torch = sys.modules.get("torch")
