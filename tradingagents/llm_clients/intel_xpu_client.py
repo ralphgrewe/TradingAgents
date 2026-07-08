@@ -13,7 +13,8 @@ degrading.
 import logging
 import threading
 import warnings
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, convert_to_openai_messages
