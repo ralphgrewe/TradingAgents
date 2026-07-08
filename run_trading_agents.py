@@ -190,7 +190,9 @@ def main():
                 except Exception as e:
                     print(f"Warning: Failed to save report for {ticker}: {str(e)}")
         except Exception as e:
-            print(f"Error processing {ticker}: {str(e)}")
+            exc_type = type(e).__name__
+            print(f"\nFatal error processing {ticker}: [{exc_type}] {str(e)}")
+            sys.exit(1)
 
     # Create consolidated trading summary if we have data
     if args.report_dir and all_structured_data:
@@ -234,9 +236,13 @@ def main():
             print(envelope["summary"])
             print(f"Portfolio report saved to: {report_file}")
         except SimulationClientError as e:
-            print(f"Error: portfolio mode failed to reach the simulator: {str(e)}")
+            exc_type = type(e).__name__
+            print(f"\nFatal error: portfolio mode failed to reach the simulator: [{exc_type}] {str(e)}")
+            sys.exit(1)
         except Exception as e:
-            print(f"Error: portfolio mode failed: {str(e)}")
+            exc_type = type(e).__name__
+            print(f"\nFatal error: portfolio mode failed: [{exc_type}] {str(e)}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
