@@ -54,6 +54,10 @@ def create_llm_client(
         from .perplexity_client import PerplexityClient
         return PerplexityClient(model, base_url, **kwargs)
 
+    if provider_lower == "intel_xpu":
+        from .intel_xpu_client import IntelXPUClient
+        return IntelXPUClient(model, base_url, **kwargs)
+
     from .openai_client import OpenAIClient, is_openai_compatible
     if is_openai_compatible(provider_lower):
         return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)

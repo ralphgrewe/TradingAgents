@@ -82,3 +82,53 @@ def mock_llm_client():
         return_value=client,
     ):
         yield client
+
+
+@pytest.fixture()
+def mock_torch_xpu():
+    """Mock torch and transformers modules for Intel XPU client tests.
+
+    Sets up both available and unavailable XPU scenarios depending on the test.
+    """
+    import sys
+    import types
+
+    # Create mock modules
+    mock_torch = types.ModuleType("torch")
+    mock_xpu = types.ModuleType("xpu")
+    mock_xpu.is_available = lambda: True
+    mock_torch.xpu = mock_xpu
+    mock_torch.bfloat16 = None
+
+    class MockNoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    mock_torch.no_grad = lambda: MockNoGrad()
+
+    # Create mock transformers module
+    mock_transformers = types.ModuleType("transformers")
+
+    # Store original modules
+    original_torch = sys.modules.get("torch")
+    original_transformers = sys.modules.get("transformers")
+
+    try:
+        # Install mocks
+        sys.modules["torch"] = mock_torch
+        sys.modules["transformers"] = mock_transformers
+        yield mock_torch, mock_transformers
+    finally:
+        # Restore originals
+        if original_torch is not None:
+            sys.modules["torch"] = original_torch
+        elif "torch" in sys.modules:
+            del sys.modules["torch"]
+
+        if original_transformers is not None:
+            sys.modules["transformers"] = original_transformers
+        elif "transformers" in sys.modules:
+            del sys.modules["transformers"]

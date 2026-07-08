@@ -46,6 +46,14 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# Intel XPU support (local PyTorch/Transformers inference on Intel GPU).
+# Optional so the core install stays lean and avoids the heavy Intel XPU build:
+# pip install "tradingagents[xpu]". Requires Intel Arc GPU and Intel Extension for PyTorch.
+xpu = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.27.0",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
