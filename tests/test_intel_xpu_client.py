@@ -6,7 +6,11 @@ Tests cover:
   attempted (gates the load instead of warn-and-continue)
 - the real load path calls Mistral3ForConditionalGeneration.from_pretrained
   (not AutoModelForCausalLM)
-- model/tokenizer are cached on the instance, not module-level globals
+- model/tokenizer for a given model id are loaded once and shared across
+  IntelXPUClient instances via the process-wide _MODEL_CACHE (so the graph's
+  deep+quick clients and repeat MCP runs reuse one in-memory copy)
+- the shared cache is keyed by id (distinct ids stay isolated) and is
+  thread-safe (concurrent first requests load exactly once)
 - invoke() formats the FULL message list (system + human) via
   tokenizer.apply_chat_template(), not just the last message
 - generation kwargs (max_new_tokens, temperature, ...) are threaded through
@@ -14,16 +18,34 @@ Tests cover:
 - with_structured_output / bind_tools log and raise NotImplementedError
 - Factory routing
 
-No test monkeypatches module-level state: IntelXPUClient caches the loaded
-model/tokenizer on ``self``, so isolation between tests only requires
-monkeypatching ``IntelXPUClient._load_model_and_tokenizer`` (an instance
-method) per-test via pytest's ``monkeypatch``, which is undone automatically.
+Test isolation for the shared cache goes through a clean, named seam:
+``clear_model_cache()`` (autouse fixture below), not by reaching into module
+internals to patch cache state. Tests that don't want a real load still just
+monkeypatch ``IntelXPUClient._load_model_and_tokenizer`` (an instance method),
+which pytest undoes automatically.
 """
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from tradingagents.llm_clients.intel_xpu_client import _LOCKED_MODEL_ID, IntelXPUClient
+from tradingagents.llm_clients.intel_xpu_client import (
+    _LOCKED_MODEL_ID,
+    IntelXPUClient,
+    clear_model_cache,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_xpu_model_cache():
+    """Reset the process-wide model cache around every test.
+
+    The cache is process-lifetime by design, so without this a real (or mocked)
+    load cached under the locked id in one test would leak into the next. This
+    is the clean, named seam the design intends for isolation.
+    """
+    clear_model_cache()
+    yield
+    clear_model_cache()
 
 
 class _MockBatchEncoding(dict):
@@ -152,32 +174,112 @@ def test_uses_mistral3_for_conditional_generation(mock_torch_xpu):
 
 
 @pytest.mark.unit
-def test_model_and_tokenizer_cached_on_instance_not_module(monkeypatch):
-    """Each IntelXPUClient instance loads and caches its own model/tokenizer;
-    there is no shared module-level cache to invalidate between instances."""
-    import tradingagents.llm_clients.intel_xpu_client as xpu_mod
-
-    assert not hasattr(xpu_mod, "_MODEL_CACHE")
-    assert not hasattr(xpu_mod, "_TOKENIZER_CACHE")
-
+def test_same_model_id_shares_one_loaded_model(monkeypatch):
+    """Two IntelXPUClient instances for the same (locked) model id reuse one
+    in-memory model/tokenizer via the shared process cache — the expensive XPU
+    load runs once, not once per client. This is the deep+quick and repeat-MCP
+    reuse the fix restores (without the old unmanaged module-global cache)."""
     call_count = {"n": 0}
-    models = [_RecordingModel(), _RecordingModel()]
-    tokenizers = [_RecordingTokenizer(), _RecordingTokenizer()]
+    model = _RecordingModel()
+    tokenizer = _RecordingTokenizer()
 
     def _loader(self):
-        idx = call_count["n"]
         call_count["n"] += 1
-        return models[idx], tokenizers[idx]
+        return model, tokenizer
 
     monkeypatch.setattr(IntelXPUClient, "_load_model_and_tokenizer", _loader)
 
     client_a = IntelXPUClient(_LOCKED_MODEL_ID)
     client_b = IntelXPUClient(_LOCKED_MODEL_ID)
 
-    assert call_count["n"] == 2  # loaded once per instance, not cached/shared
-    assert client_a.model_obj is models[0]
-    assert client_b.model_obj is models[1]
-    assert client_a.model_obj is not client_b.model_obj
+    assert call_count["n"] == 1  # loaded once, shared across instances
+    assert client_a.model_obj is client_b.model_obj is model
+    assert client_a.tokenizer is client_b.tokenizer is tokenizer
+
+
+@pytest.mark.unit
+def test_clear_model_cache_forces_reload(monkeypatch):
+    """clear_model_cache() is a real, working seam: after it, the next client
+    re-loads instead of reusing the (now dropped) cached copy."""
+    call_count = {"n": 0}
+
+    def _loader(self):
+        call_count["n"] += 1
+        return _RecordingModel(), _RecordingTokenizer()
+
+    monkeypatch.setattr(IntelXPUClient, "_load_model_and_tokenizer", _loader)
+
+    IntelXPUClient(_LOCKED_MODEL_ID)
+    IntelXPUClient(_LOCKED_MODEL_ID)
+    assert call_count["n"] == 1  # second construction is a cache hit
+
+    clear_model_cache()
+    IntelXPUClient(_LOCKED_MODEL_ID)
+    assert call_count["n"] == 2  # cache cleared -> reloaded
+
+
+@pytest.mark.unit
+def test_model_cache_isolates_distinct_ids():
+    """The shared cache keys by model id: distinct ids load independently and
+    don't clobber one another. Exercised through the cache's public interface,
+    not by reaching into internals to patch state."""
+    from tradingagents.llm_clients.intel_xpu_client import _ModelCache
+
+    cache = _ModelCache()
+    calls = []
+
+    def make_loader(tag):
+        def _loader():
+            calls.append(tag)
+            return (f"model-{tag}", f"tok-{tag}")
+
+        return _loader
+
+    a1 = cache.get_or_load("id-a", make_loader("a"))
+    b1 = cache.get_or_load("id-b", make_loader("b"))
+    a2 = cache.get_or_load("id-a", make_loader("a-again"))
+
+    assert a1 == ("model-a", "tok-a")
+    assert b1 == ("model-b", "tok-b")
+    assert a2 is a1  # second request for id-a reuses; loader not re-run
+    assert calls == ["a", "b"]  # exactly one load per distinct id
+
+
+@pytest.mark.unit
+def test_model_cache_loads_once_under_concurrency():
+    """Concurrent first requests for the same id load exactly once (double-
+    checked locking), never duplicating an expensive XPU load across threads —
+    grounds the thread-safety claim, since the MCP server dispatches
+    analyze_stock in worker threads."""
+    import threading
+    import time
+
+    from tradingagents.llm_clients.intel_xpu_client import _ModelCache
+
+    cache = _ModelCache()
+    load_count = {"n": 0}
+    barrier = threading.Barrier(8)
+    sentinel = object()
+
+    def _loader():
+        time.sleep(0.01)  # widen the window for a racing thread
+        load_count["n"] += 1
+        return (sentinel, sentinel)
+
+    results = []
+
+    def worker():
+        barrier.wait()  # release all threads into get_or_load together
+        results.append(cache.get_or_load("shared-id", _loader))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert load_count["n"] == 1  # loaded once despite 8 concurrent requests
+    assert all(r is results[0] for r in results)
 
 
 @pytest.mark.unit

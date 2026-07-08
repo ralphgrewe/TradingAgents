@@ -11,8 +11,9 @@ degrading.
 """
 
 import logging
+import threading
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, convert_to_openai_messages
@@ -25,6 +26,84 @@ logger = logging.getLogger(__name__)
 
 # Locked model ID for v1: no changes without explicit decision.
 _LOCKED_MODEL_ID = "mistralai/Ministral-3-3B-Reasoning-2512"
+
+
+class _ModelCache:
+    """Thread-safe, process-lifetime cache of loaded (model, tokenizer) pairs.
+
+    Keyed by model id. Loading a model onto XPU is expensive (a full from-disk
+    read plus VRAM residency), and both of ``TradingAgentsGraph``'s clients
+    (deep + quick thinking) plus every repeat ``analyze_stock`` call in the
+    long-lived MCP server request the *same* locked model id. Without sharing,
+    each of those would re-load the identical weights and double VRAM for no
+    benefit — so the first request for a given id loads it and every later
+    request for that id reuses the same in-memory objects.
+
+    Lifecycle (explicit, deliberate decision — not silent):
+      * Entries are loaded lazily on first request and kept for the entire
+        process lifetime. There is intentionally NO automatic eviction or
+        invalidation in v1: the model id is locked to a single value and the
+        weights never change under us, so there is nothing to invalidate.
+      * ``clear()`` exists as an explicit, named seam for test isolation and
+        deliberate teardown. It drops Python references from the cache but does
+        NOT by itself free XPU memory — that additionally requires every
+        ``IntelXPUChatModel`` holding the model to be released and
+        ``torch.xpu.empty_cache()`` to run, which is out of scope for v1.
+
+    Thread-safety: ``TradingAgentsGraph`` builds its two clients sequentially,
+    but the MCP server dispatches the synchronous ``analyze_stock`` tool in
+    worker threads, so two ``analyze_stock`` calls can construct clients
+    concurrently. ``get_or_load`` therefore uses double-checked locking so a
+    given id is loaded at most once even under concurrent first requests.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[Any, Any]] = {}
+
+    def get_or_load(
+        self, model_id: str, loader: Callable[[], tuple[Any, Any]]
+    ) -> tuple[Any, Any]:
+        """Return the cached (model, tokenizer) for ``model_id``, loading once.
+
+        ``loader`` is invoked at most once per distinct ``model_id`` for the
+        life of the process, even if multiple threads request the same id
+        simultaneously.
+        """
+        # Fast path: already loaded (dict reads are atomic under the GIL).
+        entry = self._entries.get(model_id)
+        if entry is not None:
+            return entry
+        with self._lock:
+            # Re-check under the lock: another thread may have loaded it while
+            # we waited to acquire.
+            entry = self._entries.get(model_id)
+            if entry is None:
+                entry = loader()
+                self._entries[model_id] = entry
+            return entry
+
+    def clear(self) -> None:
+        """Drop all cached entries (test isolation / explicit teardown seam)."""
+        with self._lock:
+            self._entries.clear()
+
+    def __contains__(self, model_id: str) -> bool:
+        return model_id in self._entries
+
+
+# Process-wide shared cache so IntelXPUClient instances requesting the same
+# model id reuse one in-memory model/tokenizer. Use clear_model_cache() to reset.
+_MODEL_CACHE = _ModelCache()
+
+
+def clear_model_cache() -> None:
+    """Reset the shared Intel XPU model/tokenizer cache.
+
+    Named seam for test isolation and deliberate teardown. See ``_ModelCache``
+    for why this does not, on its own, free XPU memory.
+    """
+    _MODEL_CACHE.clear()
 
 # Sensible defaults applied only when not overridden by IntelXPUClient kwargs
 # or per-call kwargs.
@@ -160,8 +239,15 @@ class IntelXPUClient(BaseLLMClient):
     so a mismatch raises immediately instead of silently loading the locked
     model under a different name.
 
-    The loaded model/tokenizer are cached on the instance (not module-level
-    globals) — one client owns, and can independently release, its own model.
+    The loaded model/tokenizer are held in a process-wide, model-id-keyed shared
+    cache (``_MODEL_CACHE``), NOT on the instance: multiple ``IntelXPUClient``
+    instances requesting the same model id (e.g. ``TradingAgentsGraph``'s deep +
+    quick clients, and repeat ``analyze_stock`` calls in the long-lived MCP
+    server) reuse one in-memory copy instead of each re-loading identical weights
+    onto XPU. The cache is process-lifetime with no per-instance release path (an
+    XPU model is a shared resource, not owned by one client); see ``_ModelCache``
+    for the full lifecycle rationale and ``clear_model_cache()`` for the test/
+    teardown seam.
 
     Structured output and tool-calling are explicitly unsupported (raise
     NotImplementedError) to prevent silent degradation in callers that rely on
@@ -178,12 +264,21 @@ class IntelXPUClient(BaseLLMClient):
                 f"'{_LOCKED_MODEL_ID}' (v1 scope is intentionally narrow, see #41); "
                 f"got '{model}'. Pass '{_LOCKED_MODEL_ID}' as the model."
             )
-        # Load at construction time so errors surface early (not deferred to
-        # the first invoke call), and cache on this instance only.
-        self.model_obj, self.tokenizer = self._load_model_and_tokenizer()
+        # Load at construction time so errors surface early (not deferred to the
+        # first invoke call). The shared cache dedups by model id: the actual
+        # disk/XPU load runs at most once per id per process, and every client
+        # for that id — across TradingAgentsGraph's deep+quick clients and repeat
+        # MCP runs — reuses the same in-memory model/tokenizer.
+        self.model_obj, self.tokenizer = _MODEL_CACHE.get_or_load(
+            self.model.lower(), self._load_model_and_tokenizer
+        )
 
     def _load_model_and_tokenizer(self) -> tuple[Any, Any]:
-        """Load the Mistral model and tokenizer on XPU with the verified parameters.
+        """Perform the actual disk/XPU load of the Mistral model and tokenizer.
+
+        Called at most once per model id per process via ``_MODEL_CACHE`` — do
+        not call directly if you want the shared/deduplicated copy. Uses the
+        verified loading parameters from the reference scripts.
 
         Raises:
             ImportError: If torch or transformers are not installed.
