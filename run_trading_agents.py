@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Script to run Trading Agents with Ollama provider for a list of stocks from JSON file.
+Script to run Trading Agents for a list of stocks from JSON file.
 
 Usage:
     python run_trading_agents.py stocks.json [--report-dir REPORT_DIR] [--show-summary]
     python run_trading_agents.py stocks.json --portfolio --style aggressive --depot-id my-depot
+    python run_trading_agents.py stocks.json --llm-provider mistral --deep-think-llm mistral-large --quick-think-llm mistral-small
 
 Expected JSON format:
     [
@@ -13,13 +14,25 @@ Expected JSON format:
     ]
 
 Optional arguments:
+    --llm-provider PROVIDER  LLM provider to use (default: ollama). Supported providers:
+                            openai, anthropic, google, mistral, ollama, etc.
+    --deep-think-llm MODEL  Model name for deep thinking tasks (required if --llm-provider is not ollama).
+    --quick-think-llm MODEL Model name for quick thinking tasks (required if --llm-provider is not ollama).
     --report-dir REPORT_DIR  Directory to save analysis reports (default: ./reports)
     --show-summary           Display formatted analysis summary for each stock
     --portfolio               Opt-in portfolio mode (see below). Requires --style and --depot-id.
     --style {aggressive,conservative}  Portfolio style-table to use.
     --depot-id DEPOT_ID       Named simulated depot to get-or-create and rebalance.
 
-The script now produces the same quality output as the CLI application:
+LLM Provider Configuration:
+- Default behavior (no --llm-provider flag): uses ollama with ministral-3:8b (deep) and
+  ministral-3:3b (quick) — byte-for-byte unchanged from before.
+- When --llm-provider is not ollama: both --deep-think-llm and --quick-think-llm are required.
+- API key requirements: before processing any tickers, the script checks that the required
+  API key environment variable for the provider is set (e.g., MISTRAL_API_KEY for mistral).
+  If missing, the script exits immediately with a clear error.
+
+The script produces the same quality output as the CLI application:
 - Uses explicit analyst selection (market, social, news, fundamentals)
 - Configures proper research depth settings
 - Generates comprehensive reports with --report-dir
@@ -38,11 +51,13 @@ rebalancing trades are executed against the simulator (tradingagents.simulation
 import argparse
 import datetime
 import json
+import os
 import sys
 from pathlib import Path
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.portfolio.runner import extract_rating, run_portfolio_mode
 from tradingagents.report_generator import save_report_to_disk
 from tradingagents.reporting import format_report_preview
@@ -96,6 +111,12 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file')
     parser.add_argument('json_file', help='Path to JSON file containing stock list')
+    parser.add_argument('--llm-provider', dest='llm_provider', default='ollama',
+                        help='LLM provider to use (default: ollama). Examples: openai, anthropic, mistral, google, etc.')
+    parser.add_argument('--deep-think-llm', dest='deep_think_llm',
+                        help='Model name for deep thinking tasks (required unless --llm-provider is ollama).')
+    parser.add_argument('--quick-think-llm', dest='quick_think_llm',
+                        help='Model name for quick thinking tasks (required unless --llm-provider is ollama).')
     parser.add_argument('--report-dir', help='Directory to save analysis reports', default='./reports')
     parser.add_argument('--show-summary', action='store_true', help='Display formatted analysis summary')
     parser.add_argument('--portfolio', action='store_true',
@@ -108,8 +129,19 @@ def main():
                                             '(required with --portfolio).')
     args = parser.parse_args()
 
+    # Validate provider and model requirements
+    if args.llm_provider.lower() != 'ollama':
+        if not args.deep_think_llm or not args.quick_think_llm:
+            parser.error(f"--llm-provider {args.llm_provider} requires both --deep-think-llm and --quick-think-llm")
+
     if args.portfolio and (not args.style or not args.depot_id):
         print("Error: --portfolio requires both --style and --depot-id")
+        sys.exit(1)
+
+    # Check API key environment variable for the provider before processing tickers
+    api_key_env = get_api_key_env(args.llm_provider)
+    if api_key_env is not None and api_key_env not in os.environ:
+        print(f"Error: LLM provider '{args.llm_provider}' requires environment variable '{api_key_env}' to be set")
         sys.exit(1)
 
     # Read stock list from JSON file
@@ -133,13 +165,21 @@ def main():
             print("Error: Each stock should have 'ticker' and 'date' fields")
             sys.exit(1)
 
-    # Configure Trading Agents with Ollama provider (similar to CLI defaults)
+    # Configure Trading Agents with the specified LLM provider
     config = DEFAULT_CONFIG.copy()
-    # Ensure we're using Ollama provider
-    config["llm_provider"] = "ollama"
-    # Use ministral-3:3b model (already default for quick_think_llm)
-    config["quick_think_llm"] = "ministral-3:3b"
-    config["deep_think_llm"] = "ministral-3:8b"
+    config["llm_provider"] = args.llm_provider
+
+    # Set model names: use CLI flags if provided, otherwise use defaults for ollama
+    if args.deep_think_llm:
+        config["deep_think_llm"] = args.deep_think_llm
+    else:
+        config["deep_think_llm"] = "ministral-3:8b"
+
+    if args.quick_think_llm:
+        config["quick_think_llm"] = args.quick_think_llm
+    else:
+        config["quick_think_llm"] = "ministral-3:3b"
+
     # Use same research depth as CLI default, Medium research depth
     config["max_debate_rounds"] = 3
     config["max_risk_discuss_rounds"] = 3

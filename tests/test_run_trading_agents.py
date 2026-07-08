@@ -1,10 +1,11 @@
-"""Tests for run_trading_agents.py error handling and fail-fast behavior.
+"""Tests for run_trading_agents.py error handling, fail-fast behavior, and LLM provider configuration.
 
 These are integration-level tests that verify the error handling by running
 the script with mocked dependencies and checking the exit behavior.
 """
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -186,3 +187,190 @@ class RunTradingAgentsErrorHandlingTests(unittest.TestCase):
 
                 # Verify propagate was called for both tickers (not stopped on report error)
                 self.assertEqual(mock_instance.propagate.call_count, 2)
+
+
+@pytest.mark.unit
+class RunTradingAgentsLLMProviderTests(unittest.TestCase):
+    """Test LLM provider configuration via CLI flags."""
+
+    def setUp(self):
+        """Create temporary JSON file with test stocks."""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.stock_list_file = Path(self.temp_dir.name) / "test_stocks.json"
+        self.stock_list_file.write_text(json.dumps([
+            {"ticker": "AAPL", "date": "2024-01-15"},
+        ]))
+
+    def tearDown(self):
+        """Clean up temporary files."""
+        self.temp_dir.cleanup()
+
+    def test_default_provider_is_ollama_unchanged(self):
+        """Test that default behavior (no flags) uses ollama with default models."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
+                run_trading_agents.main()
+
+                # Verify TradingAgentsGraph was called with ollama provider
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "ollama")
+                self.assertEqual(config["deep_think_llm"], "ministral-3:8b")
+                self.assertEqual(config["quick_think_llm"], "ministral-3:3b")
+
+    def test_mistral_provider_with_models_and_api_key(self):
+        """Test that --llm-provider mistral with models and MISTRAL_API_KEY set works."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
+             patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--llm-provider', 'mistral',
+                                   '--deep-think-llm', 'mistral-large',
+                                   '--quick-think-llm', 'mistral-small']):
+                run_trading_agents.main()
+
+                # Verify TradingAgentsGraph was called with mistral provider and specified models
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "mistral")
+                self.assertEqual(config["deep_think_llm"], "mistral-large")
+                self.assertEqual(config["quick_think_llm"], "mistral-small")
+
+    def test_non_ollama_provider_missing_deep_think_model_fails(self):
+        """Test that non-ollama provider without --deep-think-llm fails with argparse error."""
+        import run_trading_agents
+        import io
+        from contextlib import redirect_stderr
+
+        with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--llm-provider', 'mistral',
+                                   '--quick-think-llm', 'mistral-small']):
+                output = io.StringIO()
+                with redirect_stderr(output):
+                    with self.assertRaises(SystemExit) as cm:
+                        run_trading_agents.main()
+
+                # argparse.error() calls sys.exit(2)
+                self.assertEqual(cm.exception.code, 2)
+                error_output = output.getvalue()
+                self.assertIn('--deep-think-llm', error_output)
+
+    def test_non_ollama_provider_missing_quick_think_model_fails(self):
+        """Test that non-ollama provider without --quick-think-llm fails with argparse error."""
+        import run_trading_agents
+        import io
+        from contextlib import redirect_stderr
+
+        with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--llm-provider', 'mistral',
+                                   '--deep-think-llm', 'mistral-large']):
+                output = io.StringIO()
+                with redirect_stderr(output):
+                    with self.assertRaises(SystemExit) as cm:
+                        run_trading_agents.main()
+
+                # argparse.error() calls sys.exit(2)
+                self.assertEqual(cm.exception.code, 2)
+                error_output = output.getvalue()
+                self.assertIn('--quick-think-llm', error_output)
+
+    def test_missing_api_key_for_mistral_exits_before_processing(self):
+        """Test that missing MISTRAL_API_KEY exits with code 1 before processing tickers."""
+        import run_trading_agents
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # Remove MISTRAL_API_KEY from environment if it exists
+        env_copy = os.environ.copy()
+        env_copy.pop('MISTRAL_API_KEY', None)
+
+        with patch.dict(os.environ, env_copy, clear=True):
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--llm-provider', 'mistral',
+                                   '--deep-think-llm', 'mistral-large',
+                                   '--quick-think-llm', 'mistral-small']):
+                output = io.StringIO()
+                with redirect_stdout(output), redirect_stderr(output):
+                    with self.assertRaises(SystemExit) as cm:
+                        run_trading_agents.main()
+
+                # Should exit with code 1
+                self.assertEqual(cm.exception.code, 1)
+
+                # Verify error message names the provider and the env var
+                output_str = output.getvalue()
+                self.assertIn('Error', output_str)
+                self.assertIn('mistral', output_str)
+                self.assertIn('MISTRAL_API_KEY', output_str)
+
+    def test_ollama_provider_does_not_require_api_key(self):
+        """Test that ollama provider (which requires no API key) works without MISTRAL_API_KEY."""
+        import run_trading_agents
+
+        # Ensure MISTRAL_API_KEY is NOT in environment
+        env_copy = os.environ.copy()
+        env_copy.pop('MISTRAL_API_KEY', None)
+
+        with patch.dict(os.environ, env_copy, clear=True), \
+             patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
+                # Should not raise SystemExit for missing API key
+                run_trading_agents.main()
+
+                # Verify propagate was called (i.e., we got past the API key check)
+                self.assertEqual(mock_instance.propagate.call_count, 1)
+
+    def test_openai_provider_with_models_and_api_key(self):
+        """Test that --llm-provider openai with models and OPENAI_API_KEY set works."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
+             patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}):
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--llm-provider', 'openai',
+                                   '--deep-think-llm', 'gpt-4-turbo',
+                                   '--quick-think-llm', 'gpt-4o']):
+                run_trading_agents.main()
+
+                # Verify TradingAgentsGraph was called with openai provider and specified models
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "openai")
+                self.assertEqual(config["deep_think_llm"], "gpt-4-turbo")
+                self.assertEqual(config["quick_think_llm"], "gpt-4o")
