@@ -15,22 +15,32 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-@pytest.mark.unit
-class RunTradingAgentsErrorHandlingTests(unittest.TestCase):
-    """Test fail-fast error handling in run_trading_agents.py."""
+class _TempStockFileTestCase(unittest.TestCase):
+    """Shared fixture: a temp dir with a JSON stock-list file for run_trading_agents.py.
+
+    Subclasses may override STOCKS to control the file's contents; the temp
+    dir and file are created in setUp and cleaned up in tearDown either way.
+    """
+
+    STOCKS = [
+        {"ticker": "AAPL", "date": "2024-01-15"},
+        {"ticker": "MSFT", "date": "2024-01-15"},
+    ]
 
     def setUp(self):
         """Create temporary JSON file with test stocks."""
         self.temp_dir = tempfile.TemporaryDirectory()
         self.stock_list_file = Path(self.temp_dir.name) / "test_stocks.json"
-        self.stock_list_file.write_text(json.dumps([
-            {"ticker": "AAPL", "date": "2024-01-15"},
-            {"ticker": "MSFT", "date": "2024-01-15"},
-        ]))
+        self.stock_list_file.write_text(json.dumps(self.STOCKS))
 
     def tearDown(self):
         """Clean up temporary files."""
         self.temp_dir.cleanup()
+
+
+@pytest.mark.unit
+class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
+    """Test fail-fast error handling in run_trading_agents.py."""
 
     def test_propagate_failure_prints_exception_type_and_message(self):
         """Test that exception diagnostics include both type and message.
@@ -190,20 +200,10 @@ class RunTradingAgentsErrorHandlingTests(unittest.TestCase):
 
 
 @pytest.mark.unit
-class RunTradingAgentsLLMProviderTests(unittest.TestCase):
+class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
     """Test LLM provider configuration via CLI flags."""
 
-    def setUp(self):
-        """Create temporary JSON file with test stocks."""
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.stock_list_file = Path(self.temp_dir.name) / "test_stocks.json"
-        self.stock_list_file.write_text(json.dumps([
-            {"ticker": "AAPL", "date": "2024-01-15"},
-        ]))
-
-    def tearDown(self):
-        """Clean up temporary files."""
-        self.temp_dir.cleanup()
+    STOCKS = [{"ticker": "AAPL", "date": "2024-01-15"}]
 
     def test_default_provider_is_ollama_unchanged(self):
         """Test that default behavior (no flags) uses ollama with default models."""

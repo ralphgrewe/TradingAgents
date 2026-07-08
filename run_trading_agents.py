@@ -169,16 +169,15 @@ def main():
     config = DEFAULT_CONFIG.copy()
     config["llm_provider"] = args.llm_provider
 
-    # Set model names: use CLI flags if provided, otherwise use defaults for ollama
+    # Set model names: only override the DEFAULT_CONFIG.copy() values when the
+    # corresponding CLI flag was actually provided, so the ollama defaults stay
+    # sourced from DEFAULT_CONFIG (single source of truth) instead of being
+    # duplicated here.
     if args.deep_think_llm:
         config["deep_think_llm"] = args.deep_think_llm
-    else:
-        config["deep_think_llm"] = "ministral-3:8b"
 
     if args.quick_think_llm:
         config["quick_think_llm"] = args.quick_think_llm
-    else:
-        config["quick_think_llm"] = "ministral-3:3b"
 
     # Use same research depth as CLI default, Medium research depth
     config["max_debate_rounds"] = 3
