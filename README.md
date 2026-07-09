@@ -160,6 +160,30 @@ For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise
 
 For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
 
+#### Intel XPU (Local GPU Inference)
+
+To use Intel Arc GPUs for local inference, install the Intel XPU support:
+```bash
+pip install "tradingagents[xpu]"
+```
+
+**Hardware prerequisites:**
+- Intel Core Ultra processor with integrated Arc GPU, or a discrete Intel Arc GPU (e.g., Arc A770, A750)
+- Intel Extension for PyTorch installed
+- Updated GPU drivers
+
+**Using with the CLI:**
+Select "Intel XPU" from the provider list when launching `tradingagents`. The model is locked to Mistral-3-3B-Reasoning for v1.
+
+**Limitations:**
+- The News Analyst is **not usable** with this provider in v1 — it requires tool-calling, which Intel XPU does not support. The pipeline will fail if you select it. Use Market, Sentiment, or Fundamentals analysts instead.
+- Structured output is not supported; agents fall back to free-text generation.
+
+To manually verify your setup works, run the smoke test on your hardware:
+```bash
+python scripts/smoke_xpu_client.py
+```
+
 Alternatively, copy `.env.example` to `.env` and fill in your keys:
 ```bash
 cp .env.example .env
@@ -192,7 +216,7 @@ An interface will appear showing results as they load, letting you track the age
 
 ### Implementation Details
 
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, DeepSeek, Qwen (Alibaba DashScope, international and China endpoints), GLM (Zhipu), MiniMax (global + China), OpenRouter, Ollama for local models, and Azure OpenAI for enterprise.
+We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, DeepSeek, Qwen (Alibaba DashScope, international and China endpoints), GLM (Zhipu), MiniMax (global + China), OpenRouter, Ollama for local models, Intel XPU for local GPU inference, and Azure OpenAI for enterprise.
 
 ### Python Usage
 
@@ -216,7 +240,7 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, google, anthropic, xai, deepseek, qwen, qwen-cn, glm, glm-cn, minimax, minimax-cn, openrouter, ollama, azure
+config["llm_provider"] = "openai"        # openai, google, anthropic, xai, deepseek, qwen, qwen-cn, glm, glm-cn, minimax, minimax-cn, openrouter, ollama, intel_xpu, azure
 config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
 config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
 config["max_debate_rounds"] = 2
