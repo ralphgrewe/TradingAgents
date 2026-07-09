@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ from typing import Any
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+logger = logging.getLogger(__name__)
 
 
 class SimulationClientError(Exception):
@@ -153,7 +156,16 @@ class SimulationClient:
         return session
 
     def close(self) -> None:
-        """Close the connection to the MCP server."""
+        """Close the connection to the MCP server.
+
+        Never raises: unwinding the session/subprocess can fail for reasons
+        outside our control (e.g. the subprocess already died, or an
+        ``__aexit__`` throws), but ``close()`` must always leave the client in a
+        clean, disconnected state — the loop closed and every reference cleared —
+        so the acceptance criterion "``close()`` cleanly shuts down the session
+        and subprocess without raising" holds regardless. Any error from the
+        unwind is logged as a warning rather than propagated.
+        """
         if self._session is None:
             return
 
@@ -166,9 +178,20 @@ class SimulationClient:
         try:
             if exit_stack is not None and loop is not None:
                 loop.run_until_complete(exit_stack.aclose())
+        except Exception as exc:  # noqa: BLE001 - close() must never raise
+            logger.warning(
+                "Error while closing SimulationClient session: %s", exc, exc_info=True
+            )
         finally:
             if loop is not None:
-                loop.close()
+                try:
+                    loop.close()
+                except Exception as exc:  # noqa: BLE001 - close() must never raise
+                    logger.warning(
+                        "Error while closing SimulationClient event loop: %s",
+                        exc,
+                        exc_info=True,
+                    )
 
     def _call_tool_sync(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call a tool synchronously by running async code.
@@ -186,13 +209,23 @@ class SimulationClient:
         """
         if self._session is None:
             raise SimulationConnectionError("Not connected to simulation server")
+        # connect()/close() always set and clear _session and _loop together, so
+        # a live session without a loop is an internal invariant violation. Fail
+        # loudly instead of silently falling back to asyncio.run(), which would
+        # reintroduce the per-call-new-loop bug (the session's streams are bound
+        # to the loop that created them and cannot be driven from a fresh one).
+        if self._loop is None:
+            raise SimulationConnectionError(
+                "Inconsistent client state: session is set but event loop is missing"
+            )
 
         try:
             # Reuse the event loop the session was created on (see connect()) —
             # the session's streams are bound to it and cannot be driven from a
             # different loop.
-            run = self._loop.run_until_complete if self._loop is not None else asyncio.run
-            result = run(self._session.call_tool(tool_name, arguments or {}))
+            result = self._loop.run_until_complete(
+                self._session.call_tool(tool_name, arguments or {})
+            )
 
             # Check if result has content (success)
             if result.content:

@@ -136,6 +136,84 @@ class TestSimulationClientConnection:
             assert client._session is None
             assert client._loop is None
 
+    def test_close_unwinds_real_exit_stack(self):
+        """close() must actually drive the AsyncExitStack unwind end-to-end —
+        i.e. the entered stdio/session context managers' __aexit__ run — not just
+        close a loop. (test_context_manager_connect_disconnect mocks
+        _async_connect wholesale, so _exit_stack stays None there and this path
+        is never exercised.)"""
+        exited = []
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(server_params):
+            try:
+                yield (object(), object())
+            finally:
+                exited.append("stdio")
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+
+        with patch(
+            "tradingagents.simulation._get_server_config",
+            return_value=("/path/to/python", ["/path/to/mcp_server.py"]),
+        ), patch(
+            "tradingagents.simulation.stdio_client", side_effect=fake_stdio_client
+        ), patch("tradingagents.simulation.ClientSession", return_value=fake_session):
+            client = SimulationClient()
+            client.connect()
+            assert client._exit_stack is not None
+            loop = client._loop
+
+            client.close()  # must not raise
+
+            # The exit stack actually unwound: session and stdio __aexit__ ran.
+            fake_session.__aexit__.assert_awaited_once()
+            assert exited == ["stdio"]
+            # Internal state cleared and loop closed.
+            assert client._session is None
+            assert client._exit_stack is None
+            assert client._loop is None
+            assert loop.is_closed()
+
+    def test_close_does_not_raise_when_unwind_fails(self):
+        """Regression test for issue #46: if the exit stack raises while
+        unwinding (e.g. a context manager's __aexit__ throws, or the subprocess
+        already died), close() must still not raise and must still leave the
+        client cleanly disconnected with the loop closed."""
+        exited = []
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(server_params):
+            try:
+                yield (object(), object())
+            finally:
+                exited.append("stdio")
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.side_effect = RuntimeError("aexit boom")
+
+        with patch(
+            "tradingagents.simulation._get_server_config",
+            return_value=("/path/to/python", ["/path/to/mcp_server.py"]),
+        ), patch(
+            "tradingagents.simulation.stdio_client", side_effect=fake_stdio_client
+        ), patch("tradingagents.simulation.ClientSession", return_value=fake_session):
+            client = SimulationClient()
+            client.connect()
+            loop = client._loop
+
+            # Must swallow the __aexit__ error rather than propagate it.
+            client.close()
+
+            fake_session.__aexit__.assert_awaited_once()
+            assert client._session is None
+            assert client._exit_stack is None
+            assert client._loop is None
+            assert loop.is_closed()
+
     def test_connection_error_propagates(self):
         """Connection errors are converted to SimulationConnectionError."""
         with patch("tradingagents.simulation._get_server_config") as mock_config:
@@ -175,6 +253,17 @@ class TestSimulationClientToolCalls:
     def test_call_tool_sync_not_connected(self):
         """Calling a tool when not connected raises error."""
         client = SimulationClient()
+        with pytest.raises(SimulationConnectionError):
+            client._call_tool_sync("list_depots")
+
+    def test_call_tool_sync_raises_when_loop_missing(self, mock_client_session):
+        """A live session without an event loop is an invariant violation
+        (connect/close always set/clear both together). _call_tool_sync must fail
+        loudly rather than silently fall back to asyncio.run() and reintroduce
+        the per-call-new-loop bug."""
+        client = SimulationClient()
+        client._session = mock_client_session
+        client._loop = None
         with pytest.raises(SimulationConnectionError):
             client._call_tool_sync("list_depots")
 
