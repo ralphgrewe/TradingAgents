@@ -4,6 +4,7 @@ import warnings
 import pytest
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.base_client import BaseLLMClient
 from tradingagents.llm_clients.model_catalog import get_known_models, get_model_options
 from tradingagents.llm_clients.validators import _ANY_MODEL_PROVIDERS, validate_model
@@ -127,3 +128,28 @@ class ModelCatalogUpstreamSyncTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 values = {v for _, v in get_model_options("ollama", mode)}
                 self.assertIn(DEFAULT_CONFIG[config_key], values)
+
+    def test_intel_xpu_appears_in_catalog_with_locked_model(self):
+        """Intel XPU provider is registered in model catalog with the locked model ID."""
+        from tradingagents.llm_clients.intel_xpu_client import _LOCKED_MODEL_ID
+
+        for mode in ("quick", "deep"):
+            with self.subTest(mode=mode):
+                options = get_model_options("intel_xpu", mode)
+                values = {v for _, v in options}
+                self.assertIn(_LOCKED_MODEL_ID, values)
+
+    def test_intel_xpu_api_key_env_is_none(self):
+        """Intel XPU provider is registered with None (no API key required)."""
+        self.assertIsNone(get_api_key_env("intel_xpu"))
+
+    def test_intel_xpu_appears_in_cli_provider_list(self):
+        """Intel XPU provider appears in the CLI provider selection list."""
+        # We can't easily call select_llm_provider interactively in tests,
+        # so we check the PROVIDERS list directly by reading the function.
+        import inspect
+
+        from cli.utils import select_llm_provider
+        source = inspect.getsource(select_llm_provider)
+        self.assertIn("intel_xpu", source)
+        self.assertIn("Intel XPU", source)

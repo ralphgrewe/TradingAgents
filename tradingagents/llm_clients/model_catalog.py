@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tradingagents.llm_clients.intel_xpu_client import _LOCKED_MODEL_ID as INTEL_XPU_LOCKED_MODEL_ID
+
 ModelOption = tuple[str, str]
 ProviderModeOptions = dict[str, dict[str, list[ModelOption]]]
 
@@ -192,6 +194,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Qwen3:latest (8B)", "qwen3:latest"),
             ("ministral-3:8b", "ministral-3:8b"),
             ("Custom model ID", "custom"),
+        ],
+    },
+    "intel_xpu": {
+        "quick": [
+            (f"Mistral-3-3B-Reasoning (Intel XPU local) - {INTEL_XPU_LOCKED_MODEL_ID}", INTEL_XPU_LOCKED_MODEL_ID),
+        ],
+        "deep": [
+            (f"Mistral-3-3B-Reasoning (Intel XPU local) - {INTEL_XPU_LOCKED_MODEL_ID}", INTEL_XPU_LOCKED_MODEL_ID),
         ],
     },
     "perplexity": {
