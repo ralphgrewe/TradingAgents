@@ -4,11 +4,13 @@ Tests run with mocked MCP sessions — no connection to real simulator.
 """
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.client.stdio import StdioServerParameters
 
 from tradingagents.simulation import (
     SimulationClient,
@@ -44,22 +46,95 @@ class TestSimulationClientConnection:
         assert client._session is None
 
     def test_context_manager_connect_disconnect(self, mock_client_session):
-        """Context manager properly connects and disconnects."""
+        """Context manager connects, keeps a persistent loop alive, and tears it
+        down cleanly on exit (the loop/session lifecycle this issue fixes)."""
         with patch(
             "tradingagents.simulation._get_server_config"
-        ) as mock_config, patch(
-            "tradingagents.simulation.stdio_client"
-        ) as mock_stdio, patch.object(
+        ) as mock_config, patch.object(
             SimulationClient, "_async_connect", new_callable=AsyncMock
         ) as mock_async_connect:
             mock_config.return_value = ("/path/to/python", ["/path/to/mcp_server.py"])
             mock_async_connect.return_value = mock_client_session
-            mock_client_session.close = AsyncMock()
 
             with SimulationClient() as client:
-                assert client._session is not None
-            # After exiting, session should be closed
-            mock_client_session.close.assert_called_once()
+                assert client._session is mock_client_session
+                assert client._loop is not None
+                assert not client._loop.is_closed()
+                loop = client._loop
+
+            # After exiting, session/exit-stack/loop are all cleared and the loop
+            # itself is closed (not leaked, not reused across connections).
+            assert client._session is None
+            assert client._loop is None
+            assert client._exit_stack is None
+            assert loop.is_closed()
+
+    def test_async_connect_uses_real_stdio_and_session_wiring(self):
+        """_async_connect must call ClientSession(read_stream, write_stream) — the
+        exact bug from issue #46 (`ClientSession(transport)` with a single
+        positional arg) — and enter both context managers via the exit stack."""
+        read_stream, write_stream = object(), object()
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(server_params):
+            yield (read_stream, write_stream)
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+
+        with patch(
+            "tradingagents.simulation.stdio_client", side_effect=fake_stdio_client
+        ), patch(
+            "tradingagents.simulation.ClientSession", return_value=fake_session
+        ) as mock_session_cls:
+            client = SimulationClient()
+            loop = asyncio.new_event_loop()
+            try:
+                session = loop.run_until_complete(
+                    client._async_connect(
+                        StdioServerParameters(command="python", args=["server.py"])
+                    )
+                )
+            finally:
+                loop.close()
+
+            mock_session_cls.assert_called_once_with(read_stream, write_stream)
+            assert session is fake_session
+            fake_session.initialize.assert_awaited_once()
+            assert client._exit_stack is not None
+
+    def test_connect_unwinds_partial_state_on_initialize_failure(self):
+        """If session.initialize() fails, whatever was already entered (the stdio
+        transport) must be unwound — no leaked subprocess/session."""
+        exited = []
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(server_params):
+            try:
+                yield (object(), object())
+            finally:
+                exited.append("stdio")
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+        fake_session.initialize.side_effect = RuntimeError("boom")
+
+        with patch(
+            "tradingagents.simulation._get_server_config",
+            return_value=("/path/to/python", ["/path/to/mcp_server.py"]),
+        ), patch(
+            "tradingagents.simulation.stdio_client", side_effect=fake_stdio_client
+        ), patch("tradingagents.simulation.ClientSession", return_value=fake_session):
+            client = SimulationClient()
+            with pytest.raises(SimulationConnectionError):
+                client.connect()
+
+            assert exited == ["stdio"]
+            fake_session.__aexit__.assert_awaited_once()
+            assert client._session is None
+            assert client._loop is None
 
     def test_connection_error_propagates(self):
         """Connection errors are converted to SimulationConnectionError."""
@@ -93,7 +168,9 @@ class TestSimulationClientToolCalls:
         """Create a connected client for testing."""
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_call_tool_sync_not_connected(self):
         """Calling a tool when not connected raises error."""
@@ -145,7 +222,9 @@ class TestListDepots:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_list_depots_success(self, connected_client, mock_call_tool_result):
         """list_depots returns list of depot dicts."""
@@ -187,7 +266,9 @@ class TestCreateDepot:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_create_depot_success(self, connected_client, mock_call_tool_result):
         """create_depot returns creation result dict."""
@@ -250,7 +331,9 @@ class TestGetPortfolio:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_get_portfolio_success(self, connected_client, mock_call_tool_result):
         """get_portfolio returns portfolio dict."""
@@ -298,7 +381,9 @@ class TestGetQuote:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_get_quote_success(self, connected_client, mock_call_tool_result):
         """get_quote returns quote dict."""
@@ -343,7 +428,9 @@ class TestPlaceOrder:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_place_order_success(self, connected_client, mock_call_tool_result):
         """place_order returns order result dict."""
@@ -420,7 +507,9 @@ class TestGetTrades:
     def connected_client(self, mock_client_session):
         client = SimulationClient()
         client._session = mock_client_session
-        return client
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
 
     def test_get_trades_success(self, connected_client, mock_call_tool_result):
         """get_trades returns list of trade dicts."""

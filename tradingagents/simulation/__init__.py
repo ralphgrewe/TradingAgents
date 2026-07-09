@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 import sys
 from pathlib import Path
@@ -67,7 +68,14 @@ class SimulationClient:
         self.server_command = server_command
         self.server_args = server_args
         self._session: ClientSession | None = None
-        self._transport: Any = None
+        # The stdio transport and ClientSession are async context managers whose
+        # yielded streams are bound to the event loop that entered them. A single
+        # loop is kept alive for the client's whole lifetime (connect -> N tool
+        # calls -> close) instead of spinning up a fresh one per call, and the
+        # AsyncExitStack that entered both context managers is kept around so
+        # close() can unwind them on that same loop.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._exit_stack: contextlib.AsyncExitStack | None = None
 
     def __enter__(self) -> SimulationClient:
         """Context manager entry."""
@@ -99,8 +107,19 @@ class SimulationClient:
                 env=None,  # Inherit from parent
             )
 
-            # Use asyncio to connect and initialize
-            self._session = asyncio.run(self._async_connect(server_params))
+            # Create a dedicated event loop and keep it alive for the lifetime of
+            # the connection — the streams/session yielded below are bound to
+            # whichever loop entered their context managers, so every subsequent
+            # call (tool calls, close) must reuse this same loop.
+            loop = asyncio.new_event_loop()
+            try:
+                session = loop.run_until_complete(self._async_connect(server_params))
+            except Exception:
+                loop.close()
+                raise
+
+            self._loop = loop
+            self._session = session
 
         except Exception as exc:
             raise SimulationConnectionError(
@@ -108,20 +127,48 @@ class SimulationClient:
             ) from exc
 
     async def _async_connect(self, server_params: StdioServerParameters) -> ClientSession:
-        """Async connection logic."""
-        transport = stdio_client(server_params)
-        self._transport = transport
-        session = ClientSession(transport)
-        await session.initialize()
+        """Async connection logic.
+
+        Enters the stdio transport and the session as async context managers via
+        an `AsyncExitStack` stored on `self`, so `close()` can unwind them later
+        on the same event loop. If anything after the transport is entered fails
+        (e.g. `session.initialize()`), whatever was already entered is unwound
+        here before the exception propagates, so `connect()` never leaks a
+        half-open subprocess.
+        """
+        exit_stack = contextlib.AsyncExitStack()
+        try:
+            read_stream, write_stream = await exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            session = await exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await session.initialize()
+        except Exception:
+            await exit_stack.aclose()
+            raise
+
+        self._exit_stack = exit_stack
         return session
 
     def close(self) -> None:
         """Close the connection to the MCP server."""
-        if self._session is not None:
-            # For stdio transport, we just close the session
-            asyncio.run(self._session.close())
-            self._session = None
-            self._transport = None
+        if self._session is None:
+            return
+
+        loop = self._loop
+        exit_stack = self._exit_stack
+        self._session = None
+        self._exit_stack = None
+        self._loop = None
+
+        try:
+            if exit_stack is not None and loop is not None:
+                loop.run_until_complete(exit_stack.aclose())
+        finally:
+            if loop is not None:
+                loop.close()
 
     def _call_tool_sync(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call a tool synchronously by running async code.
@@ -141,7 +188,11 @@ class SimulationClient:
             raise SimulationConnectionError("Not connected to simulation server")
 
         try:
-            result = asyncio.run(self._session.call_tool(tool_name, arguments or {}))
+            # Reuse the event loop the session was created on (see connect()) —
+            # the session's streams are bound to it and cannot be driven from a
+            # different loop.
+            run = self._loop.run_until_complete if self._loop is not None else asyncio.run
+            result = run(self._session.call_tool(tool_name, arguments or {}))
 
             # Check if result has content (success)
             if result.content:
