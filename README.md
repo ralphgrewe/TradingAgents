@@ -173,7 +173,7 @@ pip install "tradingagents[xpu]"
 - Updated GPU drivers
 
 **Using with the CLI:**
-Select "Intel XPU" from the provider list when launching `tradingagents`. The model is locked to Mistral-3-3B-Reasoning for v1.
+Select "Intel XPU" from the provider list when launching `tradingagents`. The model is locked to `mistralai/Ministral-3-3B-Reasoning-2512` for v1.
 
 **Limitations:**
 - The News Analyst is **not usable** with this provider in v1 — it requires tool-calling, which Intel XPU does not support. The pipeline will fail if you select it. Use Market, Sentiment, or Fundamentals analysts instead.
