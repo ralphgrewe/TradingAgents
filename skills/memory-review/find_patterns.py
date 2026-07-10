@@ -86,15 +86,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tradingagents.memory.stats import _is_correct, _normalize_signal, get_statistics  # noqa: E402
-from tradingagents.memory.store import get_connection  # noqa: E402
+from tradingagents.memory.query import DEFAULT_CONTEXT_LIMIT, gather_context_rows  # noqa: E402
+from tradingagents.memory.stats import get_statistics  # noqa: E402
 
 # --- Pattern-detection knobs (see module docstring) -------------------------
 DEFAULT_MIN_SAMPLE = 3
 DEFAULT_DIVERGENCE_THRESHOLD = 0.3  # 30 percentage points
-
-# --- Context-gathering default ----------------------------------------------
-DEFAULT_CONTEXT_LIMIT = 10
 
 # --- Heuristics file location (see module docstring) -------------------------
 DEFAULT_HEURISTICS_DIR = Path("runs") / "memory" / "heuristics"
@@ -192,74 +189,8 @@ def find_patterns(
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Context gathering — the "why" material (issue step 2)
-# ---------------------------------------------------------------------------
-
-
-def gather_context_rows(
-    agent: str,
-    ticker: str,
-    db_path: str | Path | None = None,
-    limit: int = DEFAULT_CONTEXT_LIMIT,
-    misses_only: bool = False,
-) -> list[dict[str, Any]]:
-    """Fetch resolved decision rows for ``(agent, ticker)`` with their key_drivers/thesis/lesson.
-
-    This is the raw material the memory-review skill's LLM step reasons over to explain *why* a
-    pattern flagged by ``find_patterns`` exists. Reuses ``stats._normalize_signal`` /
-    ``stats._is_correct`` (rather than re-implementing the HOLD-threshold correctness rule) so
-    "correct"/"miss" here is defined identically to how ``find_patterns``'s underlying statistics
-    were computed.
-
-    Args:
-        agent/ticker: exact-match filters (no ticker normalization — see module docstring).
-        limit: maximum rows returned, most recent (``decision_date`` DESC, ``id`` DESC) first —
-            same ordering convention as ``query.get_past_context``.
-        misses_only: if True, only rows scored "incorrect" are returned (useful once a finding's
-            direction is "underperforms" and the reasoning step only cares about the misses).
-
-    Returns:
-        A list of dicts: ``{"decision_date", "signal", "confidence", "key_drivers" (parsed from
-        JSON, or None), "thesis", "lesson", "forward_return", "correct"}``. ``correct`` is ``None``
-        if the row's signal doesn't normalize to BUY/HOLD/SELL (see ``stats._normalize_signal``).
-    """
-    conn = get_connection(db_path)
-    try:
-        rows = conn.execute(
-            """
-            SELECT decision_date, signal, confidence, key_drivers, thesis, lesson, forward_return
-            FROM decisions
-            WHERE resolved_at IS NOT NULL AND agent = ? AND ticker = ?
-            ORDER BY decision_date DESC, id DESC
-            LIMIT ?
-            """,
-            (agent, ticker, limit),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        norm_signal = _normalize_signal(row["signal"])
-        correct: bool | None = None
-        if norm_signal is not None and row["forward_return"] is not None:
-            correct = _is_correct(norm_signal, row["forward_return"])
-        if misses_only and correct is not False:
-            continue
-        out.append(
-            {
-                "decision_date": row["decision_date"],
-                "signal": row["signal"],
-                "confidence": row["confidence"],
-                "key_drivers": json_module.loads(row["key_drivers"]) if row["key_drivers"] else None,
-                "thesis": row["thesis"],
-                "lesson": row["lesson"],
-                "forward_return": row["forward_return"],
-                "correct": correct,
-            }
-        )
-    return out
+# Note: gather_context_rows has been promoted to tradingagents/memory/query.py (issue #52)
+# and is now imported at the top of this file. The function is called below via that import.
 
 
 def _context_key(finding: dict[str, Any]) -> tuple[str, str]:

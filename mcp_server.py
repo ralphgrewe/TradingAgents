@@ -326,6 +326,59 @@ def memory_get_statistics(
         return f"ERROR: {exc}"
 
 
+@mcp.tool()
+def memory_get_decisions(
+    agent: str,
+    ticker: str,
+    db_path: str | None = None,
+    limit: int | None = None,
+    misses_only: bool = False,
+) -> Any:
+    """
+    Fetch raw per-decision context rows for an agent/ticker pair from the memory core.
+
+    Thin pass-through to tradingagents.memory.gather_context_rows. Returns resolved
+    decision rows (forward_return + lesson already resolved) with their key_drivers,
+    thesis, and lesson — the material needed for pattern analysis and reasoning about
+    why a divergent performance pattern exists for a given (agent, ticker) pair.
+
+    Only resolved decisions (``resolved_at IS NOT NULL``) are returned; pending rows
+    are always excluded.
+
+    Args:
+        agent: Exact agent identifier to match (no normalization).
+        ticker: Exact (un-normalized) ticker to match against the stored column
+            (no normalization, consistent with resolve_pending and get_past_context).
+        db_path: Optional override for the memory DB path.
+        limit: Maximum number of rows to return, most recent first
+            (``decision_date`` DESC, ``id`` DESC). If None, defaults to
+            DEFAULT_CONTEXT_LIMIT (10).
+        misses_only: If True, only rows scored "incorrect" are returned; useful
+            for focusing on failures when investigating underperformance patterns.
+
+    Returns:
+        A JSON-serializable list of dicts, one per resolved decision:
+        ``{"decision_date", "signal", "confidence", "key_drivers" (parsed JSON
+        object/list or None), "thesis", "lesson", "forward_return", "correct"}``.
+        The ``correct`` field is ``None`` if the signal doesn't normalize to
+        BUY/HOLD/SELL, and is ``True``/``False`` otherwise. On error, a string
+        starting with "ERROR:".
+    """
+    try:
+        from tradingagents.memory import DEFAULT_CONTEXT_LIMIT, gather_context_rows
+
+        effective_limit = limit if limit is not None else DEFAULT_CONTEXT_LIMIT
+        return gather_context_rows(
+            agent=agent,
+            ticker=ticker,
+            db_path=db_path,
+            limit=effective_limit,
+            misses_only=misses_only,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: {exc}"
+
+
 if __name__ == "__main__":
     # Validate MCP_TRANSPORT env var and dispatch to appropriate transport
     valid_transports = {"stdio", "streamable-http", "sse"}

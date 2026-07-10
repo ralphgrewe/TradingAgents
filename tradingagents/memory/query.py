@@ -97,15 +97,23 @@ want to reuse or extend this shape):
 
 from __future__ import annotations
 
+import json as json_module
 from pathlib import Path
 from typing import Any
 
+from tradingagents.memory.stats import _is_correct, _normalize_signal
 from tradingagents.memory.store import get_connection
 
 # Module-level defaults for the "no matching rows at all" message, kept as a
 # constant so tests/future callers can assert on it without hardcoding the
 # string in multiple places.
 _NO_LESSONS_MESSAGE = "*No prior resolved lessons yet.*"
+
+# Default limit for gather_context_rows — contexts gathered for a pattern
+# finding (issue #52) use this as the default number of decision rows
+# retrieved for an (agent, ticker) pair, same precedent as
+# find_patterns.DEFAULT_CONTEXT_LIMIT (issue #14).
+DEFAULT_CONTEXT_LIMIT = 10
 
 
 def _format_confidence(confidence: Any) -> str:
@@ -211,3 +219,79 @@ def get_past_context(
         parts.append("\n".join(_format_cross_ticker_entry(row) for row in cross_rows))
 
     return "\n\n".join(parts)
+
+
+def gather_context_rows(
+    agent: str,
+    ticker: str,
+    db_path: str | Path | None = None,
+    limit: int = DEFAULT_CONTEXT_LIMIT,
+    misses_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Fetch resolved decision rows for ``(agent, ticker)`` with their key_drivers/thesis/lesson.
+
+    This function retrieves raw per-decision context rows for pattern analysis and reasoning,
+    exposing the same data the memory-review skill's LLM step uses to explain *why* a pattern
+    flagged by pattern detection exists. Reuses ``_normalize_signal`` / ``_is_correct``
+    (rather than re-implementing the HOLD-threshold correctness rule) so "correct"/"miss" here
+    is defined identically to how memory statistics are computed.
+
+    Only resolved rows (``resolved_at IS NOT NULL``) are considered; pending decisions are
+    always excluded. See the module docstring for the established conventions: resolved-only,
+    exact-match ticker matching, ordering (``decision_date`` DESC, ``id`` DESC).
+
+    Args:
+        agent: Exact agent identifier to match (no normalization).
+        ticker: Exact (un-normalized) ticker to match — matched verbatim against the stored
+            ``decisions.ticker`` column, consistent with ``resolve_pending`` and
+            ``get_past_context`` (see module docstring).
+        db_path: Optional override for the DB path (see
+            ``tradingagents.memory.store.resolve_db_path``).
+        limit: Maximum number of rows returned, most recent (``decision_date`` DESC,
+            ``id`` DESC) first — same ordering convention as ``get_past_context``.
+        misses_only: If True, only rows scored "incorrect" are returned (useful for focusing
+            analysis on failures when investigating a pattern like "underperforms").
+
+    Returns:
+        A list of dicts, one per resolved decision: ``{"decision_date", "signal",
+        "confidence", "key_drivers" (parsed from JSON, or None), "thesis", "lesson",
+        "forward_return", "correct"}``. The ``correct`` field is ``None`` if the row's
+        signal doesn't normalize to BUY/HOLD/SELL (see ``_normalize_signal``), and is
+        ``True``/``False`` otherwise (see ``_is_correct`` for the correctness rules).
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT decision_date, signal, confidence, key_drivers, thesis, lesson, forward_return
+            FROM decisions
+            WHERE resolved_at IS NOT NULL AND agent = ? AND ticker = ?
+            ORDER BY decision_date DESC, id DESC
+            LIMIT ?
+            """,
+            (agent, ticker, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        norm_signal = _normalize_signal(row["signal"])
+        correct: bool | None = None
+        if norm_signal is not None and row["forward_return"] is not None:
+            correct = _is_correct(norm_signal, row["forward_return"])
+        if misses_only and correct is not False:
+            continue
+        out.append(
+            {
+                "decision_date": row["decision_date"],
+                "signal": row["signal"],
+                "confidence": row["confidence"],
+                "key_drivers": json_module.loads(row["key_drivers"]) if row["key_drivers"] else None,
+                "thesis": row["thesis"],
+                "lesson": row["lesson"],
+                "forward_return": row["forward_return"],
+                "correct": correct,
+            }
+        )
+    return out
