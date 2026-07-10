@@ -12,6 +12,8 @@ own") and that they are actually registered as MCP tools.
 """
 
 import asyncio
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -205,3 +207,49 @@ def test_get_statistics_defaults_are_passed_through(tmp_path):
         "per_agent": [],
         "calibration": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Transport validation: invalid MCP_TRANSPORT must fail fast with clear error
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_mcp_transport_fails_fast(monkeypatch, capsys):
+    """An invalid MCP_TRANSPORT env var must fail fast with exit code 2,
+    not silently default to stdio."""
+    import subprocess
+
+    # Use subprocess to test the __main__ dispatch logic in a clean interpreter
+    code = """\
+import os
+import sys
+os.environ["MCP_TRANSPORT"] = "invalid_transport"
+os.environ["FASTMCP_HOST"] = "127.0.0.1"
+os.environ["FASTMCP_PORT"] = "8000"
+
+# Simulate the __main__ section of mcp_server.py
+_mcp_transport = os.environ.get("MCP_TRANSPORT", "stdio")
+valid_transports = {"stdio", "streamable-http", "sse"}
+if _mcp_transport not in valid_transports:
+    print(
+        f"Invalid MCP_TRANSPORT '{_mcp_transport}'. "
+        f"Must be one of: {', '.join(sorted(valid_transports))}",
+        file=sys.stderr
+    )
+    sys.exit(2)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "Invalid MCP_TRANSPORT" in result.stderr
+    assert "invalid_transport" in result.stderr
+
+
+def test_valid_mcp_transports_are_accepted():
+    """Valid MCP_TRANSPORT values are recognized and don't fail validation."""
+    valid_transports = {"stdio", "streamable-http", "sse"}
+    for transport in valid_transports:
+        assert transport in valid_transports

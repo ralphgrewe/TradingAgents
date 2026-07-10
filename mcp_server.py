@@ -13,10 +13,16 @@ Exposes:
   decision history the legacy LangGraph pipeline's Python callers use
   directly. No logic of their own beyond argument/error plumbing.
 
-Usage (stdio transport, default):
+Usage:
+
+    # Stdio transport (default — for Claude Desktop, Claude Code)
     python mcp_server.py
 
-Claude Desktop config example:
+    # Networked transports (streamable-http, sse) via env vars
+    MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 python mcp_server.py
+    # or use the provided start_server.sh script
+
+Claude Desktop config example (stdio):
     {
       "mcpServers": {
         "tradingagents": {
@@ -26,6 +32,11 @@ Claude Desktop config example:
         }
       }
     }
+
+Environment variables:
+    MCP_TRANSPORT: Transport type (default "stdio"). Options: "stdio", "streamable-http", "sse".
+    FASTMCP_HOST: Host to bind to for networked transports (default "127.0.0.1").
+    FASTMCP_PORT: Port to bind to for networked transports (default "8000").
 """
 
 from __future__ import annotations
@@ -49,6 +60,11 @@ if str(_HERE) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+# ── read transport and network configuration from environment ──────────────────
+_mcp_transport = os.environ.get("MCP_TRANSPORT", "stdio")
+_fastmcp_host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
+_fastmcp_port = os.environ.get("FASTMCP_PORT", "8000")
+
 mcp = FastMCP(
     "TradingAgents",
     instructions=(
@@ -56,6 +72,8 @@ mcp = FastMCP(
         "stock ticker and receive a detailed report with a final BUY / SELL / "
         "HOLD recommendation."
     ),
+    host=_fastmcp_host,
+    port=int(_fastmcp_port),
 )
 
 
@@ -309,4 +327,16 @@ def memory_get_statistics(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Validate MCP_TRANSPORT env var and dispatch to appropriate transport
+    valid_transports = {"stdio", "streamable-http", "sse"}
+    if _mcp_transport not in valid_transports:
+        logging.getLogger().error(
+            f"Invalid MCP_TRANSPORT '{_mcp_transport}'. "
+            f"Must be one of: {', '.join(sorted(valid_transports))}"
+        )
+        sys.exit(2)
+
+    if _mcp_transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(transport=_mcp_transport)

@@ -46,7 +46,9 @@ mode, report directory, etc.).
 
 `mcp_server.py` exposes the pipeline and the shared decision-memory store as MCP tools
 (`analyze_stock`, plus `memory_store_decision` / `memory_resolve_pending` /
-`memory_get_past_context` / `memory_get_statistics`) over stdio:
+`memory_get_past_context` / `memory_get_statistics`).
+
+### Stdio transport (default — for Claude Desktop, Claude Code)
 
 ```bash
 ./venv/bin/python mcp_server.py
@@ -66,6 +68,32 @@ with the repo as the working directory, for example:
   }
 }
 ```
+
+### Networked transports (streamable-http, sse)
+
+For running the server on a different machine or accessing it over a network, use one of the
+bundled start scripts (which set up the environment and launch the server on `0.0.0.0:8000`):
+
+**macOS / Linux:**
+```bash
+./start_server.sh
+```
+
+**Windows:**
+```cmd
+start_server.bat
+```
+
+Alternatively, set the environment variables manually:
+
+```bash
+MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/python mcp_server.py
+```
+
+**Environment variables:**
+- `MCP_TRANSPORT`: Transport type (`"stdio"` default, or `"streamable-http"`, `"sse"`).
+- `FASTMCP_HOST`: Host/interface to bind to for networked transports (`"127.0.0.1"` default).
+- `FASTMCP_PORT`: Port to bind to for networked transports (`"8000"` default).
 
 ## More detail
 

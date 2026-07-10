@@ -36,8 +36,10 @@ Always use the project virtualenv (`./venv`), never system Python.
 ./venv/bin/tradingagents            # installed entry point
 ./venv/bin/python -m cli.main       # equivalent, run from source
 
-# Run the MCP server (stdio transport)
-./venv/bin/python mcp_server.py
+# Run the MCP server
+./venv/bin/python mcp_server.py               # stdio transport (default)
+./start_server.sh                             # networked transport (streamable-http)
+MCP_TRANSPORT=sse FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/python mcp_server.py  # SSE transport
 
 # Structured-output smoke test against a real provider (costs API credits)
 OPENAI_API_KEY=... ./venv/bin/python scripts/smoke_structured_output.py openai
