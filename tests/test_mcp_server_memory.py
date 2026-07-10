@@ -12,9 +12,11 @@ own") and that they are actually registered as MCP tools.
 """
 
 import asyncio
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -213,43 +215,73 @@ def test_get_statistics_defaults_are_passed_through(tmp_path):
 # Transport validation: invalid MCP_TRANSPORT must fail fast with clear error
 # ---------------------------------------------------------------------------
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
-def test_invalid_mcp_transport_fails_fast(monkeypatch, capsys):
-    """An invalid MCP_TRANSPORT env var must fail fast with exit code 2,
-    not silently default to stdio."""
-    import subprocess
+# Patches FastMCP.run to a no-op recorder before executing mcp_server.py as
+# __main__ (via runpy), so the *real* module-level env-var reads, FastMCP
+# construction, and __main__ dispatch logic all run for real, but the process
+# never actually binds a socket or blocks on stdio.
+_DISPATCH_PROBE_SCRIPT = """\
+import runpy
+from mcp.server.fastmcp import FastMCP
 
-    # Use subprocess to test the __main__ dispatch logic in a clean interpreter
-    code = """\
-import os
-import sys
-os.environ["MCP_TRANSPORT"] = "invalid_transport"
-os.environ["FASTMCP_HOST"] = "127.0.0.1"
-os.environ["FASTMCP_PORT"] = "8000"
+calls = []
 
-# Simulate the __main__ section of mcp_server.py
-_mcp_transport = os.environ.get("MCP_TRANSPORT", "stdio")
-valid_transports = {"stdio", "streamable-http", "sse"}
-if _mcp_transport not in valid_transports:
-    print(
-        f"Invalid MCP_TRANSPORT '{_mcp_transport}'. "
-        f"Must be one of: {', '.join(sorted(valid_transports))}",
-        file=sys.stderr
-    )
-    sys.exit(2)
+
+def _fake_run(self, transport=None):
+    calls.append(transport)
+
+
+FastMCP.run = _fake_run
+
+runpy.run_path("mcp_server.py", run_name="__main__")
+
+print("DISPATCHED_TRANSPORT=" + repr(calls[0] if calls else None))
 """
+
+
+def test_invalid_mcp_transport_fails_fast():
+    """An invalid MCP_TRANSPORT env var must fail fast with exit code 2 and a
+    visible error message, not silently default to stdio.
+
+    Runs the real mcp_server.py script (not a reimplementation) so this
+    actually exercises the __main__ validation code, including the interplay
+    with the module's `logging.disable(logging.CRITICAL)` call at import time
+    (which would otherwise silently swallow a `logging.getLogger().error(...)`
+    call on this path).
+    """
+    env = {**os.environ, "MCP_TRANSPORT": "invalid_transport"}
     result = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "mcp_server.py"],
         capture_output=True,
         text=True,
+        cwd=str(_REPO_ROOT),
+        env=env,
     )
     assert result.returncode == 2
     assert "Invalid MCP_TRANSPORT" in result.stderr
     assert "invalid_transport" in result.stderr
 
 
-def test_valid_mcp_transports_are_accepted():
-    """Valid MCP_TRANSPORT values are recognized and don't fail validation."""
-    valid_transports = {"stdio", "streamable-http", "sse"}
-    for transport in valid_transports:
-        assert transport in valid_transports
+@pytest.mark.parametrize("transport", ["stdio", "streamable-http", "sse"])
+def test_valid_mcp_transports_dispatch_correctly(transport):
+    """Each valid MCP_TRANSPORT value reaches mcp.run() with the right args.
+
+    Executes the real mcp_server.py script (via runpy, in a subprocess) with
+    FastMCP.run monkeypatched to a recorder, so the real validation +
+    dispatch branch (`mcp.run()` for stdio, `mcp.run(transport=transport)`
+    otherwise) is exercised without ever binding a socket or blocking on
+    stdio.
+    """
+    env = {**os.environ, "MCP_TRANSPORT": transport}
+    result = subprocess.run(
+        [sys.executable, "-c", _DISPATCH_PROBE_SCRIPT],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+    expected = None if transport == "stdio" else transport
+    assert f"DISPATCHED_TRANSPORT={expected!r}" in result.stdout

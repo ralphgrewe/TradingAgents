@@ -330,9 +330,15 @@ if __name__ == "__main__":
     # Validate MCP_TRANSPORT env var and dispatch to appropriate transport
     valid_transports = {"stdio", "streamable-http", "sse"}
     if _mcp_transport not in valid_transports:
-        logging.getLogger().error(
-            f"Invalid MCP_TRANSPORT '{_mcp_transport}'. "
-            f"Must be one of: {', '.join(sorted(valid_transports))}"
+        # logging.disable(logging.CRITICAL) above silences logging.getLogger()
+        # calls, so surface this fatal error the same way _run_analysis surfaces
+        # tool errors: written directly rather than routed through the disabled
+        # logger, otherwise it fails fast with a non-zero exit but no visible
+        # message at all.
+        print(
+            f"ERROR: Invalid MCP_TRANSPORT '{_mcp_transport}'. "
+            f"Must be one of: {', '.join(sorted(valid_transports))}",
+            file=sys.stderr,
         )
         sys.exit(2)
 
