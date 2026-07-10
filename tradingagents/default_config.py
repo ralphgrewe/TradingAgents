@@ -20,6 +20,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_SIMULATION_SERVER_COMMAND": "simulation_server_command",
     "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
+    "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
+    "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
 }
 
 
@@ -141,4 +143,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # env vars if running on a different machine/checkout layout.
     "simulation_server_command": None,   # Path to Python interpreter (e.g. /path/to/venv/bin/python)
     "simulation_server_args": None,      # List of args: ["/path/to/mcp_server.py"]
+    # MemoryMCPClient configuration (issue #51) — networked client for the
+    # memory core's MCP server (mcp_server.py run under start_server.sh).
+    # When memory_mcp_url is None, MemoryMCPClient derives a default from
+    # memory_mcp_transport ("http://127.0.0.1:8000/mcp" for streamable-http,
+    # "http://127.0.0.1:8000/sse" for sse) — see tradingagents/memory/mcp_client.py.
+    "memory_mcp_url": None,
+    "memory_mcp_transport": "streamable-http",   # Options: streamable-http, sse
 })
