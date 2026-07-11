@@ -12,6 +12,15 @@ heuristics.md" — everything up to the live LLM curation step (which cannot be 
 real provider, and this repo's tests never call live LLM APIs — see CLAUDE.md / conftest.py).
 
 No live LLM or network access is used.
+
+As of issue #54, `find_patterns`/`gather_context_rows` no longer talk to
+`tradingagents.memory.{stats,query}` in-process — they go through `MemoryMCPClient`
+(`tradingagents/memory/mcp_client.py`), which itself would need a live networked MCP server. Tests
+mock that boundary rather than the DB/stats module: `_FakeMemoryMCPClient` below stands in for
+`MemoryMCPClient` (same public shape — context manager + `get_statistics`/`get_decisions`) but
+calls the real `tradingagents.memory.{stats,query}` functions in-process instead of going over the
+network. This keeps every seeded-DB scenario below exercising the real statistics/query logic
+end-to-end while still verifying the call path goes through the client, not a direct import.
 """
 
 from __future__ import annotations
@@ -22,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from tradingagents.memory import query as memory_query
+from tradingagents.memory import stats as memory_stats
 from tradingagents.memory.store import get_connection, store_decision
 
 # ---------------------------------------------------------------------------
@@ -36,6 +47,40 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 find_patterns_mod = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(find_patterns_mod)
+
+
+# ---------------------------------------------------------------------------
+# MemoryMCPClient test double — see module docstring. Delegates to the real
+# tradingagents.memory.{stats,query} functions so behavior/output shape is
+# unchanged, while standing in for the networked client find_patterns.py now
+# calls exclusively.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMemoryMCPClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def get_statistics(self, agent=None, ticker=None, since=None, db_path=None):
+        return memory_stats.get_statistics(agent=agent, ticker=ticker, since=since, db_path=db_path)
+
+    def get_decisions(self, agent, ticker, db_path=None, limit=None, misses_only=False):
+        kwargs = {"agent": agent, "ticker": ticker, "db_path": db_path, "misses_only": misses_only}
+        if limit is not None:
+            kwargs["limit"] = limit
+        return memory_query.gather_context_rows(**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_memory_mcp_client(monkeypatch):
+    """Replace `find_patterns_mod.MemoryMCPClient` with the in-process fake for every test."""
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _FakeMemoryMCPClient)
 
 
 def _db_path(tmp_path):
@@ -200,6 +245,30 @@ def test_find_patterns_filters_by_agent(tmp_path):
     assert {f["agent"] for f in findings} == {"fundamental"}
 
 
+def test_find_patterns_routes_through_memory_mcp_client(tmp_path, monkeypatch):
+    """find_patterns calls MemoryMCPClient.get_statistics — not the stats module directly."""
+    db_path = _db_path(tmp_path)
+    _seed_planted_pattern(db_path)
+
+    calls = []
+
+    class _SpyClient(_FakeMemoryMCPClient):
+        def get_statistics(self, **kwargs):
+            calls.append(kwargs)
+            return super().get_statistics(**kwargs)
+
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _SpyClient)
+    find_patterns_mod.find_patterns(agent="fundamental", since="2026-01-01", db_path=db_path)
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "agent": "fundamental",
+        "ticker": None,
+        "since": "2026-01-01",
+        "db_path": str(db_path),
+    }
+
+
 # ---------------------------------------------------------------------------
 # gather_context_rows: the "why" material -- key_drivers/thesis on the misses.
 # ---------------------------------------------------------------------------
@@ -243,6 +312,135 @@ def test_gather_context_rows_respects_limit(tmp_path):
 
     rows = find_patterns_mod.gather_context_rows("fundamental", "TSLA", db_path=db_path, limit=3)
     assert len(rows) == 3
+
+
+def test_gather_context_rows_routes_through_memory_mcp_client(tmp_path, monkeypatch):
+    """gather_context_rows calls MemoryMCPClient.get_decisions — not the query module directly."""
+    db_path = _db_path(tmp_path)
+    _seed_planted_pattern(db_path)
+
+    calls = []
+
+    class _SpyClient(_FakeMemoryMCPClient):
+        def get_decisions(self, **kwargs):
+            calls.append(kwargs)
+            return super().get_decisions(**kwargs)
+
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _SpyClient)
+    rows = find_patterns_mod.gather_context_rows(
+        "fundamental", "TSLA", db_path=db_path, limit=5, misses_only=True
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "agent": "fundamental",
+        "ticker": "TSLA",
+        "db_path": str(db_path),
+        "limit": 5,
+        "misses_only": True,
+    }
+    # Same result as calling the underlying query function directly with identical args --
+    # confirms the routing change didn't alter behavior/output shape.
+    expected = memory_query.gather_context_rows(
+        "fundamental", "TSLA", db_path=db_path, limit=5, misses_only=True
+    )
+    assert rows == expected
+    assert all(r["correct"] is False for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Connection reuse: one MemoryMCPClient across a whole batch, not one per call.
+# ---------------------------------------------------------------------------
+
+
+class _CountingMemoryMCPClient(_FakeMemoryMCPClient):
+    """A fake client that records every instantiation + context-manager entry, so tests can
+    assert the connect-once/N-calls lifecycle (see mcp_client.py's module docstring) is honored
+    and gather_all_context doesn't reopen a connection per finding."""
+
+    instantiations: list[int] = []
+    entries: list[int] = []
+
+    def __init__(self, *args, **kwargs):
+        type(self).instantiations.append(1)
+        super().__init__(*args, **kwargs)
+
+    def __enter__(self):
+        type(self).entries.append(1)
+        return super().__enter__()
+
+    @classmethod
+    def reset(cls):
+        cls.instantiations = []
+        cls.entries = []
+
+
+def test_gather_all_context_reuses_single_connection(tmp_path, monkeypatch):
+    """gather_all_context opens exactly one MemoryMCPClient for a multi-finding batch, not one
+    per finding — the flaw this fix-forward addresses."""
+    db_path = _db_path(tmp_path)
+    _seed_planted_pattern(db_path)
+
+    _CountingMemoryMCPClient.reset()
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _CountingMemoryMCPClient)
+
+    findings = find_patterns_mod.find_patterns(db_path=db_path)
+    # The planted pattern flags both fundamental×TSLA and fundamental×AAPL -> >1 finding, so a
+    # per-finding client would show up as multiple instantiations below.
+    assert len(findings) >= 2
+
+    _CountingMemoryMCPClient.reset()  # ignore the connection find_patterns opened for itself
+    context = find_patterns_mod.gather_all_context(findings, db_path=db_path)
+
+    assert len(_CountingMemoryMCPClient.instantiations) == 1
+    assert len(_CountingMemoryMCPClient.entries) == 1
+    # Still produced context for every finding despite the single shared connection.
+    assert set(context.keys()) == {(f["agent"], f["ticker"]) for f in findings}
+
+
+def test_gather_all_context_empty_findings_opens_no_connection(tmp_path, monkeypatch):
+    """No findings -> nothing to fetch -> no MCP connection opened at all."""
+    _CountingMemoryMCPClient.reset()
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _CountingMemoryMCPClient)
+
+    assert find_patterns_mod.gather_all_context([]) == {}
+    assert _CountingMemoryMCPClient.instantiations == []
+    assert _CountingMemoryMCPClient.entries == []
+
+
+def test_gather_all_context_reuses_caller_provided_client(tmp_path, monkeypatch):
+    """When handed an already-connected client, gather_all_context reuses it and opens none."""
+    db_path = _db_path(tmp_path)
+    _seed_planted_pattern(db_path)
+
+    _CountingMemoryMCPClient.reset()
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _CountingMemoryMCPClient)
+    findings = find_patterns_mod.find_patterns(db_path=db_path)
+    assert len(findings) >= 2
+
+    _CountingMemoryMCPClient.reset()
+    with _CountingMemoryMCPClient() as shared:
+        # Opening the shared client is the one and only instantiation/entry we expect.
+        context = find_patterns_mod.gather_all_context(findings, db_path=db_path, client=shared)
+
+    assert len(_CountingMemoryMCPClient.instantiations) == 1
+    assert len(_CountingMemoryMCPClient.entries) == 1
+    assert set(context.keys()) == {(f["agent"], f["ticker"]) for f in findings}
+
+
+def test_main_opens_a_single_connection_for_the_whole_run(tmp_path, monkeypatch, capsys):
+    """main opens one MemoryMCPClient shared across find_patterns + gather_all_context."""
+    db_path = _db_path(tmp_path)
+    _seed_planted_pattern(db_path)
+
+    _CountingMemoryMCPClient.reset()
+    monkeypatch.setattr(find_patterns_mod, "MemoryMCPClient", _CountingMemoryMCPClient)
+
+    find_patterns_mod.main(["--db-path", str(db_path)])
+    capsys.readouterr()
+
+    assert len(_CountingMemoryMCPClient.instantiations) == 1
+    assert len(_CountingMemoryMCPClient.entries) == 1
 
 
 # ---------------------------------------------------------------------------

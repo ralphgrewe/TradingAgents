@@ -69,9 +69,11 @@ Design choices:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json as json_module
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -86,8 +88,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tradingagents.memory.query import DEFAULT_CONTEXT_LIMIT, gather_context_rows  # noqa: E402
-from tradingagents.memory.stats import get_statistics  # noqa: E402
+from tradingagents.memory.mcp_client import MemoryMCPClient  # noqa: E402
+
+# DEFAULT_CONTEXT_LIMIT is a shared numeric constant (10), not a call path — reusing it here
+# keeps this module's own default in sync with the server-side default (mcp_server.py's
+# memory_get_decisions tool / tradingagents.memory.query.gather_context_rows) without importing
+# the query/stats *functions* this module now reaches exclusively through MemoryMCPClient
+# (issue #54: find_patterns.py no longer talks to tradingagents.memory.{query,stats} in-process).
+from tradingagents.memory.query import DEFAULT_CONTEXT_LIMIT  # noqa: E402
 
 # --- Pattern-detection knobs (see module docstring) -------------------------
 DEFAULT_MIN_SAMPLE = 3
@@ -119,6 +127,34 @@ def heuristics_path(agent: str, heuristics_dir: str | Path | None = None) -> Pat
 
 
 # ---------------------------------------------------------------------------
+# MemoryMCPClient lifecycle helper
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _memory_client(client: MemoryMCPClient | None) -> Iterator[MemoryMCPClient]:
+    """Yield a connected ``MemoryMCPClient``, reusing a caller-provided one if given.
+
+    ``mcp_client.py``'s module docstring documents a connect-once/N-calls lifecycle ("one loop +
+    one AsyncExitStack kept alive for connect() → N tool calls → close(), never recreated per
+    call"). A fresh ``with MemoryMCPClient() as client:`` per tool call defeats that — it pays full
+    event-loop / AsyncExitStack / session-handshake setup on every call. So every function here
+    that talks to the memory core accepts an optional already-connected ``client`` and threads it
+    through: when ``client`` is not ``None`` it is reused as-is (its lifecycle is owned by whoever
+    opened it — this helper does not close it); only when ``client is None`` is a new connection
+    opened and closed for the duration of the call. ``gather_all_context``/``main`` open a single
+    client once and reuse it across every call (mirroring ``trading_graph.py``'s #53 conversion),
+    while standalone callers of ``find_patterns``/``gather_context_rows`` still work with no
+    connection management of their own.
+    """
+    if client is not None:
+        yield client
+    else:
+        with MemoryMCPClient() as owned:
+            yield owned
+
+
+# ---------------------------------------------------------------------------
 # Pattern detection
 # ---------------------------------------------------------------------------
 
@@ -130,20 +166,25 @@ def find_patterns(
     min_n: int = DEFAULT_MIN_SAMPLE,
     divergence_threshold: float = DEFAULT_DIVERGENCE_THRESHOLD,
     db_path: str | Path | None = None,
+    client: MemoryMCPClient | None = None,
 ) -> list[dict[str, Any]]:
     """Flag ``(agent, ticker)`` cells whose hit-rate diverges from that agent's other tickers.
 
-    Built on top of ``tradingagents.memory.stats.get_statistics`` — this function adds no new SQL,
-    it re-derives "this ticker's baseline" from the same ``per_agent_ticker`` breakdown
-    ``get_statistics`` already computes.
+    Built on top of the ``memory_get_statistics`` MCP tool (via ``MemoryMCPClient``, issue #54) —
+    this function adds no new SQL, it re-derives "this ticker's baseline" from the same
+    ``per_agent_ticker`` breakdown ``get_statistics`` already computes server-side.
 
     Args:
-        agent/ticker/since/db_path: forwarded to ``get_statistics`` — same filter semantics
-            (exact-match ticker, inclusive ``since`` lower bound; see ``stats.py``).
+        agent/ticker/since/db_path: forwarded to ``MemoryMCPClient.get_statistics`` — same filter
+            semantics (exact-match ticker, inclusive ``since`` lower bound; see
+            ``tradingagents.memory.stats``).
         min_n: minimum resolved-decision count for a cell to be eligible, and separately for its
             "elsewhere" baseline to be eligible as a comparison point.
         divergence_threshold: minimum absolute hit-rate gap (0.0-1.0) between a cell and its
             agent's elsewhere-baseline to be flagged.
+        client: Optional already-connected ``MemoryMCPClient`` to reuse (see ``_memory_client``).
+            When ``None`` a connection is opened just for this call; ``main`` passes a single
+            shared client so ``find_patterns`` + ``gather_all_context`` reuse one connection.
 
     Returns:
         A list of finding dicts, sorted by descending ``abs(delta)`` (most divergent first), each:
@@ -152,7 +193,13 @@ def find_patterns(
         ``direction="underperforms"``: this ticker is worse than the agent's baseline; negative ->
         ``direction="overperforms"``).
     """
-    stats = get_statistics(agent=agent, ticker=ticker, since=since, db_path=db_path)
+    with _memory_client(client) as active_client:
+        stats = active_client.get_statistics(
+            agent=agent,
+            ticker=ticker,
+            since=since,
+            db_path=str(db_path) if db_path is not None else None,
+        )
 
     by_agent: dict[str, list[dict[str, Any]]] = {}
     for cell in stats["per_agent_ticker"]:
@@ -189,8 +236,46 @@ def find_patterns(
     return findings
 
 
-# Note: gather_context_rows has been promoted to tradingagents/memory/query.py (issue #52)
-# and is now imported at the top of this file. The function is called below via that import.
+def gather_context_rows(
+    agent: str,
+    ticker: str,
+    db_path: str | Path | None = None,
+    limit: int = DEFAULT_CONTEXT_LIMIT,
+    misses_only: bool = False,
+    client: MemoryMCPClient | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch resolved decision rows for ``(agent, ticker)`` via the ``memory_get_decisions`` MCP tool.
+
+    Thin wrapper around ``MemoryMCPClient.get_decisions`` (issue #54) — this module no longer
+    imports ``tradingagents.memory.query.gather_context_rows`` directly, but this function
+    preserves that function's exact signature and output shape (the ``correct`` field arrives
+    pre-computed, already applying the same ``_normalize_signal``/``_is_correct`` rules the
+    ``memory_get_decisions`` tool applies server-side — see
+    ``tradingagents.memory.query.gather_context_rows`` for the authoritative shape/semantics).
+
+    Args:
+        agent: Exact agent identifier to match (no normalization).
+        ticker: Exact (un-normalized) ticker to match against the stored column.
+        db_path: Optional override for the memory DB path on the server.
+        limit: Maximum number of rows returned, most recent (``decision_date`` DESC, ``id`` DESC)
+            first.
+        misses_only: If True, only rows scored "incorrect" are returned.
+        client: Optional already-connected ``MemoryMCPClient`` to reuse (see ``_memory_client``).
+            ``gather_all_context`` passes a single shared client so a whole batch of findings is
+            served over one connection rather than one per finding.
+
+    Returns:
+        A list of dicts, one per resolved decision: ``{"decision_date", "signal", "confidence",
+        "key_drivers", "thesis", "lesson", "forward_return", "correct"}``.
+    """
+    with _memory_client(client) as active_client:
+        return active_client.get_decisions(
+            agent=agent,
+            ticker=ticker,
+            db_path=str(db_path) if db_path is not None else None,
+            limit=limit,
+            misses_only=misses_only,
+        )
 
 
 def _context_key(finding: dict[str, Any]) -> tuple[str, str]:
@@ -201,12 +286,25 @@ def gather_all_context(
     findings: list[dict[str, Any]],
     db_path: str | Path | None = None,
     limit: int = DEFAULT_CONTEXT_LIMIT,
+    client: MemoryMCPClient | None = None,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    """Convenience: ``gather_context_rows`` for every ``(agent, ticker)`` in ``findings``."""
-    return {
-        _context_key(f): gather_context_rows(f["agent"], f["ticker"], db_path=db_path, limit=limit)
-        for f in findings
-    }
+    """Convenience: ``gather_context_rows`` for every ``(agent, ticker)`` in ``findings``.
+
+    Opens (or reuses, if ``client`` is provided) a single ``MemoryMCPClient`` connection and
+    threads it through every ``gather_context_rows`` call so M findings cost one connection, not M
+    — honoring ``mcp_client.py``'s connect-once/N-calls lifecycle (see ``_memory_client``), the
+    same pattern ``trading_graph.py`` follows for its #53 conversion. With no findings there is
+    nothing to fetch, so no connection is opened at all.
+    """
+    if not findings:
+        return {}
+    with _memory_client(client) as active_client:
+        return {
+            _context_key(f): gather_context_rows(
+                f["agent"], f["ticker"], db_path=db_path, limit=limit, client=active_client
+            )
+            for f in findings
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -355,15 +453,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_arg_parser().parse_args(argv)
-    findings = find_patterns(
-        agent=args.agent,
-        ticker=args.ticker,
-        since=args.since,
-        min_n=args.min_n,
-        divergence_threshold=args.divergence,
-        db_path=args.db_path,
-    )
-    context_by_key = gather_all_context(findings, db_path=args.db_path, limit=args.context_limit)
+    # Open one MCP connection for the whole run and reuse it across find_patterns'
+    # get_statistics call and gather_all_context's get_decisions calls, rather than
+    # reconnecting per call — see _memory_client / mcp_client.py's lifecycle docstring.
+    with MemoryMCPClient() as client:
+        findings = find_patterns(
+            agent=args.agent,
+            ticker=args.ticker,
+            since=args.since,
+            min_n=args.min_n,
+            divergence_threshold=args.divergence,
+            db_path=args.db_path,
+            client=client,
+        )
+        context_by_key = gather_all_context(
+            findings, db_path=args.db_path, limit=args.context_limit, client=client
+        )
 
     if args.write_draft:
         agents = sorted({f["agent"] for f in findings})

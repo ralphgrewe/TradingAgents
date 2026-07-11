@@ -614,3 +614,83 @@ class TestGetStatistics:
 
         with pytest.raises(MemoryMCPToolError):
             connected_client.get_statistics(since="not-a-date")
+
+
+class TestGetDecisions:
+    """Tests for get_decisions (mirrors tradingagents.memory.query.gather_context_rows)."""
+
+    @pytest.fixture
+    def connected_client(self, mock_client_session):
+        client = MemoryMCPClient(url="http://example.com/mcp", transport="streamable-http")
+        client._session = mock_client_session
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
+
+    def test_get_decisions_success_round_trip(self, connected_client, mock_call_tool_result):
+        rows = [
+            {
+                "decision_date": "2026-01-01",
+                "signal": "BUY",
+                "confidence": 0.75,
+                "key_drivers": {"ratio_signal": "undervalued"},
+                "thesis": "Cheap on P/E.",
+                "lesson": "Missed an earnings-driven guidance cut.",
+                "forward_return": -0.04,
+                "correct": False,
+            }
+        ]
+        content = MagicMock()
+        content.text = json.dumps(rows)
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+
+        result = connected_client.get_decisions("fundamental", "TSLA", limit=5, misses_only=True)
+        assert result == rows
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][0] == "memory_get_decisions"
+        assert call_args[0][1] == {
+            "agent": "fundamental",
+            "ticker": "TSLA",
+            "db_path": None,
+            "limit": 5,
+            "misses_only": True,
+        }
+
+    def test_get_decisions_defaults(self, connected_client, mock_call_tool_result):
+        content = MagicMock()
+        content.text = json.dumps([])
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+
+        result = connected_client.get_decisions("trader", "AAPL")
+        assert result == []
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1] == {
+            "agent": "trader",
+            "ticker": "AAPL",
+            "db_path": None,
+            "limit": None,
+            "misses_only": False,
+        }
+
+    def test_get_decisions_validates_list_type(self, connected_client, mock_call_tool_result):
+        content = MagicMock()
+        content.text = json.dumps({"not": "a list"})
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+
+        with pytest.raises(MemoryMCPToolError) as exc_info:
+            connected_client.get_decisions("trader", "AAPL")
+        assert "non-list" in str(exc_info.value)
+
+    def test_get_decisions_tool_error_response(self, connected_client, mock_call_tool_result):
+        content = MagicMock()
+        content.text = "ERROR: something went wrong"
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+
+        with pytest.raises(MemoryMCPToolError):
+            connected_client.get_decisions("trader", "AAPL")

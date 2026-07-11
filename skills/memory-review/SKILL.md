@@ -25,10 +25,13 @@ review is over the whole memory core (optionally filtered).
 
 > **Execution environment.** Unlike the other `skills/` (`quant`, `fundamental`, `news`,
 > `trader`, `portfolio-manager`), this skill does **not** run against the Windows-mounted
-> `trading-skills` Cowork project — it runs directly against *this* repository's own shared
-> memory core (the same SQLite DB the `memory_*` MCP tools and the legacy LangGraph pipeline
-> read/write). Run all shell commands from this repo's root using the project virtualenv, per
+> `trading-skills` Cowork project — it runs from *this* repository, against its own shared
+> memory core. Run all shell commands from this repo's root using the project virtualenv, per
 > `CLAUDE.md`: `./venv/bin/python ...`, never system Python and never a `C:\...` path.
+> `find_patterns.py` reaches the memory core the same way `trading_graph.py` does (issue #54) —
+> over the networked memory MCP server (`memory_get_statistics`/`memory_get_decisions`, via
+> `MemoryMCPClient`), not by opening the SQLite DB in-process — so the memory MCP server must be
+> running first (`./start_server.sh`; see `CLAUDE.md` "Commands").
 
 ---
 

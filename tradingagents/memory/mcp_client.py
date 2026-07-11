@@ -3,15 +3,17 @@
 Connects to ``mcp_server.py`` running under a networked transport
 (``streamable-http`` or ``sse`` — see ``start_server.sh`` /
 ``MCP_TRANSPORT``/``FASTMCP_HOST``/``FASTMCP_PORT`` at the top of
-``mcp_server.py``) and wraps its four memory tools
+``mcp_server.py``) and wraps its five memory tools
 (``memory_store_decision``, ``memory_resolve_pending``,
-``memory_get_past_context``, ``memory_get_statistics``) with typed Python
-methods mirroring the signatures of the functions they proxy to
+``memory_get_past_context``, ``memory_get_statistics``,
+``memory_get_decisions``) with typed Python methods mirroring the signatures
+of the functions they proxy to
 (``tradingagents.memory.{store,resolve,query,stats}``).
 
-This module is the shared foundation both #50's ``trading_graph.py``
-conversion and its ``find_patterns.py`` conversion will build on. It is
-scoped to *only* the client: no existing caller is converted to use it here.
+This module is the shared foundation #50's ``trading_graph.py`` (issue #53)
+and ``find_patterns.py`` (issue #54) conversions build on. It is scoped to
+*only* the client: no caller is converted to use it here — that happens in
+each consuming module.
 
 Usage::
 
@@ -520,4 +522,56 @@ class MemoryMCPClient:
         )
         if not isinstance(result, dict):
             raise MemoryMCPToolError(f"memory_get_statistics returned non-dict: {result!r}")
+        return result
+
+    def get_decisions(
+        self,
+        agent: str,
+        ticker: str,
+        db_path: str | None = None,
+        limit: int | None = None,
+        misses_only: bool = False,
+    ) -> list:
+        """Fetch raw per-decision context rows via ``memory_get_decisions``.
+
+        Mirrors ``tradingagents.memory.query.gather_context_rows``. Only resolved
+        decisions (``resolved_at IS NOT NULL``) are ever returned; pending rows are
+        always excluded.
+
+        Args:
+            agent: Exact agent identifier to match (no normalization).
+            ticker: Exact (un-normalized) ticker to match against the stored
+                column (no normalization, consistent with ``resolve_pending``
+                and ``get_past_context``).
+            db_path: Optional override for the memory DB path on the server.
+            limit: Maximum number of rows to return, most recent first
+                (``decision_date`` DESC, ``id`` DESC). If ``None``, the server
+                defaults to ``DEFAULT_CONTEXT_LIMIT`` (10).
+            misses_only: If True, only rows scored "incorrect" are returned —
+                useful for focusing on failures when investigating a
+                divergent-performance pattern.
+
+        Returns:
+            A JSON-serializable list of dicts, one per resolved decision:
+            ``{"decision_date", "signal", "confidence", "key_drivers" (parsed
+            JSON object/list or None), "thesis", "lesson", "forward_return",
+            "correct"}``. ``correct`` is ``None`` if the signal doesn't
+            normalize to BUY/HOLD/SELL, and ``True``/``False`` otherwise.
+
+        Raises:
+            MemoryMCPToolError: If the tool call fails.
+            MemoryMCPConnectionError: If not connected.
+        """
+        result = self._call_tool_sync(
+            "memory_get_decisions",
+            {
+                "agent": agent,
+                "ticker": ticker,
+                "db_path": db_path,
+                "limit": limit,
+                "misses_only": misses_only,
+            },
+        )
+        if not isinstance(result, list):
+            raise MemoryMCPToolError(f"memory_get_decisions returned non-list: {result!r}")
         return result
