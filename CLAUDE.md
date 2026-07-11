@@ -104,7 +104,7 @@ actual fetches; `symbol_utils.normalize_symbol` maps broker/forex/commodity tick
 
 ## Persistence
 
-Two independent, still-coexisting memory systems:
+Three independent, still-coexisting memory systems:
 
 - **Legacy markdown decision log** (`tradingagents/agents/utils/memory.py`,
   `TradingMemoryLog`) — always on. Appends a pending entry at the end of every `propagate()`
@@ -114,14 +114,25 @@ Two independent, still-coexisting memory systems:
   and `get_past_context` injects recent same-ticker + cross-ticker history into the Portfolio
   Manager prompt.
 - **SQLite memory core** (`tradingagents/memory/{store,resolve,query}.py`) — the shared backend
-  for the `skills/` reimplementation, storing one row per `(agent, ticker, decision_date)` in a
-  `decisions` table (default path `runs/memory/memory.db`, override
-  `TRADINGAGENTS_MEMORY_DB_PATH`). `store.py` is write-only/idempotent (`INSERT OR IGNORE`);
-  `resolve.py` fills in `forward_return`/`lesson` once enough trading days have elapsed
-  (`numpy.busday_count`-based, no holiday calendar); `query.py` is the read/formatting path for
-  prompt injection. See the module docstrings in each file — they carry the design rationale
-  (idempotency semantics, normalization boundary, single-transaction batching) and are the
-  canonical reference, not this file.
+  for the `skills/` reimplementation and (as of issue #51/#53) for `trading_graph.py` as well.
+  Stores one row per `(agent, ticker, decision_date)` in a `decisions` table (default path
+  `runs/memory/memory.db`, override `TRADINGAGENTS_MEMORY_DB_PATH`). `store.py` is
+  write-only/idempotent (`INSERT OR IGNORE`); `resolve.py` fills in `forward_return`/`lesson`
+  once enough trading days have elapsed (`numpy.busday_count`-based, no holiday calendar);
+  `query.py` is the read/formatting path for prompt injection.
+  
+  **Access path**: `trading_graph.py` and `skills/memory-review/find_patterns.py` reach the
+  SQLite core over the networked memory MCP server (via `MemoryMCPClient`), not by opening
+  the DB in-process. The memory MCP server (`mcp_server.py`) is a **hard dependency** for
+  `trading_graph.py` — if the server is unreachable or a tool call fails, the run aborts with
+  a `MemoryMCPConnectionError` or `MemoryMCPToolError` and does not proceed. This is a
+  deliberate behavior change from the prior in-process warn-and-continue pattern (issue #53).
+  `skills/` agents access the same tools via MCP tool registration in Claude Desktop/Code
+  (see README.md "To register the server with Claude agents").
+  
+  See the module docstrings in `store.py`, `resolve.py`, and `query.py` — they carry the
+  design rationale (idempotency semantics, normalization boundary, single-transaction batching)
+  and are the canonical reference.
 - **Checkpoint/resume** (`tradingagents/graph/checkpointer.py`) — opt-in via
   `config["checkpoint_enabled"]` / `--checkpoint`. LangGraph `SqliteSaver`, one DB per ticker at
   `<data_cache_dir>/checkpoints/<TICKER>.db`, keyed by a `thread_id` derived from
