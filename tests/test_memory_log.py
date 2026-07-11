@@ -875,7 +875,15 @@ class TestLegacyRemoval:
         mock_graph._run_graph = functools.partial(
             TradingAgentsGraph._run_graph, mock_graph
         )
-        TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
+        # propagate() now connects a memory MCP client (#53) for the SQLite
+        # memory-core resolve/store calls; fake it here (no real MCP server).
+        from tests.test_memory_core_integration import FakeMemoryMCPClient
+
+        with patch(
+            "tradingagents.graph.trading_graph.MemoryMCPClient",
+            lambda *a, **kw: FakeMemoryMCPClient(),
+        ):
+            TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
         entries = mock_graph.memory_log.load_entries()
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"

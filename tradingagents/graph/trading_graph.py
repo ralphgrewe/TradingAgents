@@ -26,8 +26,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
-from tradingagents.memory import resolve as memory_resolve
-from tradingagents.memory import store as memory_store
+from tradingagents.memory.mcp_client import MemoryMCPClient
 from tradingagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -132,6 +131,9 @@ class TradingAgentsGraph:
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
+        # Networked memory MCP client (#53) — connected once per propagate()
+        # run and torn down at the end of that run; see propagate().
+        self._memory_client: MemoryMCPClient | None = None
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -308,41 +310,44 @@ class TradingAgentsGraph:
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
 
-        # Resolve any pending decisions in the SQLite memory core.
-        try:
-            memory_resolve.resolve_pending(ticker=company_name)
-        except Exception as e:
-            logger.warning(
-                "Could not resolve pending decisions in SQLite memory core for %s: %s "
-                "(pipeline will continue)",
-                company_name, e,
-            )
+        # Connect to the networked memory MCP server (#53) for the SQLite memory
+        # core's resolve-pending call and this run's store-decision calls. This
+        # is a hard dependency: an unreachable server (MemoryMCPConnectionError)
+        # or a failing tool call (MemoryMCPToolError) both propagate and fail
+        # the run rather than being logged and swallowed — a deliberate
+        # behavior change from the prior in-process warn-and-continue pattern.
+        with MemoryMCPClient() as memory_client:
+            self._memory_client = memory_client
 
-        # Recompile with a checkpointer if the user opted in.
-        if self.config.get("checkpoint_enabled"):
-            self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
-            )
-            saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
+            # Resolve any pending decisions in the SQLite memory core.
+            memory_client.resolve_pending(ticker=company_name)
 
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
+            # Recompile with a checkpointer if the user opted in.
+            if self.config.get("checkpoint_enabled"):
+                self._checkpointer_ctx = get_checkpointer(
+                    self.config["data_cache_dir"], company_name
                 )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+                saver = self._checkpointer_ctx.__enter__()
+                self.graph = self.workflow.compile(checkpointer=saver)
 
-        try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
-        finally:
-            if self._checkpointer_ctx is not None:
-                self._checkpointer_ctx.__exit__(None, None, None)
-                self._checkpointer_ctx = None
-                self.graph = self.workflow.compile()
+                step = checkpoint_step(
+                    self.config["data_cache_dir"], company_name, str(trade_date)
+                )
+                if step is not None:
+                    logger.info(
+                        "Resuming from step %d for %s on %s", step, company_name, trade_date
+                    )
+                else:
+                    logger.info("Starting fresh for %s on %s", company_name, trade_date)
+
+            try:
+                return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            finally:
+                if self._checkpointer_ctx is not None:
+                    self._checkpointer_ctx.__exit__(None, None, None)
+                    self._checkpointer_ctx = None
+                    self.graph = self.workflow.compile()
+                self._memory_client = None
 
     def save_reports(self, final_state, ticker, save_path=None) -> Path:
         """Write the markdown report tree for a completed run, like the CLI does.
@@ -402,62 +407,43 @@ class TradingAgentsGraph:
             final_trade_decision=final_state["final_trade_decision"],
         )
 
-        # Store decisions in SQLite memory core for the three decision-bearing stages.
-        # Each stage's signal is derived via parse_rating from its own output text.
-        # Failures are logged and do not interrupt the pipeline (warn-and-continue pattern).
-        try:
-            # Research Manager decision
-            research_signal = parse_rating(final_state.get("investment_plan", ""))
-            memory_store.store_decision(
-                agent="research_manager",
-                ticker=company_name,
-                date=trade_date,
-                signal=research_signal,
-                confidence=None,
-                key_drivers=None,
-                thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
-            )
-        except Exception as e:
-            logger.warning(
-                "Could not store research_manager decision in SQLite memory core for %s on %s: %s",
-                company_name, trade_date, e,
-            )
+        # Store decisions in SQLite memory core (via the memory MCP client, #53)
+        # for the three decision-bearing stages. Each stage's signal is derived
+        # via parse_rating from its own output text. Connection/tool failures
+        # propagate — the memory MCP server is a hard dependency for a run to
+        # complete, not a best-effort side write.
+        research_signal = parse_rating(final_state.get("investment_plan", ""))
+        self._memory_client.store_decision(
+            agent="research_manager",
+            ticker=company_name,
+            date=trade_date,
+            signal=research_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
+        )
 
-        try:
-            # Trader decision
-            trader_signal = parse_rating(final_state.get("trader_investment_plan", ""))
-            memory_store.store_decision(
-                agent="trader",
-                ticker=company_name,
-                date=trade_date,
-                signal=trader_signal,
-                confidence=None,
-                key_drivers=None,
-                thesis=final_state.get("trader_investment_plan", "")[:500],  # truncate for DB
-            )
-        except Exception as e:
-            logger.warning(
-                "Could not store trader decision in SQLite memory core for %s on %s: %s",
-                company_name, trade_date, e,
-            )
+        trader_signal = parse_rating(final_state.get("trader_investment_plan", ""))
+        self._memory_client.store_decision(
+            agent="trader",
+            ticker=company_name,
+            date=trade_date,
+            signal=trader_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("trader_investment_plan", "")[:500],  # truncate for DB
+        )
 
-        try:
-            # Portfolio Manager decision
-            pm_signal = parse_rating(final_state.get("final_trade_decision", ""))
-            memory_store.store_decision(
-                agent="portfolio_manager",
-                ticker=company_name,
-                date=trade_date,
-                signal=pm_signal,
-                confidence=None,
-                key_drivers=None,
-                thesis=final_state.get("final_trade_decision", "")[:500],  # truncate for DB
-            )
-        except Exception as e:
-            logger.warning(
-                "Could not store portfolio_manager decision in SQLite memory core for %s on %s: %s",
-                company_name, trade_date, e,
-            )
+        pm_signal = parse_rating(final_state.get("final_trade_decision", ""))
+        self._memory_client.store_decision(
+            agent="portfolio_manager",
+            ticker=company_name,
+            date=trade_date,
+            signal=pm_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("final_trade_decision", "")[:500],  # truncate for DB
+        )
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
