@@ -342,7 +342,16 @@ class MemoryMCPClient:
                 )
 
             parsed: Any = None
-            if result.content and hasattr(result.content[0], "text"):
+            # Prefer structuredContent when available — it's always the
+            # correctly-shaped {"result": ...} dict regardless of whether the
+            # underlying value is a list, dict, bool, or string. The content
+            # list is only for backward compatibility and is unreliable for
+            # list-typed returns (empty list → zero blocks, N-item list → N
+            # blocks each containing one item — see issue #57 and the FastMCP
+            # conversion logic in mcp/server/fastmcp/utilities/func_metadata.py).
+            if result.structuredContent is not None:
+                parsed = result.structuredContent.get("result")
+            elif result.content and hasattr(result.content[0], "text"):
                 try:
                     parsed = json.loads(result.content[0].text)
                 except (json.JSONDecodeError, AttributeError):

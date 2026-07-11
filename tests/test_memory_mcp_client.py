@@ -33,6 +33,7 @@ def mock_call_tool_result():
     result = MagicMock()
     result.isError = False
     result.content = []
+    result.structuredContent = None  # Explicitly None to test legacy content path
     return result
 
 
@@ -694,3 +695,201 @@ class TestGetDecisions:
 
         with pytest.raises(MemoryMCPToolError):
             connected_client.get_decisions("trader", "AAPL")
+
+
+class TestStructuredContentParsing:
+    """Tests for structuredContent parsing (issue #57).
+
+    Verifies that the fix uses result.structuredContent["result"] when
+    available, instead of manually parsing result.content[0].text. This
+    is critical for list-typed returns, which are mishandled by the
+    legacy content parsing: empty lists have zero content blocks, and
+    N-item lists have N separate blocks (each containing one item, not
+    the whole list).
+    """
+
+    @pytest.fixture
+    def connected_client(self, mock_client_session):
+        client = MemoryMCPClient(url="http://example.com/mcp", transport="streamable-http")
+        client._session = mock_client_session
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
+
+    def test_empty_list_via_structured_content(self, connected_client):
+        """Empty list result via structuredContent (the main bug fix for #57).
+
+        Before the fix, result.content would be empty/falsy, parsed would stay
+        None, and resolve_pending() would raise MemoryMCPToolError("returned
+        non-list: None"). With the fix, structuredContent["result"] contains
+        [], and it round-trips correctly.
+        """
+        mock_result = MagicMock()
+        mock_result.isError = False
+        # structuredContent is the fixed path: always has {"result": ...}
+        mock_result.structuredContent = {"result": []}
+        # content is empty for an empty list (shows the legacy path's problem)
+        mock_result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.resolve_pending()
+        assert result == []
+
+    def test_multi_item_list_via_structured_content(self, connected_client):
+        """Multi-item list result via structuredContent (the other list bug).
+
+        Before the fix, result.content would have N separate blocks (each
+        containing one item's JSON), and only content[0].text would be read,
+        silently truncating the list. With the fix, structuredContent["result"]
+        contains the full list, and all items round-trip.
+        """
+        list_data = [1, 2, 3]
+        mock_result = MagicMock()
+        mock_result.isError = False
+        # structuredContent is correct
+        mock_result.structuredContent = {"result": list_data}
+        # content is split per item (the legacy path's problem)
+        content_items = [MagicMock() for _ in range(3)]
+        for i, content_item in enumerate(content_items):
+            content_item.text = json.dumps(list_data[i])
+        mock_result.content = content_items
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.resolve_pending()
+        assert result == list_data
+
+    def test_dict_result_via_structured_content(self, connected_client):
+        """Dict result (non-list) via structuredContent.
+
+        Verifies that the fix handles non-list types correctly too.
+        """
+        dict_data = {"filters": {}, "per_agent": []}
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": dict_data}
+        mock_result.content = [MagicMock(text=json.dumps(dict_data))]
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.get_statistics()
+        assert result == dict_data
+
+    def test_bool_result_via_structured_content(self, connected_client):
+        """Bool result via structuredContent.
+
+        Verifies that the fix handles non-list types correctly too.
+        """
+        bool_data = True
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": bool_data}
+        mock_result.content = [MagicMock(text=json.dumps(bool_data))]
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.store_decision("trader", "AAPL", "2026-07-01", "BUY")
+        assert result is True
+
+    def test_string_result_via_structured_content(self, connected_client):
+        """String result via structuredContent."""
+        string_data = "## Past context"
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": string_data}
+        # content would have the raw string (not JSON-encoded)
+        mock_result.content = [MagicMock(text=string_data)]
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.get_past_context("trader", "AAPL")
+        assert result == string_data
+
+    def test_error_string_detected_after_structured_content(self, connected_client):
+        """ERROR:-prefixed string in structuredContent is still detected as error.
+
+        The error convention check (isinstance(parsed, str) and
+        parsed.startswith("ERROR:")) must work the same whether parsing from
+        structuredContent or legacy content.
+        """
+        error_string = "ERROR: db unavailable"
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": error_string}
+        mock_result.content = [MagicMock(text=error_string)]
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(MemoryMCPToolError) as exc_info:
+            connected_client.get_statistics()
+        assert "ERROR: db unavailable" in str(exc_info.value)
+
+    def test_legacy_content_fallback_when_structured_content_missing(self, connected_client):
+        """Legacy content parsing path still works when structuredContent is None.
+
+        The fix includes a fallback for backward compatibility or when the MCP
+        server doesn't provide structuredContent.
+        """
+        dict_data = {"test": "value"}
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = None  # Not present
+        mock_result.content = [MagicMock(text=json.dumps(dict_data))]
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.get_statistics()
+        assert result == dict_data
+
+    def test_list_result_empty_via_structured_content_makes_resolve_pending_succeed(
+        self, connected_client
+    ):
+        """Integration test: resolve_pending() succeeds with empty list via structuredContent.
+
+        This is the concrete manifestation of the bug from issue #56: before
+        the fix, an empty list result would cause resolve_pending() to raise
+        MemoryMCPToolError("returned non-list: None").
+        """
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": []}
+        mock_result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        # This should not raise — empty list is a valid "nothing resolved yet" result
+        result = connected_client.resolve_pending(agent="trader", ticker="AAPL")
+        assert result == []
+        assert isinstance(result, list)
+
+    def test_list_result_with_multiple_items_via_structured_content_makes_get_decisions_complete(
+        self, connected_client
+    ):
+        """Integration test: get_decisions() returns full list via structuredContent.
+
+        Before the fix, only the first item would be returned (due to reading
+        only content[0].text), and subsequent items would be silently lost.
+        """
+        list_data = [
+            {"decision_date": "2026-01-01", "signal": "BUY", "correct": True},
+            {"decision_date": "2026-01-02", "signal": "HOLD", "correct": False},
+            {"decision_date": "2026-01-03", "signal": "SELL", "correct": True},
+        ]
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.structuredContent = {"result": list_data}
+        # Legacy content path would have 3 separate blocks
+        content_items = [MagicMock() for _ in range(3)]
+        for i, content_item in enumerate(content_items):
+            content_item.text = json.dumps(list_data[i])
+        mock_result.content = content_items
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        result = connected_client.get_decisions("trader", "AAPL")
+        assert result == list_data
+        assert len(result) == 3
+        assert result[0]["decision_date"] == "2026-01-01"
+        assert result[1]["decision_date"] == "2026-01-02"
+        assert result[2]["decision_date"] == "2026-01-03"
