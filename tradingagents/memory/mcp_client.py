@@ -43,12 +43,36 @@ was hardened against):
   ``127.0.0.1:8000`` host/port ``start_server.sh`` binds
   (``FASTMCP_HOST``/``FASTMCP_PORT`` there bind the *server*; the client
   talks to it over loopback by default, same as any other local client).
-- **Event-loop lifecycle**: identical to ``SimulationClient`` — a single
-  event loop and ``AsyncExitStack`` are created in ``connect()`` and kept
-  alive for the client's whole lifetime (the transport's streams and the
-  ``ClientSession`` are bound to whichever loop entered their async context
-  managers), reused for every subsequent tool call, and unwound together in
-  ``close()``. ``close()`` never raises (same contract and rationale as
+- **Event-loop lifecycle**: a single event loop is created in ``connect()``
+  and kept alive for the client's whole lifetime, reused for every
+  subsequent tool call, and closed in ``close()`` — but unlike a naive
+  ``SimulationClient``-style port, entering and exiting the transport's
+  ``AsyncExitStack`` (streams + ``ClientSession``) is **not** split across
+  two independent ``loop.run_until_complete()`` calls. Each
+  ``run_until_complete()`` wraps its coroutine in a brand-new ``asyncio.Task``
+  even on the same loop, and the streamable-http transport
+  (``mcp.client.streamable_http.streamable_http_client``) opens an anyio
+  ``TaskGroup`` internally whose cancel scope must be entered *and* exited by
+  the same ``Task`` — entering it in one ``run_until_complete()`` call and
+  exiting it in another raises ``RuntimeError: Attempted to exit cancel
+  scope in a different task than it was entered in`` (issue #58).
+
+  Instead, ``connect()`` starts one persistent coroutine as a single
+  ``asyncio.Task`` (``self._lifecycle_task``, via ``loop.create_task()``)
+  that owns the entire session lifetime: it enters the transport/session
+  into an ``AsyncExitStack`` (via ``_enter_session()``), signals readiness
+  through ``self._shutdown_event``'s sibling readiness event, then blocks on
+  ``self._shutdown_event.wait()`` until told to unwind, and only then calls
+  ``exit_stack.aclose()`` — all inside that one Task. ``connect()`` drives
+  the loop just far enough to observe readiness (or failure) and capture the
+  session; ``close()`` sets ``self._shutdown_event`` and drives the loop
+  with ``run_until_complete(self._lifecycle_task)`` until that *same* task
+  finishes unwinding, rather than closing the stack from a task of its own.
+  Tool calls (``_call_tool_sync``) still run each ``session.call_tool()`` in
+  its own ad hoc ``run_until_complete()`` task — that's fine, since they only
+  drive the already-open streams/session and never touch the transport's
+  task group directly; only the stack's entry/exit needed to move into the
+  persistent task. ``close()`` never raises (same contract and rationale as
   ``SimulationClient.close()``, see commit c42d73c) — any error unwinding the
   exit stack or closing the loop is logged as a warning rather than
   propagated, and internal state is always cleared.
@@ -170,11 +194,15 @@ class MemoryMCPClient:
         self.url = url
         self.transport = transport
         self._session: ClientSession | None = None
-        # See module docstring "Event-loop lifecycle" — mirrors
-        # SimulationClient exactly: one loop + one AsyncExitStack kept alive
-        # for connect() -> N tool calls -> close(), never recreated per call.
+        # See module docstring "Event-loop lifecycle" — one loop plus one
+        # persistent lifecycle Task (which owns the AsyncExitStack
+        # internally) are kept alive for connect() -> N tool calls ->
+        # close(), never recreated per call. The exit stack itself lives in
+        # the lifecycle task's coroutine frame, not as an attribute here —
+        # only the same Task that entered it may exit it (issue #58).
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._exit_stack: contextlib.AsyncExitStack | None = None
+        self._lifecycle_task: asyncio.Task | None = None
+        self._shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> MemoryMCPClient:
         """Context manager entry."""
@@ -187,6 +215,13 @@ class MemoryMCPClient:
 
     def connect(self) -> None:
         """Connect to the memory MCP server.
+
+        Starts a single persistent lifecycle Task (see module docstring
+        "Event-loop lifecycle") that owns entering and — much later, in
+        ``close()`` — exiting the transport/session ``AsyncExitStack``, so
+        the anyio cancel scope opened by the streamable-http transport is
+        entered and exited by the same ``asyncio.Task`` throughout
+        (issue #58).
 
         Raises:
             MemoryMCPConnectionError: If unable to reach the server or
@@ -205,18 +240,59 @@ class MemoryMCPClient:
 
         try:
             # A dedicated event loop is kept alive for the lifetime of the
-            # connection — the streams/session yielded below are bound to
-            # whichever loop entered their context managers, so every
+            # connection — the streams/session entered below are bound to
+            # whichever loop/Task entered their context managers, so every
             # subsequent call (tool calls, close) must reuse this same loop.
             loop = asyncio.new_event_loop()
+            ready_event = asyncio.Event()
+            shutdown_event = asyncio.Event()
+            state: dict[str, Any] = {}
+
+            async def _lifecycle() -> None:
+                """Own the transport/session AsyncExitStack for its entire
+                life: enter it, publish the session (or the failure) and
+                signal readiness, then wait to be told to shut down before
+                exiting the stack — all within this one Task, so entry and
+                exit are never split across different Tasks.
+                """
+                exit_stack = contextlib.AsyncExitStack()
+                try:
+                    session = await self._enter_session(exit_stack)
+                except Exception as exc:
+                    state["error"] = exc
+                    ready_event.set()
+                    await exit_stack.aclose()
+                    return
+
+                state["session"] = session
+                ready_event.set()
+                try:
+                    await shutdown_event.wait()
+                finally:
+                    await exit_stack.aclose()
+
+            task = loop.create_task(_lifecycle())
             try:
-                session = loop.run_until_complete(self._async_connect())
+                loop.run_until_complete(ready_event.wait())
             except Exception:
                 loop.close()
                 raise
 
+            if "error" in state:
+                # Drive the lifecycle task to completion (it still needs to
+                # unwind whatever it already entered) before surfacing the
+                # failure, so connect() never leaks a half-open connection.
+                try:
+                    loop.run_until_complete(task)
+                except Exception:
+                    pass
+                loop.close()
+                raise state["error"]
+
             self._loop = loop
-            self._session = session
+            self._session = state["session"]
+            self._lifecycle_task = task
+            self._shutdown_event = shutdown_event
 
         except Exception as exc:
             raise MemoryMCPConnectionError(
@@ -224,45 +300,44 @@ class MemoryMCPClient:
                 f"via {self.transport!r} transport: {exc}"
             ) from exc
 
-    async def _async_connect(self) -> ClientSession:
-        """Async connection logic.
+    async def _enter_session(self, exit_stack: contextlib.AsyncExitStack) -> ClientSession:
+        """Enter the transport and ``ClientSession`` into ``exit_stack`` and
+        initialize the session.
 
-        Enters the transport (``streamable_http_client`` or ``sse_client``)
-        and the session as async context managers via an ``AsyncExitStack``
-        stored on ``self``, so ``close()`` can unwind them later on the same
-        event loop. If anything after the transport is entered fails (e.g.
-        ``session.initialize()``), whatever was already entered is unwound
-        here before the exception propagates, so ``connect()`` never leaks a
-        half-open connection.
+        ``exit_stack`` is owned by the caller (the persistent lifecycle Task
+        started in ``connect()``), not by this method — this method does not
+        unwind it on failure; the caller is responsible for calling
+        ``exit_stack.aclose()`` (from the same Task) if this raises, so that
+        whatever was already entered (e.g. the transport, if
+        ``session.initialize()`` is what failed) is unwound rather than
+        leaked.
         """
-        exit_stack = contextlib.AsyncExitStack()
-        try:
-            if self.transport == "sse":
-                from mcp.client.sse import sse_client
+        if self.transport == "sse":
+            from mcp.client.sse import sse_client
 
-                read_stream, write_stream = await exit_stack.enter_async_context(
-                    sse_client(self.url)
-                )
-            else:  # "streamable-http"
-                from mcp.client.streamable_http import streamable_http_client
-
-                read_stream, write_stream, _get_session_id = await exit_stack.enter_async_context(
-                    streamable_http_client(self.url)
-                )
-
-            session = await exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
+            read_stream, write_stream = await exit_stack.enter_async_context(
+                sse_client(self.url)
             )
-            await session.initialize()
-        except Exception:
-            await exit_stack.aclose()
-            raise
+        else:  # "streamable-http"
+            from mcp.client.streamable_http import streamable_http_client
 
-        self._exit_stack = exit_stack
+            read_stream, write_stream, _get_session_id = await exit_stack.enter_async_context(
+                streamable_http_client(self.url)
+            )
+
+        session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+        await session.initialize()
         return session
 
     def close(self) -> None:
         """Close the connection to the memory MCP server.
+
+        Signals the persistent lifecycle Task (started in ``connect()``) to
+        shut down via ``self._shutdown_event``, then drives the event loop
+        with ``run_until_complete(task)`` until that *same* Task finishes
+        unwinding its ``AsyncExitStack`` — never by calling
+        ``exit_stack.aclose()`` from a task of its own, which is what caused
+        the cross-task cancel-scope error this lifecycle fixes (issue #58).
 
         Never raises: unwinding the session/HTTP transport can fail for
         reasons outside our control (e.g. the server already went away, or
@@ -276,14 +351,18 @@ class MemoryMCPClient:
             return
 
         loop = self._loop
-        exit_stack = self._exit_stack
+        task = self._lifecycle_task
+        shutdown_event = self._shutdown_event
         self._session = None
-        self._exit_stack = None
+        self._lifecycle_task = None
+        self._shutdown_event = None
         self._loop = None
 
         try:
-            if exit_stack is not None and loop is not None:
-                loop.run_until_complete(exit_stack.aclose())
+            if shutdown_event is not None:
+                shutdown_event.set()
+            if task is not None and loop is not None:
+                loop.run_until_complete(task)
         except Exception as exc:  # noqa: BLE001 - close() must never raise
             logger.warning(
                 "Error while closing MemoryMCPClient session: %s", exc, exc_info=True

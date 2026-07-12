@@ -91,9 +91,9 @@ class TestMemoryMCPClientConnection:
         """Context manager connects, keeps a persistent loop alive, resolves
         defaults, and tears everything down cleanly on exit."""
         with patch.object(
-            MemoryMCPClient, "_async_connect", new_callable=AsyncMock
-        ) as mock_async_connect:
-            mock_async_connect.return_value = mock_client_session
+            MemoryMCPClient, "_enter_session", new_callable=AsyncMock
+        ) as mock_enter_session:
+            mock_enter_session.return_value = mock_client_session
 
             with MemoryMCPClient() as client:
                 assert client._session is mock_client_session
@@ -103,15 +103,16 @@ class TestMemoryMCPClientConnection:
                 assert client.transport == "streamable-http"
                 loop = client._loop
 
-            # After exiting, session/exit-stack/loop are all cleared and the
+            # After exiting, session/task/loop are all cleared and the
             # loop itself is closed (not leaked, not reused across connections).
             assert client._session is None
             assert client._loop is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert loop.is_closed()
 
     def test_async_connect_streamable_http_wiring(self):
-        """_async_connect enters streamable_http_client then constructs
+        """_enter_session enters streamable_http_client then constructs
         ClientSession(read_stream, write_stream) — the 3-tuple's session-id
         callback must be discarded, not passed to ClientSession."""
         read_stream, write_stream = object(), object()
@@ -133,17 +134,18 @@ class TestMemoryMCPClientConnection:
             client = MemoryMCPClient(url="http://example.com/mcp", transport="streamable-http")
             loop = asyncio.new_event_loop()
             try:
-                session = loop.run_until_complete(client._async_connect())
+                exit_stack = contextlib.AsyncExitStack()
+                session = loop.run_until_complete(client._enter_session(exit_stack))
+                loop.run_until_complete(exit_stack.aclose())
             finally:
                 loop.close()
 
             mock_session_cls.assert_called_once_with(read_stream, write_stream)
             assert session is fake_session
             fake_session.initialize.assert_awaited_once()
-            assert client._exit_stack is not None
 
     def test_async_connect_sse_wiring(self):
-        """_async_connect enters sse_client (2-tuple) for the sse transport."""
+        """_enter_session enters sse_client (2-tuple) for the sse transport."""
         read_stream, write_stream = object(), object()
 
         @contextlib.asynccontextmanager
@@ -162,7 +164,9 @@ class TestMemoryMCPClientConnection:
             client = MemoryMCPClient(url="http://example.com/sse", transport="sse")
             loop = asyncio.new_event_loop()
             try:
-                session = loop.run_until_complete(client._async_connect())
+                exit_stack = contextlib.AsyncExitStack()
+                session = loop.run_until_complete(client._enter_session(exit_stack))
+                loop.run_until_complete(exit_stack.aclose())
             finally:
                 loop.close()
 
@@ -222,7 +226,8 @@ class TestMemoryMCPClientConnection:
         ), patch("tradingagents.memory.mcp_client.ClientSession", return_value=fake_session):
             client = MemoryMCPClient(url="http://example.com/mcp", transport="streamable-http")
             client.connect()
-            assert client._exit_stack is not None
+            assert client._lifecycle_task is not None
+            assert not client._lifecycle_task.done()
             loop = client._loop
 
             client.close()  # must not raise
@@ -230,9 +235,58 @@ class TestMemoryMCPClientConnection:
             fake_session.__aexit__.assert_awaited_once()
             assert exited == ["transport"]
             assert client._session is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert client._loop is None
             assert loop.is_closed()
+
+    def test_repeated_connect_close_no_cross_task_cancel_scope_error(self, caplog):
+        """Regression test for issue #58: opening and closing several
+        MemoryMCPClient instances in sequence (mirroring
+        run_trading_agents.py processing multiple tickers, each opening its
+        own client per ticker) must not raise or log a warning from close()
+        — in particular, no "Attempted to exit cancel scope in a different
+        task than it was entered in" RuntimeError, which is what happens
+        when the transport's AsyncExitStack is entered in one Task
+        (connect()'s) and exited in another (close()'s)."""
+        exited = []
+
+        @contextlib.asynccontextmanager
+        async def fake_streamable_http_client(url):
+            try:
+                yield (object(), object(), lambda: None)
+            finally:
+                exited.append("transport")
+
+        def make_fake_session():
+            fake_session = AsyncMock()
+            fake_session.__aenter__.return_value = fake_session
+            fake_session.__aexit__.return_value = None
+            return fake_session
+
+        with patch(
+            "mcp.client.streamable_http.streamable_http_client",
+            side_effect=fake_streamable_http_client,
+        ), patch(
+            "tradingagents.memory.mcp_client.ClientSession",
+            side_effect=lambda *a, **kw: make_fake_session(),
+        ):
+            with caplog.at_level("WARNING", logger="tradingagents.memory.mcp_client"):
+                for _ in range(3):
+                    client = MemoryMCPClient(
+                        url="http://example.com/mcp", transport="streamable-http"
+                    )
+                    client.connect()
+                    loop = client._loop
+                    client.close()  # must not raise
+                    assert client._session is None
+                    assert client._lifecycle_task is None
+                    assert client._shutdown_event is None
+                    assert client._loop is None
+                    assert loop.is_closed()
+
+            assert exited == ["transport"] * 3
+            assert caplog.records == []
 
     def test_close_does_not_raise_when_unwind_fails(self):
         """Regression-shaped test (mirrors issue #46's fix for SimulationClient):
@@ -260,7 +314,8 @@ class TestMemoryMCPClientConnection:
 
             fake_session.__aexit__.assert_awaited_once()
             assert client._session is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert client._loop is None
             assert loop.is_closed()
 
