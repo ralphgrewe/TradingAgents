@@ -227,26 +227,45 @@ class SimulationClient:
                 self._session.call_tool(tool_name, arguments or {})
             )
 
-            # Check if result has content (success)
-            if result.content:
-                # result.content is a list of TextContent/ImageContent/etc
-                if result.content and hasattr(result.content[0], "text"):
-                    # Try to parse JSON response
-                    import json
-
-                    try:
-                        return json.loads(result.content[0].text)
-                    except (json.JSONDecodeError, AttributeError):
-                        # Return as-is if not JSON
-                        return result.content[0].text if result.content else None
-
             # Check if there's an error
             if result.isError:
                 raise SimulationToolError(
                     f"Tool '{tool_name}' returned error: {result.content}"
                 )
 
-            return None
+            # Parse result following the reference implementation in mcp_client.py.
+            # Prefer structuredContent when available — it preserves the original
+            # type including empty and multi-element lists. The content list is
+            # only for backward compatibility and is unreliable for list-typed
+            # returns (empty list → zero blocks, N-item list → N blocks each
+            # containing one item — see issue #62).
+            import json
+
+            parsed: Any = None
+            if result.structuredContent is not None:
+                parsed = result.structuredContent.get("result")
+            elif result.content:
+                # Parse all content blocks as JSON; if there is more than one
+                # block, return them as a list.
+                parsed_items = []
+                for block in result.content:
+                    if hasattr(block, "text"):
+                        try:
+                            item = json.loads(block.text)
+                            parsed_items.append(item)
+                        except json.JSONDecodeError:
+                            # If not JSON, return the text as-is
+                            parsed_items.append(block.text)
+
+                # If single block, return it unwrapped; if multiple blocks,
+                # return as list; if zero blocks, return None.
+                if len(parsed_items) == 1:
+                    parsed = parsed_items[0]
+                elif len(parsed_items) > 1:
+                    parsed = parsed_items
+                # else: zero blocks → parsed stays None
+
+            return parsed
 
         except SimulationToolError:
             raise

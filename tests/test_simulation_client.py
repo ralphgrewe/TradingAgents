@@ -32,6 +32,7 @@ def mock_call_tool_result():
     result = MagicMock()
     result.isError = False
     result.content = []
+    result.structuredContent = None  # Explicitly None to test legacy content path
     return result
 
 
@@ -303,6 +304,94 @@ class TestSimulationClientToolCalls:
             connected_client._call_tool_sync("test_tool")
         assert "failed" in str(exc_info.value).lower()
 
+    def test_call_tool_sync_structured_content_preferred(self, connected_client):
+        """structuredContent is preferred over content blocks."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": [{"id": "depot1"}, {"id": "depot2"}]}
+        result.content = []  # Even though empty, structuredContent should be used
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("list_depots")
+        assert parsed == [{"id": "depot1"}, {"id": "depot2"}]
+
+    def test_call_tool_sync_structured_content_empty_list(self, connected_client):
+        """structuredContent with empty list is handled correctly."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": []}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("list_depots")
+        assert parsed == []
+
+    def test_call_tool_sync_zero_content_blocks(self, connected_client):
+        """Zero content blocks returns None."""
+        result = MagicMock()
+        result.isError = False
+        result.content = []
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("some_tool")
+        assert parsed is None
+
+    def test_call_tool_sync_one_content_block_dict(self, connected_client):
+        """One content block with dict is unwrapped."""
+        test_dict = {"id": "default", "size_bytes": 1024}
+        content = MagicMock()
+        content.text = json.dumps(test_dict)
+        result = MagicMock()
+        result.isError = False
+        result.content = [content]
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("get_depot")
+        assert parsed == test_dict
+
+    def test_call_tool_sync_multiple_content_blocks(self, connected_client):
+        """Multiple content blocks are returned as a list."""
+        block1_dict = {"id": "depot1"}
+        block2_dict = {"id": "depot2"}
+        block3_dict = {"id": "depot3"}
+
+        content1 = MagicMock()
+        content1.text = json.dumps(block1_dict)
+        content2 = MagicMock()
+        content2.text = json.dumps(block2_dict)
+        content3 = MagicMock()
+        content3.text = json.dumps(block3_dict)
+
+        result = MagicMock()
+        result.isError = False
+        result.content = [content1, content2, content3]
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("list_depots")
+        assert parsed == [block1_dict, block2_dict, block3_dict]
+
+    def test_call_tool_sync_non_json_text_fallback(self, connected_client):
+        """Non-JSON text in content blocks is returned as-is."""
+        content = MagicMock()
+        content.text = "plain text response"
+        result = MagicMock()
+        result.isError = False
+        result.content = [content]
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        parsed = connected_client._call_tool_sync("test_tool")
+        assert parsed == "plain text response"
+
 
 class TestListDepots:
     """Tests for list_depots method."""
@@ -333,6 +422,54 @@ class TestListDepots:
         assert result == depots
         assert len(result) == 2
 
+    def test_list_depots_empty_fresh_simulator(self, connected_client):
+        """list_depots returns [] on a fresh simulator (via structuredContent)."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": []}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.list_depots()
+        assert result_list == []
+        assert isinstance(result_list, list)
+
+    def test_list_depots_single_depot_via_structured_content(self, connected_client):
+        """list_depots returns [dict] for single depot via structuredContent."""
+        depot = {"id": "default", "db_path": "/data/simulation.db", "size_bytes": 1024}
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": [depot]}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.list_depots()
+        assert result_list == [depot]
+        assert isinstance(result_list, list)
+
+    def test_list_depots_single_depot_via_content_block(self, connected_client):
+        """list_depots returns [dict] for single depot via single content block.
+
+        This tests that when MCP returns a single-element list as a single
+        content block (legacy behavior), we still wrap it as a list."""
+        depot = {"id": "default", "db_path": "/data/simulation.db", "size_bytes": 1024}
+        content = MagicMock()
+        content.text = json.dumps(depot)
+        result = MagicMock()
+        result.isError = False
+        result.content = [content]
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        # The tool wrapper calls _call_tool_sync, which returns the dict.
+        # list_depots validates and raises if not a list.
+        with pytest.raises(SimulationToolError) as exc_info:
+            connected_client.list_depots()
+        assert "non-list" in str(exc_info.value)
+
     def test_list_depots_validates_list_type(self, connected_client):
         """list_depots raises error if result is not a list."""
         content = MagicMock()
@@ -340,6 +477,7 @@ class TestListDepots:
         mock_result = MagicMock()
         mock_result.content = [content]
         mock_result.isError = False
+        mock_result.structuredContent = None
 
         connected_client._session.call_tool = AsyncMock(return_value=mock_result)
 
@@ -461,6 +599,29 @@ class TestGetPortfolio:
 
         call_args = connected_client._session.call_tool.call_args
         assert call_args[0][1]["depot_id"] == "default"
+
+    def test_get_portfolio_via_structured_content(self, connected_client):
+        """get_portfolio returns dict via structuredContent (not wrapped)."""
+        portfolio = {
+            "depot_id": "default",
+            "cash": 95000.0,
+            "currency": "USD",
+            "positions": {"AAPL": {"shares": 10, "price": 150.0, "market_value": 1500.0}},
+            "positions_value": 1500.0,
+            "total_equity": 96500.0,
+        }
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": portfolio}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_dict = connected_client.get_portfolio("default")
+        # Must be a dict, not wrapped in a list
+        assert isinstance(result_dict, dict)
+        assert result_dict == portfolio
+        assert result_dict["depot_id"] == "default"
 
 
 class TestGetQuote:
@@ -640,6 +801,44 @@ class TestGetTrades:
         assert len(result) == 2
         assert result[0]["id"] == "trade-002"  # Newest first
 
+    def test_get_trades_empty_via_structured_content(self, connected_client):
+        """get_trades returns [] on fresh depot (via structuredContent)."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": []}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.get_trades(depot_id="new-depot")
+        assert result_list == []
+        assert isinstance(result_list, list)
+
+    def test_get_trades_single_trade_via_structured_content(self, connected_client):
+        """get_trades returns [dict] for single trade via structuredContent."""
+        trade = {
+            "id": "trade-001",
+            "ts": "2025-07-05T14:00:00Z",
+            "symbol": "MSFT",
+            "side": "buy",
+            "quantity": 10,
+            "price": 400.00,
+            "fee": 2.50,
+            "gross": 4000.00,
+            "net": 4002.50,
+            "cash_after": 95997.50,
+        }
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = {"result": [trade]}
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.get_trades()
+        assert result_list == [trade]
+        assert isinstance(result_list, list)
+
     def test_get_trades_default_args(self, connected_client, mock_call_tool_result):
         """get_trades uses defaults for limit, symbol, depot_id."""
         trades = []
@@ -665,6 +864,7 @@ class TestGetTrades:
         mock_result = MagicMock()
         mock_result.content = [content]
         mock_result.isError = False
+        mock_result.structuredContent = None
 
         connected_client._session.call_tool = AsyncMock(return_value=mock_result)
 
@@ -678,8 +878,8 @@ class TestGetServerConfig:
 
     def test_get_server_config_from_settings(self):
         """_get_server_config returns values from config when set."""
-        from tradingagents.simulation import _get_server_config
         from tradingagents.dataflows.config import set_config
+        from tradingagents.simulation import _get_server_config
 
         set_config({
             "simulation_server_command": "/custom/python",
@@ -692,8 +892,8 @@ class TestGetServerConfig:
 
     def test_get_server_config_fallback_to_sibling(self):
         """_get_server_config falls back to sibling checkout when config not set."""
-        from tradingagents.simulation import _get_server_config
         from tradingagents.dataflows.config import set_config
+        from tradingagents.simulation import _get_server_config
 
         set_config({
             "simulation_server_command": None,
@@ -710,8 +910,8 @@ class TestGetServerConfig:
 
     def test_get_server_config_missing_sibling(self):
         """_get_server_config raises error when sibling not found and no config."""
-        from tradingagents.simulation import _get_server_config
         from tradingagents.dataflows.config import set_config
+        from tradingagents.simulation import _get_server_config
 
         set_config({
             "simulation_server_command": None,
