@@ -380,15 +380,36 @@ class TradingAgentsGraph:
 
         if self.debug:
             trace = []
-            for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
+            last_printed_message = None
+
+            # Use "updates" mode to get node names for each state delta
+            # Override stream_mode from args to use "updates" instead of "values"
+            debug_args = {**args, "stream_mode": "updates"}
+            for chunk in self.graph.stream(init_agent_state, **debug_args):
+                # chunk is {node_name: state_delta}
+                for node_name, state_delta in chunk.items():
+                    trace.append(state_delta)
+
+                    # Check if this node delta has messages
+                    if state_delta.get("messages"):
+                        current_message = state_delta["messages"][-1]
+
+                        # Deduplicate: only print if message content or type differs
+                        # Create a key from message type and content for comparison
+                        message_key = (
+                            type(current_message).__name__,
+                            current_message.content,
+                        )
+                        if last_printed_message is None or last_printed_message != message_key:
+                            # Print node name header
+                            print(f"\n── {node_name} ──")
+                            current_message.pretty_print()
+                            last_printed_message = message_key
+
             # Streamed chunks are per-node deltas. Merge them so the returned
             # state matches what graph.invoke() yields in the non-debug path.
-            final_state = {}
+            # Start with initial state to preserve fields not modified by any node.
+            final_state = dict(init_agent_state)
             for chunk in trace:
                 final_state.update(chunk)
         else:
