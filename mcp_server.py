@@ -46,9 +46,9 @@ import logging
 import os
 import sys
 import tempfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # ── make sure the TradingAgents package is importable ───────────────────────
 _HERE = Path(__file__).parent.resolve()
@@ -62,19 +62,29 @@ _mcp_transport = os.environ.get("MCP_TRANSPORT", "stdio")
 _fastmcp_host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
 _fastmcp_port = os.environ.get("FASTMCP_PORT", "8000")
 
+# Module logger, defined unconditionally — same convention used elsewhere in
+# this codebase (trading_graph.py, dataflows/interface.py, memory/resolve.py,
+# memory/mcp_client.py): a plain `logging.getLogger(__name__)`, with no
+# `if logger:` guard at call sites. For stdio transport, stdout is the
+# JSON-RPC protocol channel, so logging is suppressed process-wide via
+# `logging.disable` below; every `logger.info`/`logger.error` call anywhere
+# in this module then costs nothing and doesn't need special-casing.
+logger = logging.getLogger(__name__)
+
 # ── configure logging based on transport ──────────────────────────────────────
 # For stdio, keep logging suppressed to avoid corrupting the JSON-RPC protocol.
 # For networked transports (streamable-http, sse), enable logging for visibility.
-if _mcp_transport != "stdio":
+if _mcp_transport == "stdio":
+    logging.disable(logging.CRITICAL)
+else:
+    # force=True: guarantees the root logger is (re)configured even if a
+    # handler already exists (e.g. this module reloaded within one process,
+    # as the test suite does) rather than basicConfig silently no-op'ing.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
+        force=True,
     )
-    _logger = logging.getLogger(__name__)
-else:
-    # For stdio, suppress logging to keep stdout clean (it's the protocol channel)
-    logging.disable(logging.CRITICAL)
-    _logger = None
 
 mcp = FastMCP(
     "TradingAgents",
@@ -130,6 +140,35 @@ def _run_analysis(ticker: str, date: str) -> tuple[str, dict]:
     return report_md, structured_data, decision
 
 
+# ── shared start/success/error logging for tool wrappers ────────────────────
+# Factored out of the 6 tool functions below (design-review follow-up on
+# issue #59: the log-start/log-success/log-error control flow was previously
+# hand-copy-pasted, with slightly different phrasing, in every one of them).
+# Each wrapper uses this the same way:
+#
+#   try:
+#       with _log_tool_call("tool_name", **args_worth_logging):
+#           result = ...  # the call that may raise
+#       return result
+#   except Exception as exc:
+#       return f"ERROR: {exc}"
+#
+# The context manager only owns logging (start / completed / failed lines,
+# each naming the tool and its arguments); it re-raises so each wrapper keeps
+# its own conversion of exceptions into the "ERROR: ..." string return value.
+@contextmanager
+def _log_tool_call(name: str, **fields: Any) -> Iterator[None]:
+    arg_str = ", ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info("%s: starting (%s)", name, arg_str)
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - logged for visibility, then re-raised
+        logger.error("%s: failed (%s): %s", name, arg_str, exc)
+        raise
+    else:
+        logger.info("%s: completed (%s)", name, arg_str)
+
+
 @mcp.tool()
 def analyze_stock(ticker: str, date: str) -> str:
     """
@@ -150,16 +189,10 @@ def analyze_stock(ticker: str, date: str) -> str:
     """
     ticker = ticker.strip().upper()
 
-    if _logger:
-        _logger.info(f"analyze_stock: starting analysis for ticker={ticker}, date={date}")
-
     try:
-        report_md, structured_data, decision = _run_analysis(ticker, date)
-        if _logger:
-            _logger.info(f"analyze_stock: completed successfully for ticker={ticker}, date={date}")
+        with _log_tool_call("analyze_stock", ticker=ticker, date=date):
+            report_md, structured_data, decision = _run_analysis(ticker, date)
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"analyze_stock: failed for ticker={ticker}, date={date}: {exc}")
         return f"ERROR: {exc}"
 
     structured_block = (
@@ -223,28 +256,24 @@ def memory_store_decision(
         existed for this (agent, ticker, date) key. On error, a string
         starting with "ERROR:".
     """
-    if _logger:
-        _logger.info(f"memory_store_decision: agent={agent}, ticker={ticker}, date={date}, signal={signal}")
-
     try:
-        from tradingagents.memory import store_decision
+        with _log_tool_call(
+            "memory_store_decision", agent=agent, ticker=ticker, date=date, signal=signal
+        ):
+            from tradingagents.memory import store_decision
 
-        result = store_decision(
-            agent=agent,
-            ticker=ticker,
-            date=date,
-            signal=signal,
-            confidence=confidence,
-            key_drivers=key_drivers,
-            thesis=thesis,
-            db_path=db_path,
-        )
-        if _logger:
-            _logger.info(f"memory_store_decision: completed for agent={agent}, ticker={ticker}, date={date}")
+            result = store_decision(
+                agent=agent,
+                ticker=ticker,
+                date=date,
+                signal=signal,
+                confidence=confidence,
+                key_drivers=key_drivers,
+                thesis=thesis,
+                db_path=db_path,
+            )
         return result
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"memory_store_decision: failed for agent={agent}, ticker={ticker}, date={date}: {exc}")
         return f"ERROR: {exc}"
 
 
@@ -273,19 +302,13 @@ def memory_resolve_pending(
         A list of `decisions.id` values resolved by this call (possibly
         empty). On error, a string starting with "ERROR:".
     """
-    if _logger:
-        _logger.info(f"memory_resolve_pending: agent={agent}, ticker={ticker}")
-
     try:
-        from tradingagents.memory import resolve_pending
+        with _log_tool_call("memory_resolve_pending", agent=agent, ticker=ticker):
+            from tradingagents.memory import resolve_pending
 
-        result = resolve_pending(agent=agent, ticker=ticker, db_path=db_path)
-        if _logger:
-            _logger.info(f"memory_resolve_pending: completed for agent={agent}, ticker={ticker}")
+            result = resolve_pending(agent=agent, ticker=ticker, db_path=db_path)
         return result
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"memory_resolve_pending: failed for agent={agent}, ticker={ticker}: {exc}")
         return f"ERROR: {exc}"
 
 
@@ -318,21 +341,17 @@ def memory_get_past_context(
         (a "no prior lessons" placeholder is returned when nothing matches).
         On error, a string starting with "ERROR:".
     """
-    if _logger:
-        _logger.info(f"memory_get_past_context: agent={agent}, ticker={ticker}, n_same={n_same}, n_cross={n_cross}")
-
     try:
-        from tradingagents.memory import get_past_context
+        with _log_tool_call(
+            "memory_get_past_context", agent=agent, ticker=ticker, n_same=n_same, n_cross=n_cross
+        ):
+            from tradingagents.memory import get_past_context
 
-        result = get_past_context(
-            agent=agent, ticker=ticker, n_same=n_same, n_cross=n_cross, db_path=db_path
-        )
-        if _logger:
-            _logger.info(f"memory_get_past_context: completed for agent={agent}, ticker={ticker}")
+            result = get_past_context(
+                agent=agent, ticker=ticker, n_same=n_same, n_cross=n_cross, db_path=db_path
+            )
         return result
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"memory_get_past_context: failed for agent={agent}, ticker={ticker}: {exc}")
         return f"ERROR: {exc}"
 
 
@@ -360,19 +379,13 @@ def memory_get_statistics(
         tradingagents.memory.stats.get_statistics for the exact shape. On
         error, a string starting with "ERROR:".
     """
-    if _logger:
-        _logger.info(f"memory_get_statistics: agent={agent}, ticker={ticker}, since={since}")
-
     try:
-        from tradingagents.memory import get_statistics
+        with _log_tool_call("memory_get_statistics", agent=agent, ticker=ticker, since=since):
+            from tradingagents.memory import get_statistics
 
-        result = get_statistics(agent=agent, ticker=ticker, since=since, db_path=db_path)
-        if _logger:
-            _logger.info(f"memory_get_statistics: completed for agent={agent}, ticker={ticker}")
+            result = get_statistics(agent=agent, ticker=ticker, since=since, db_path=db_path)
         return result
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"memory_get_statistics: failed for agent={agent}, ticker={ticker}: {exc}")
         return f"ERROR: {exc}"
 
 
@@ -414,26 +427,22 @@ def memory_get_decisions(
         BUY/HOLD/SELL, and is ``True``/``False`` otherwise. On error, a string
         starting with "ERROR:".
     """
-    if _logger:
-        _logger.info(f"memory_get_decisions: agent={agent}, ticker={ticker}, limit={limit}, misses_only={misses_only}")
-
     try:
-        from tradingagents.memory import DEFAULT_CONTEXT_LIMIT, gather_context_rows
+        with _log_tool_call(
+            "memory_get_decisions", agent=agent, ticker=ticker, limit=limit, misses_only=misses_only
+        ):
+            from tradingagents.memory import DEFAULT_CONTEXT_LIMIT, gather_context_rows
 
-        effective_limit = limit if limit is not None else DEFAULT_CONTEXT_LIMIT
-        result = gather_context_rows(
-            agent=agent,
-            ticker=ticker,
-            db_path=db_path,
-            limit=effective_limit,
-            misses_only=misses_only,
-        )
-        if _logger:
-            _logger.info(f"memory_get_decisions: completed for agent={agent}, ticker={ticker}")
+            effective_limit = limit if limit is not None else DEFAULT_CONTEXT_LIMIT
+            result = gather_context_rows(
+                agent=agent,
+                ticker=ticker,
+                db_path=db_path,
+                limit=effective_limit,
+                misses_only=misses_only,
+            )
         return result
     except Exception as exc:  # noqa: BLE001
-        if _logger:
-            _logger.error(f"memory_get_decisions: failed for agent={agent}, ticker={ticker}: {exc}")
         return f"ERROR: {exc}"
 
 
@@ -441,24 +450,24 @@ if __name__ == "__main__":
     # Validate MCP_TRANSPORT env var and dispatch to appropriate transport
     valid_transports = {"stdio", "streamable-http", "sse"}
     if _mcp_transport not in valid_transports:
-        # For stdio, logging is disabled, so surface this error via print.
-        # For networked transports, the logger is available.
+        # "stdio" is itself a valid transport, so this branch is only ever
+        # reached for a value other than "stdio" — logging is always enabled
+        # here (see the transport branch above) and this call surfaces the
+        # error via logging's default stderr handler.
         error_msg = (
             f"ERROR: Invalid MCP_TRANSPORT '{_mcp_transport}'. "
             f"Must be one of: {', '.join(sorted(valid_transports))}"
         )
-        if _logger:
-            _logger.error(error_msg)
-        else:
-            print(error_msg, file=sys.stderr)
+        logger.error(error_msg)
         sys.exit(2)
 
-    # Log startup for networked transports
-    if _logger:
-        _logger.info(
-            f"TradingAgents MCP server starting on {_mcp_transport} "
-            f"(host={_fastmcp_host}, port={_fastmcp_port})"
-        )
+    # Log startup for networked transports (a no-op under stdio, see above).
+    logger.info(
+        "TradingAgents MCP server starting on %s (host=%s, port=%s)",
+        _mcp_transport,
+        _fastmcp_host,
+        _fastmcp_port,
+    )
 
     if _mcp_transport == "stdio":
         mcp.run()
