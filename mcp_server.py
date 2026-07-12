@@ -232,7 +232,7 @@ def memory_store_decision(
     key_drivers: Any = None,
     thesis: str | None = None,
     db_path: str | None = None,
-) -> Any:
+) -> bool | str:
     """
     Record a pending trading decision in the shared memory core.
 
@@ -282,7 +282,7 @@ def memory_resolve_pending(
     agent: str | None = None,
     ticker: str | None = None,
     db_path: str | None = None,
-) -> Any:
+) -> list[int] | str:
     """
     Resolve pending memory-core decisions whose horizon has elapsed.
 
@@ -292,6 +292,11 @@ def memory_resolve_pending(
     realized forward return and an LLM-generated lesson, and writes both
     back. Rows whose window hasn't elapsed yet, or whose price data isn't
     available yet, are left pending untouched (no error).
+
+    Why this needs an LLM call at all: turning a resolved decision into a
+    prose "lesson" is a synthesis step, not a lookup — see the module
+    docstring above `_build_reflector`/`_generate_lesson` in
+    tradingagents/memory/resolve.py for the full rationale.
 
     Args:
         agent: Optional exact agent id to restrict to.
@@ -319,7 +324,7 @@ def memory_get_past_context(
     n_same: int = 5,
     n_cross: int = 3,
     db_path: str | None = None,
-) -> Any:
+) -> str:
     """
     Render past resolved memory-core lessons for an agent/ticker as markdown.
 
@@ -361,7 +366,7 @@ def memory_get_statistics(
     ticker: str | None = None,
     since: str | None = None,
     db_path: str | None = None,
-) -> Any:
+) -> dict[str, Any] | str:
     """
     Compute hit-rate / average-return / calibration statistics from the memory core.
 
@@ -396,7 +401,7 @@ def memory_get_decisions(
     db_path: str | None = None,
     limit: int | None = None,
     misses_only: bool = False,
-) -> Any:
+) -> list[dict[str, Any]] | str:
     """
     Fetch raw per-decision context rows for an agent/ticker pair from the memory core.
 

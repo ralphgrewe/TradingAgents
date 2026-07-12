@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 
 import mcp_server
 from tradingagents.memory.resolve import DEFAULT_HORIZON_DAYS
@@ -70,6 +71,95 @@ def test_memory_tools_are_registered():
         "memory_get_statistics",
         "memory_get_decisions",
     } <= names
+
+
+# ---------------------------------------------------------------------------
+# Real FastMCP schema generation / structuredContent (issue #60 regression).
+#
+# Every existing structuredContent test elsewhere (test_memory_mcp_client.py)
+# mocks CallToolResult directly, so it never exercises FastMCP's actual
+# schema-builder. A `-> Any` return annotation makes that schema-builder give
+# up silently (outputSchema=None), which drops structuredContent entirely and
+# leaves a `[]`/`False` result with zero legacy content blocks too -- the
+# client then sees `None` where it expected the real value. These tests go
+# through a real in-memory MCP client/server session (mcp.shared.memory) so
+# they would have failed before the return-type annotations were fixed and
+# pass now.
+# ---------------------------------------------------------------------------
+
+
+async def _call_tool(name, arguments):
+    async with create_connected_server_and_client_session(mcp_server.mcp) as client:
+        return await client.call_tool(name, arguments)
+
+
+async def _list_tools():
+    async with create_connected_server_and_client_session(mcp_server.mcp) as client:
+        return await client.list_tools()
+
+
+def test_all_memory_tools_have_non_none_output_schema():
+    """Every memory_* tool must build a real output schema.
+
+    Before the fix, `-> Any` annotations made FastMCP's schema-builder treat
+    the return type as "a class with no type hints" and silently skip
+    building an outputSchema, i.e. outputSchema stayed None for all five
+    tools regardless of what they actually returned.
+    """
+    tools = asyncio.run(_list_tools())
+    by_name = {t.name: t for t in tools.tools}
+    for name in (
+        "memory_store_decision",
+        "memory_resolve_pending",
+        "memory_get_past_context",
+        "memory_get_statistics",
+        "memory_get_decisions",
+    ):
+        assert by_name[name].outputSchema is not None, f"{name} has no outputSchema"
+
+
+def test_resolve_pending_empty_list_round_trips_via_real_session(tmp_path):
+    """memory_resolve_pending returning [] must populate structuredContent.
+
+    This is the exact crash from issue #60: a real client
+    (tradingagents/memory/mcp_client.py) prefers structuredContent, and for
+    an empty list the legacy `content` fallback has zero blocks -- without
+    structuredContent, `resolve_pending()`'s isinstance(result, list) check
+    fails against None and raises MemoryMCPToolError. Nothing here needs to
+    resolve (no rows stored), so the tool call legitimately returns [].
+    """
+    db_path = _db_path(tmp_path)
+
+    result = asyncio.run(_call_tool("memory_resolve_pending", {"db_path": db_path}))
+
+    assert result.isError is False
+    assert result.structuredContent == {"result": []}
+
+
+def test_store_decision_duplicate_false_round_trips_via_real_session(tmp_path):
+    """memory_store_decision returning False (duplicate key) must populate
+    structuredContent -- the same "falsy value, zero content blocks" gap
+    reported for memory_get_decisions/[] in issue #60 also applies to the
+    bool return here."""
+    db_path = _db_path(tmp_path)
+
+    first = asyncio.run(
+        _call_tool(
+            "memory_store_decision",
+            {"agent": "trader", "ticker": "AAPL", "date": BACKDATED, "signal": "Buy", "db_path": db_path},
+        )
+    )
+    assert first.structuredContent == {"result": True}
+
+    duplicate = asyncio.run(
+        _call_tool(
+            "memory_store_decision",
+            {"agent": "trader", "ticker": "AAPL", "date": BACKDATED, "signal": "Sell", "db_path": db_path},
+        )
+    )
+
+    assert duplicate.isError is False
+    assert duplicate.structuredContent == {"result": False}
 
 
 # ---------------------------------------------------------------------------

@@ -123,6 +123,12 @@ def _fetch_forward_return(
         return None
 
 
+# Why resolving a pending row needs an LLM call at all: this isn't a plain
+# lookup. `_generate_lesson` below turns a resolved decision (signal,
+# confidence, key drivers, realized forward return) into a 2-4 sentence
+# prose "lesson" for later prompt injection — that's a synthesis step, and
+# synthesis needs an LLM. See the "Lesson generation" bullet in this
+# module's top docstring for the fuller rationale (issue #60).
 def _build_reflector():
     """Build a ``Reflector`` wired to the configured quick-thinking LLM.
 
