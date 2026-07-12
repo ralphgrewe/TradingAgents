@@ -52,10 +52,10 @@ class TestSimulationClientConnection:
         with patch(
             "tradingagents.simulation._get_server_config"
         ) as mock_config, patch.object(
-            SimulationClient, "_async_connect", new_callable=AsyncMock
-        ) as mock_async_connect:
+            SimulationClient, "_enter_session", new_callable=AsyncMock
+        ) as mock_enter_session:
             mock_config.return_value = ("/path/to/python", ["/path/to/mcp_server.py"])
-            mock_async_connect.return_value = mock_client_session
+            mock_enter_session.return_value = mock_client_session
 
             with SimulationClient() as client:
                 assert client._session is mock_client_session
@@ -63,15 +63,16 @@ class TestSimulationClientConnection:
                 assert not client._loop.is_closed()
                 loop = client._loop
 
-            # After exiting, session/exit-stack/loop are all cleared and the loop
+            # After exiting, session/task/loop are all cleared and the loop
             # itself is closed (not leaked, not reused across connections).
             assert client._session is None
             assert client._loop is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert loop.is_closed()
 
-    def test_async_connect_uses_real_stdio_and_session_wiring(self):
-        """_async_connect must call ClientSession(read_stream, write_stream) — the
+    def test_enter_session_uses_real_stdio_and_session_wiring(self):
+        """_enter_session must call ClientSession(read_stream, write_stream) — the
         exact bug from issue #46 (`ClientSession(transport)` with a single
         positional arg) — and enter both context managers via the exit stack."""
         read_stream, write_stream = object(), object()
@@ -92,18 +93,20 @@ class TestSimulationClientConnection:
             client = SimulationClient()
             loop = asyncio.new_event_loop()
             try:
+                exit_stack = contextlib.AsyncExitStack()
                 session = loop.run_until_complete(
-                    client._async_connect(
-                        StdioServerParameters(command="python", args=["server.py"])
+                    client._enter_session(
+                        StdioServerParameters(command="python", args=["server.py"]),
+                        exit_stack,
                     )
                 )
+                loop.run_until_complete(exit_stack.aclose())
             finally:
                 loop.close()
 
             mock_session_cls.assert_called_once_with(read_stream, write_stream)
             assert session is fake_session
             fake_session.initialize.assert_awaited_once()
-            assert client._exit_stack is not None
 
     def test_connect_unwinds_partial_state_on_initialize_failure(self):
         """If session.initialize() fails, whatever was already entered (the stdio
@@ -141,8 +144,7 @@ class TestSimulationClientConnection:
         """close() must actually drive the AsyncExitStack unwind end-to-end —
         i.e. the entered stdio/session context managers' __aexit__ run — not just
         close a loop. (test_context_manager_connect_disconnect mocks
-        _async_connect wholesale, so _exit_stack stays None there and this path
-        is never exercised.)"""
+        _enter_session wholesale, so this path is never exercised there.)"""
         exited = []
 
         @contextlib.asynccontextmanager
@@ -164,7 +166,8 @@ class TestSimulationClientConnection:
         ), patch("tradingagents.simulation.ClientSession", return_value=fake_session):
             client = SimulationClient()
             client.connect()
-            assert client._exit_stack is not None
+            assert client._lifecycle_task is not None
+            assert not client._lifecycle_task.done()
             loop = client._loop
 
             client.close()  # must not raise
@@ -174,7 +177,8 @@ class TestSimulationClientConnection:
             assert exited == ["stdio"]
             # Internal state cleared and loop closed.
             assert client._session is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert client._loop is None
             assert loop.is_closed()
 
@@ -211,9 +215,56 @@ class TestSimulationClientConnection:
 
             fake_session.__aexit__.assert_awaited_once()
             assert client._session is None
-            assert client._exit_stack is None
+            assert client._lifecycle_task is None
+            assert client._shutdown_event is None
             assert client._loop is None
             assert loop.is_closed()
+
+    def test_repeated_connect_close_no_cross_task_cancel_scope_error(self, caplog):
+        """Regression test for issue #63: opening and closing several
+        SimulationClient instances in sequence must not raise or log a warning
+        from close() — in particular, no "Attempted to exit cancel scope in a
+        different task than it was entered in" RuntimeError, which is what
+        happens when the stdio transport's AsyncExitStack is entered in one
+        Task (connect()'s) and exited in another (close()'s)."""
+        exited = []
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(server_params):
+            try:
+                yield (object(), object())
+            finally:
+                exited.append("stdio")
+
+        def make_fake_session():
+            fake_session = AsyncMock()
+            fake_session.__aenter__.return_value = fake_session
+            fake_session.__aexit__.return_value = None
+            return fake_session
+
+        with patch(
+            "tradingagents.simulation._get_server_config",
+            return_value=("/path/to/python", ["/path/to/mcp_server.py"]),
+        ), patch(
+            "tradingagents.simulation.stdio_client", side_effect=fake_stdio_client
+        ), patch(
+            "tradingagents.simulation.ClientSession",
+            side_effect=lambda *a, **kw: make_fake_session(),
+        ):
+            with caplog.at_level("WARNING", logger="tradingagents.simulation"):
+                for _ in range(3):
+                    client = SimulationClient()
+                    client.connect()
+                    loop = client._loop
+                    client.close()  # must not raise
+                    assert client._session is None
+                    assert client._lifecycle_task is None
+                    assert client._shutdown_event is None
+                    assert client._loop is None
+                    assert loop.is_closed()
+
+            assert exited == ["stdio"] * 3
+            assert caplog.records == []
 
     def test_connection_error_propagates(self):
         """Connection errors are converted to SimulationConnectionError."""

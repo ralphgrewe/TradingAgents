@@ -11,6 +11,48 @@ Usage:
         portfolio = client.get_portfolio("my-depot")
         quote = client.get_quote("AAPL")
         order = client.place_order("AAPL", "buy", 10, "my-depot")
+
+Design choices (mirrors ``tradingagents/memory/mcp_client.py``'s
+``MemoryMCPClient`` — connect/close/context-manager shape and event-loop
+lifecycle — adapted from ``mcp.client.streamable_http``/``mcp.client.sse`` to
+``mcp.client.stdio``, which manages a server subprocess rather than an HTTP
+connection; see that module's docstring section "Event-loop lifecycle" for
+the original rationale and commit 8d60230/issue #58 for the bug it fixes):
+
+- **Event-loop lifecycle**: a single event loop is created in ``connect()``
+  and kept alive for the client's whole lifetime, reused for every
+  subsequent tool call, and closed in ``close()`` — but entering and exiting
+  the transport's ``AsyncExitStack`` (stdio streams + ``ClientSession``) is
+  **not** split across two independent ``loop.run_until_complete()`` calls.
+  Each ``run_until_complete()`` wraps its coroutine in a brand-new
+  ``asyncio.Task`` even on the same loop, and the stdio transport
+  (``mcp.client.stdio.stdio_client``) opens an anyio ``TaskGroup`` internally
+  whose cancel scope must be entered *and* exited by the same ``Task`` —
+  entering it in one ``run_until_complete()`` call (``connect()``) and
+  exiting it in another (``close()``) raises ``RuntimeError: Attempted to
+  exit cancel scope in a different task than it was entered in`` (issue #63,
+  the same bug as #58).
+
+  Instead, ``connect()`` starts one persistent coroutine as a single
+  ``asyncio.Task`` (``self._lifecycle_task``, via ``loop.create_task()``)
+  that owns the entire session lifetime: it enters the transport/session
+  into an ``AsyncExitStack`` (via ``_enter_session()``), signals readiness
+  through a dedicated event, then blocks on ``self._shutdown_event.wait()``
+  until told to unwind, and only then calls ``exit_stack.aclose()`` — all
+  inside that one Task. ``connect()`` drives the loop just far enough to
+  observe readiness (or failure) and capture the session; ``close()`` sets
+  ``self._shutdown_event`` and drives the loop with
+  ``run_until_complete(self._lifecycle_task)`` until that *same* task
+  finishes unwinding — which also terminates the server subprocess, since
+  ``stdio_client``'s ``__aexit__`` tears it down — rather than closing the
+  stack from a task of its own. Tool calls (``_call_tool_sync``) still run
+  each ``session.call_tool()`` in its own ad hoc ``run_until_complete()``
+  task — that's fine, since they only drive the already-open streams/session
+  and never touch the transport's task group directly; only the stack's
+  entry/exit needed to move into the persistent task. ``close()`` never
+  raises (same contract and rationale as before, see commit c42d73c) — any
+  error unwinding the exit stack or closing the loop is logged as a warning
+  rather than propagated, and internal state is always cleared.
 """
 
 from __future__ import annotations
@@ -18,8 +60,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -71,14 +111,15 @@ class SimulationClient:
         self.server_command = server_command
         self.server_args = server_args
         self._session: ClientSession | None = None
-        # The stdio transport and ClientSession are async context managers whose
-        # yielded streams are bound to the event loop that entered them. A single
-        # loop is kept alive for the client's whole lifetime (connect -> N tool
-        # calls -> close) instead of spinning up a fresh one per call, and the
-        # AsyncExitStack that entered both context managers is kept around so
-        # close() can unwind them on that same loop.
+        # See module docstring "Event-loop lifecycle" — one loop plus one
+        # persistent lifecycle Task (which owns the AsyncExitStack
+        # internally) are kept alive for connect() -> N tool calls ->
+        # close(), never recreated per call. The exit stack itself lives in
+        # the lifecycle task's coroutine frame, not as an attribute here —
+        # only the same Task that entered it may exit it (issue #63).
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._exit_stack: contextlib.AsyncExitStack | None = None
+        self._lifecycle_task: asyncio.Task | None = None
+        self._shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> SimulationClient:
         """Context manager entry."""
@@ -92,8 +133,15 @@ class SimulationClient:
     def connect(self) -> None:
         """Connect to the MCP server.
 
+        Starts a single persistent lifecycle Task (see module docstring
+        "Event-loop lifecycle") that owns entering and — much later, in
+        ``close()`` — exiting the stdio transport/session ``AsyncExitStack``,
+        so the anyio cancel scope opened by the stdio transport is entered
+        and exited by the same ``asyncio.Task`` throughout (issue #63).
+
         Raises:
-            SimulationConnectionError: If unable to start the server or initialize session.
+            SimulationConnectionError: If unable to start the server or
+                initialize a session.
         """
         if self._session is not None:
             return  # Already connected
@@ -110,74 +158,121 @@ class SimulationClient:
                 env=None,  # Inherit from parent
             )
 
-            # Create a dedicated event loop and keep it alive for the lifetime of
-            # the connection — the streams/session yielded below are bound to
-            # whichever loop entered their context managers, so every subsequent
-            # call (tool calls, close) must reuse this same loop.
+            # A dedicated event loop is kept alive for the lifetime of the
+            # connection — the streams/session entered below are bound to
+            # whichever loop/Task entered their context managers, so every
+            # subsequent call (tool calls, close) must reuse this same loop.
             loop = asyncio.new_event_loop()
+            ready_event = asyncio.Event()
+            shutdown_event = asyncio.Event()
+            state: dict[str, Any] = {}
+
+            async def _lifecycle() -> None:
+                """Own the transport/session AsyncExitStack for its entire
+                life: enter it, publish the session (or the failure) and
+                signal readiness, then wait to be told to shut down before
+                exiting the stack — all within this one Task, so entry and
+                exit are never split across different Tasks.
+                """
+                exit_stack = contextlib.AsyncExitStack()
+                try:
+                    session = await self._enter_session(server_params, exit_stack)
+                except Exception as exc:
+                    state["error"] = exc
+                    ready_event.set()
+                    await exit_stack.aclose()
+                    return
+
+                state["session"] = session
+                ready_event.set()
+                try:
+                    await shutdown_event.wait()
+                finally:
+                    await exit_stack.aclose()
+
+            task = loop.create_task(_lifecycle())
             try:
-                session = loop.run_until_complete(self._async_connect(server_params))
+                loop.run_until_complete(ready_event.wait())
             except Exception:
                 loop.close()
                 raise
 
+            if "error" in state:
+                # Drive the lifecycle task to completion (it still needs to
+                # unwind whatever it already entered, including terminating
+                # the subprocess) before surfacing the failure, so connect()
+                # never leaks a half-open subprocess.
+                with contextlib.suppress(Exception):
+                    loop.run_until_complete(task)
+                loop.close()
+                raise state["error"]
+
             self._loop = loop
-            self._session = session
+            self._session = state["session"]
+            self._lifecycle_task = task
+            self._shutdown_event = shutdown_event
 
         except Exception as exc:
             raise SimulationConnectionError(
                 f"Failed to connect to McpTradingSimulation server: {exc}"
             ) from exc
 
-    async def _async_connect(self, server_params: StdioServerParameters) -> ClientSession:
-        """Async connection logic.
+    async def _enter_session(
+        self, server_params: StdioServerParameters, exit_stack: contextlib.AsyncExitStack
+    ) -> ClientSession:
+        """Enter the stdio transport and ``ClientSession`` into ``exit_stack``
+        and initialize the session.
 
-        Enters the stdio transport and the session as async context managers via
-        an `AsyncExitStack` stored on `self`, so `close()` can unwind them later
-        on the same event loop. If anything after the transport is entered fails
-        (e.g. `session.initialize()`), whatever was already entered is unwound
-        here before the exception propagates, so `connect()` never leaks a
-        half-open subprocess.
+        ``exit_stack`` is owned by the caller (the persistent lifecycle Task
+        started in ``connect()``), not by this method — this method does not
+        unwind it on failure; the caller is responsible for calling
+        ``exit_stack.aclose()`` (from the same Task) if this raises, so that
+        whatever was already entered (e.g. the subprocess/transport, if
+        ``session.initialize()`` is what failed) is unwound rather than
+        leaked.
         """
-        exit_stack = contextlib.AsyncExitStack()
-        try:
-            read_stream, write_stream = await exit_stack.enter_async_context(
-                stdio_client(server_params)
-            )
-            session = await exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
-            await session.initialize()
-        except Exception:
-            await exit_stack.aclose()
-            raise
-
-        self._exit_stack = exit_stack
+        read_stream, write_stream = await exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+        session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+        await session.initialize()
         return session
 
     def close(self) -> None:
         """Close the connection to the MCP server.
 
+        Signals the persistent lifecycle Task (started in ``connect()``) to
+        shut down via ``self._shutdown_event``, then drives the event loop
+        with ``run_until_complete(task)`` until that *same* Task finishes
+        unwinding its ``AsyncExitStack`` — which also terminates the server
+        subprocess — never by calling ``exit_stack.aclose()`` from a task of
+        its own, which is what caused the cross-task cancel-scope error this
+        lifecycle fixes (issue #63).
+
         Never raises: unwinding the session/subprocess can fail for reasons
         outside our control (e.g. the subprocess already died, or an
-        ``__aexit__`` throws), but ``close()`` must always leave the client in a
-        clean, disconnected state — the loop closed and every reference cleared —
-        so the acceptance criterion "``close()`` cleanly shuts down the session
-        and subprocess without raising" holds regardless. Any error from the
-        unwind is logged as a warning rather than propagated.
+        ``__aexit__`` throws), but ``close()`` must always leave the client in
+        a clean, disconnected state — the loop closed and every reference
+        cleared — so the acceptance criterion "``close()`` cleanly shuts down
+        the session and subprocess without raising" holds regardless. Any
+        error from the unwind is logged as a warning rather than propagated.
         """
         if self._session is None:
             return
 
         loop = self._loop
-        exit_stack = self._exit_stack
+        task = self._lifecycle_task
+        shutdown_event = self._shutdown_event
         self._session = None
-        self._exit_stack = None
+        self._lifecycle_task = None
+        self._shutdown_event = None
         self._loop = None
 
         try:
-            if exit_stack is not None and loop is not None:
-                loop.run_until_complete(exit_stack.aclose())
+            if shutdown_event is not None:
+                shutdown_event.set()
+            if task is not None and loop is not None:
+                loop.run_until_complete(task)
         except Exception as exc:  # noqa: BLE001 - close() must never raise
             logger.warning(
                 "Error while closing SimulationClient session: %s", exc, exc_info=True
