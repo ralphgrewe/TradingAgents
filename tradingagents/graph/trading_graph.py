@@ -379,17 +379,29 @@ class TradingAgentsGraph:
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if self.debug:
-            trace = []
             last_printed_message = None
+            # Start with the initial state in case the graph yields no "values"
+            # chunk at all (e.g. an empty/no-op graph) — kept in sync with the
+            # non-debug path's starting point.
+            final_state = dict(init_agent_state)
 
-            # Use "updates" mode to get node names for each state delta
-            # Override stream_mode from args to use "updates" instead of "values"
-            debug_args = {**args, "stream_mode": "updates"}
-            for chunk in self.graph.stream(init_agent_state, **debug_args):
-                # chunk is {node_name: state_delta}
+            # Combine "values" and "updates" modes: "updates" chunks carry
+            # {node_name: state_delta} so we can label each printed message
+            # with its originating node, while "values" chunks carry the full,
+            # already-reduced state after each step (LangGraph applies each
+            # channel's reducer — e.g. `add_messages` for `messages` — before
+            # yielding a "values" chunk). Taking the last "values" chunk as the
+            # final state means we never have to hand-reimplement reducer
+            # semantics: it matches graph.invoke()'s output exactly, unlike
+            # last-write-wins merging of raw "updates" deltas.
+            debug_args = {**args, "stream_mode": ["values", "updates"]}
+            for mode, chunk in self.graph.stream(init_agent_state, **debug_args):
+                if mode == "values":
+                    final_state = chunk
+                    continue
+
+                # mode == "updates": chunk is {node_name: state_delta}
                 for node_name, state_delta in chunk.items():
-                    trace.append(state_delta)
-
                     # Check if this node delta has messages
                     if state_delta.get("messages"):
                         current_message = state_delta["messages"][-1]
@@ -405,13 +417,6 @@ class TradingAgentsGraph:
                             print(f"\n── {node_name} ──")
                             current_message.pretty_print()
                             last_printed_message = message_key
-
-            # Streamed chunks are per-node deltas. Merge them so the returned
-            # state matches what graph.invoke() yields in the non-debug path.
-            # Start with initial state to preserve fields not modified by any node.
-            final_state = dict(init_agent_state)
-            for chunk in trace:
-                final_state.update(chunk)
         else:
             final_state = self.graph.invoke(init_agent_state, **args)
 
