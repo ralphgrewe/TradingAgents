@@ -367,6 +367,34 @@ class SimulationClient:
         except Exception as exc:
             raise SimulationToolError(f"Tool call '{tool_name}' failed: {exc}") from exc
 
+    def _coerce_list_result(self, tool_name: str, result: Any) -> list:
+        """Coerce a parsed tool result into a list for list-typed tools.
+
+        The content-block fallback in ``_call_tool_sync`` cannot tell a
+        single-element list apart from a scalar/dict result — both collapse
+        to one content block (see the comment there). Disambiguate using the
+        same ``'error'``-key convention documented on ``create_depot``/
+        ``get_portfolio``/``get_quote``:
+
+        - Already a ``list`` (e.g. via ``structuredContent``, or the
+          multi-block fallback case) — return as-is.
+        - A ``dict`` *without* an ``'error'`` key — a single item collapsed
+          from a one-element list by the fallback; wrap it as ``[result]``.
+        - A ``dict`` *with* an ``'error'`` key — a real tool-level error;
+          raise, surfacing that error.
+        - Anything else (bare string/number/None) — nonsensical for a
+          list-typed tool; raise the generic "non-list" error.
+        """
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            if "error" in result:
+                raise SimulationToolError(
+                    f"Tool '{tool_name}' returned error: {result['error']}"
+                )
+            return [result]
+        raise SimulationToolError(f"{tool_name} returned non-list: {result}")
+
     # ─── Public tool methods ────────────────────────────────────────────────
 
     def list_depots(self) -> list:
@@ -379,9 +407,7 @@ class SimulationClient:
             SimulationToolError: If the tool call fails.
         """
         result = self._call_tool_sync("list_depots")
-        if not isinstance(result, list):
-            raise SimulationToolError(f"list_depots returned non-list: {result}")
-        return result
+        return self._coerce_list_result("list_depots", result)
 
     def create_depot(self, depot_id: str, initial_cash: float = 10_000.0) -> dict:
         """Create a new isolated trading depot.
@@ -511,9 +537,7 @@ class SimulationClient:
                 "depot_id": depot_id,
             },
         )
-        if not isinstance(result, list):
-            raise SimulationToolError(f"get_trades returned non-list: {result}")
-        return result
+        return self._coerce_list_result("get_trades", result)
 
 
 def _get_server_config() -> tuple[str, list[str]]:

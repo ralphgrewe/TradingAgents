@@ -515,16 +515,29 @@ class TestListDepots:
 
         connected_client._session.call_tool = AsyncMock(return_value=result)
 
-        # The tool wrapper calls _call_tool_sync, which returns the dict.
-        # list_depots validates and raises if not a list.
-        with pytest.raises(SimulationToolError) as exc_info:
-            connected_client.list_depots()
-        assert "non-list" in str(exc_info.value)
+        result_list = connected_client.list_depots()
+        assert result_list == [depot]
+        assert isinstance(result_list, list)
 
     def test_list_depots_validates_list_type(self, connected_client):
-        """list_depots raises error if result is not a list."""
+        """list_depots raises the surfaced error if the fallback dict has an 'error' key."""
         content = MagicMock()
         content.text = json.dumps({"error": "not a list"})
+        mock_result = MagicMock()
+        mock_result.content = [content]
+        mock_result.isError = False
+        mock_result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(SimulationToolError) as exc_info:
+            connected_client.list_depots()
+        assert "not a list" in str(exc_info.value)
+
+    def test_list_depots_non_list_non_dict_fallback_raises(self, connected_client):
+        """list_depots raises the generic non-list error for a bare scalar fallback."""
+        content = MagicMock()
+        content.text = json.dumps("just a string")
         mock_result = MagicMock()
         mock_result.content = [content]
         mock_result.isError = False
@@ -908,10 +921,55 @@ class TestGetTrades:
         assert call_args[0][1]["symbol"] == ""
         assert call_args[0][1]["depot_id"] == "default"
 
+    def test_get_trades_single_trade_via_content_block(self, connected_client):
+        """get_trades returns [dict] for single trade via single content block.
+
+        This tests that when MCP returns a single-element list as a single
+        content block (legacy behavior), we still wrap it as a list."""
+        trade = {
+            "id": "trade-001",
+            "ts": "2025-07-05T14:00:00Z",
+            "symbol": "MSFT",
+            "side": "buy",
+            "quantity": 10,
+            "price": 400.00,
+            "fee": 2.50,
+            "gross": 4000.00,
+            "net": 4002.50,
+            "cash_after": 95997.50,
+        }
+        content = MagicMock()
+        content.text = json.dumps(trade)
+        result = MagicMock()
+        result.isError = False
+        result.content = [content]
+        result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.get_trades()
+        assert result_list == [trade]
+        assert isinstance(result_list, list)
+
     def test_get_trades_validates_list_type(self, connected_client):
-        """get_trades raises error if result is not a list."""
+        """get_trades raises the surfaced error if the fallback dict has an 'error' key."""
         content = MagicMock()
         content.text = json.dumps({"error": "not a list"})
+        mock_result = MagicMock()
+        mock_result.content = [content]
+        mock_result.isError = False
+        mock_result.structuredContent = None
+
+        connected_client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(SimulationToolError) as exc_info:
+            connected_client.get_trades()
+        assert "not a list" in str(exc_info.value)
+
+    def test_get_trades_non_list_non_dict_fallback_raises(self, connected_client):
+        """get_trades raises the generic non-list error for a bare scalar fallback."""
+        content = MagicMock()
+        content.text = json.dumps("just a string")
         mock_result = MagicMock()
         mock_result.content = [content]
         mock_result.isError = False
