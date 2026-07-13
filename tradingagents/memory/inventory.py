@@ -31,7 +31,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from tradingagents.memory.store import get_connection, resolve_db_path
+from tradingagents.memory.store import get_connection
 
 
 def get_inventory(db_path: str | Path | None = None) -> dict[str, Any]:
@@ -167,7 +167,7 @@ def _format_ticker_entries_text(ticker: str, entries: list[dict[str, Any]]) -> s
     # Print rows
     for entry in entries:
         row_parts = []
-        for col_name, field, width in col_specs:
+        for _col_name, field, width in col_specs:
             if field is None:
                 # Special handling for status
                 value = _format_resolved_status(entry.get("resolved_at"))
@@ -176,10 +176,7 @@ def _format_ticker_entries_text(ticker: str, entries: list[dict[str, Any]]) -> s
                 if field == "confidence":
                     value = _format_confidence(value)
                 elif field == "forward_return":
-                    if value is None:
-                        value = "n/a"
-                    else:
-                        value = f"{value:+.2%}"
+                    value = "n/a" if value is None else f"{value:+.2%}"
                 elif value is None:
                     value = ""
                 else:

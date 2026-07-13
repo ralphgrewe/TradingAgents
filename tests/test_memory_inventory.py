@@ -2,8 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
-
 from tradingagents.memory.inventory import get_inventory, get_ticker_entries
 from tradingagents.memory.store import get_connection, store_decision
 
