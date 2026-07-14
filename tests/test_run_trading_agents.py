@@ -200,6 +200,153 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
 
 @pytest.mark.unit
+class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
+    """Test date handling: default mode (today's date) and --use-dates-from-json mode."""
+
+    def test_default_mode_uses_todays_date_when_date_field_omitted(self):
+        """Test that in default mode, stocks without 'date' field use today's date."""
+        import run_trading_agents
+        import datetime
+
+        # Stocks with no 'date' field
+        self.STOCKS = [{"ticker": "AAPL"}, {"ticker": "MSFT"}]
+        self.setUp()  # Recreate the JSON file with updated STOCKS
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
+                run_trading_agents.main()
+
+                # Verify propagate was called twice
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+
+                # Verify both calls used today's date
+                today = datetime.date.today()
+                calls = mock_instance.propagate.call_args_list
+                self.assertEqual(calls[0][0], ("AAPL", today))
+                self.assertEqual(calls[1][0], ("MSFT", today))
+
+    def test_default_mode_ignores_date_field_if_present(self):
+        """Test that in default mode, 'date' field in JSON is ignored."""
+        import run_trading_agents
+        import datetime
+
+        # Stocks with 'date' field that should be ignored
+        self.STOCKS = [
+            {"ticker": "AAPL", "date": "2024-01-15"},
+            {"ticker": "MSFT", "date": "2024-02-20"}
+        ]
+        self.setUp()  # Recreate the JSON file with updated STOCKS
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
+                run_trading_agents.main()
+
+                # Verify both calls used today's date, not the dates from JSON
+                today = datetime.date.today()
+                calls = mock_instance.propagate.call_args_list
+                self.assertEqual(calls[0][0], ("AAPL", today))
+                self.assertEqual(calls[1][0], ("MSFT", today))
+
+    def test_use_dates_from_json_mode_uses_stock_dates(self):
+        """Test that --use-dates-from-json mode uses each stock's 'date' field."""
+        import run_trading_agents
+        import datetime
+
+        self.STOCKS = [
+            {"ticker": "AAPL", "date": "2024-01-15"},
+            {"ticker": "MSFT", "date": "2024-02-20"}
+        ]
+        self.setUp()  # Recreate the JSON file
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--use-dates-from-json']):
+                run_trading_agents.main()
+
+                # Verify calls used dates from JSON
+                calls = mock_instance.propagate.call_args_list
+                self.assertEqual(calls[0][0], ("AAPL", "2024-01-15"))
+                self.assertEqual(calls[1][0], ("MSFT", "2024-02-20"))
+
+    def test_use_dates_from_json_mode_requires_date_field(self):
+        """Test that --use-dates-from-json mode fails if 'date' field is missing."""
+        import run_trading_agents
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # Stock without 'date' field
+        self.STOCKS = [{"ticker": "AAPL"}]
+        self.setUp()  # Recreate the JSON file
+
+        output = io.StringIO()
+        with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                               '--use-dates-from-json']):
+            with redirect_stdout(output), redirect_stderr(output):
+                with self.assertRaises(SystemExit) as cm:
+                    run_trading_agents.main()
+
+                # Should exit with code 1
+                self.assertEqual(cm.exception.code, 1)
+
+                # Verify error message indicates the problem
+                output_str = output.getvalue()
+                self.assertIn('Error', output_str)
+                self.assertIn('date', output_str.lower())
+                self.assertIn('use-dates-from-json', output_str.lower() or 'from_json' in output_str.lower())
+
+    def test_use_dates_from_json_mode_validates_all_stocks_upfront(self):
+        """Test that --use-dates-from-json mode validates all stocks before processing any."""
+        import run_trading_agents
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # First stock is valid, second is missing 'date'
+        self.STOCKS = [
+            {"ticker": "AAPL", "date": "2024-01-15"},
+            {"ticker": "MSFT"}  # Missing date
+        ]
+        self.setUp()  # Recreate the JSON file
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+
+            output = io.StringIO()
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--use-dates-from-json']):
+                with redirect_stdout(output), redirect_stderr(output):
+                    with self.assertRaises(SystemExit) as cm:
+                        run_trading_agents.main()
+
+                    # Should exit with code 1
+                    self.assertEqual(cm.exception.code, 1)
+
+                    # Verify propagate was never called (validation happened upfront)
+                    self.assertEqual(mock_instance.propagate.call_count, 0)
+
+
+@pytest.mark.unit
 class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
     """Test LLM provider configuration via CLI flags."""
 

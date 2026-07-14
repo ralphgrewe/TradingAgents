@@ -22,12 +22,28 @@ python -m venv venv
 ## Running a single trading agent
 
 `run_trading_agents.py` runs the full agent pipeline for one or more tickers from a JSON file and
-prints the resulting decision:
+prints the resulting decision.
+
+**Default behavior (today's date mode):** by default, every ticker is run against today's date:
 
 ```bash
-echo '[{"ticker": "AAPL", "date": "2024-01-15"}]' > stocks.json
+echo '[{"ticker": "AAPL"}, {"ticker": "MSFT"}]' > stocks.json
 ./venv/bin/python run_trading_agents.py stocks.json --show-summary
 ```
+
+The `"date"` field is optional and ignored in default mode. The script computes today's date once
+at startup and uses it for all tickers in the batch.
+
+**Legacy behavior (per-ticker dates from JSON):** to run each ticker against a date field in the
+JSON, use the `--use-dates-from-json` flag:
+
+```bash
+echo '[{"ticker": "AAPL", "date": "2024-01-15"}, {"ticker": "MSFT", "date": "2024-01-16"}]' > stocks.json
+./venv/bin/python run_trading_agents.py stocks.json --use-dates-from-json --show-summary
+```
+
+When `--use-dates-from-json` is active, every stock entry must have a non-empty `"date"` field, or
+the script exits with an error.
 
 By default this uses local Ollama models (`ministral-3:8b` / `ministral-3:3b`) — no API key
 needed. To use a hosted provider instead, pass `--llm-provider` plus both model flags, and make
