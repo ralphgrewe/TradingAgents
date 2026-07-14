@@ -32,14 +32,21 @@ Always use the project virtualenv (`./venv`), never system Python.
 # Run by marker (unit / integration / smoke — see pyproject.toml)
 ./venv/bin/pytest -m unit
 
+# Lint (CI runs this with a strict rule set over the full repo)
+./venv/bin/ruff check .
+
 # Launch the interactive CLI
 ./venv/bin/tradingagents            # installed entry point
 ./venv/bin/python -m cli.main       # equivalent, run from source
 
+# Run one or more tickers non-interactively from a JSON file (see README.md)
+echo '[{"ticker": "AAPL", "date": "2024-01-15"}]' > stocks.json
+./venv/bin/python run_trading_agents.py stocks.json --show-summary
+
 # Run the MCP server
 ./venv/bin/python mcp_server.py               # stdio transport (default)
 ./start_server.sh                             # networked transport (streamable-http)
-MCP_TRANSPORT=sse FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/python mcp_server.py  # SSE transport
+MCP_TRANSPORT=sse FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8001 ./venv/bin/python mcp_server.py  # SSE transport
 
 # Structured-output smoke test against a real provider (costs API credits)
 OPENAI_API_KEY=... ./venv/bin/python scripts/smoke_structured_output.py openai

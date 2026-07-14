@@ -41,15 +41,15 @@ class TestUrlResolution:
     """Tests for the URL/transport default-derivation helpers."""
 
     def test_default_url_streamable_http(self):
-        assert _default_url("streamable-http") == "http://127.0.0.1:8000/mcp"
+        assert _default_url("streamable-http") == "http://127.0.0.1:8001/mcp"
 
     def test_default_url_sse(self):
-        assert _default_url("sse") == "http://127.0.0.1:8000/sse"
+        assert _default_url("sse") == "http://127.0.0.1:8001/sse"
 
     def test_resolve_connection_builtin_defaults(self):
         url, transport = _resolve_connection(None, None)
         assert transport == "streamable-http"
-        assert url == "http://127.0.0.1:8000/mcp"
+        assert url == "http://127.0.0.1:8001/mcp"
 
     def test_resolve_connection_explicit_args_win(self):
         url, transport = _resolve_connection("http://example.com/mcp", "sse")
@@ -62,7 +62,7 @@ class TestUrlResolution:
         set_config({"memory_mcp_transport": "sse", "memory_mcp_url": None})
         url, transport = _resolve_connection(None, None)
         assert transport == "sse"
-        assert url == "http://127.0.0.1:8000/sse"
+        assert url == "http://127.0.0.1:8001/sse"
 
     def test_resolve_connection_config_url_overrides_derived_default(self):
         from tradingagents.dataflows.config import set_config
@@ -99,7 +99,7 @@ class TestMemoryMCPClientConnection:
                 assert client._session is mock_client_session
                 assert client._loop is not None
                 assert not client._loop.is_closed()
-                assert client.url == "http://127.0.0.1:8000/mcp"
+                assert client.url == "http://127.0.0.1:8001/mcp"
                 assert client.transport == "streamable-http"
                 loop = client._loop
 

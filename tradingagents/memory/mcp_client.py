@@ -40,7 +40,7 @@ was hardened against):
   transport — verified against the installed ``mcp`` SDK
   (``mcp/server/fastmcp/server.py``: ``streamable_http_path="/mcp"``,
   ``sse_path="/sse"``) rather than assumed — combined with the same
-  ``127.0.0.1:8000`` host/port ``start_server.sh`` binds
+  ``127.0.0.1:8001`` host/port ``start_server.sh`` binds
   (``FASTMCP_HOST``/``FASTMCP_PORT`` there bind the *server*; the client
   talks to it over loopback by default, same as any other local client).
 - **Event-loop lifecycle**: a single event loop is created in ``connect()``
@@ -107,7 +107,7 @@ _VALID_TRANSPORTS = ("streamable-http", "sse")
 # networked transport (see ``start_server.sh``). The client connects to it
 # over loopback by default; override via an explicit ``url``.
 _DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 8000
+_DEFAULT_PORT = 8001
 
 # FastMCP's own default mount paths per transport (verified against the
 # installed SDK — ``mcp/server/fastmcp/server.py``'s ``Settings`` defaults —
@@ -185,9 +185,9 @@ class MemoryMCPClient:
         """Initialize the client.
 
         Args:
-            url: Full server URL (e.g. ``"http://127.0.0.1:8000/mcp"``).
+            url: Full server URL (e.g. ``"http://127.0.0.1:8001/mcp"``).
                 Defaults to config/env value, then a URL derived from the
-                resolved transport's default path on ``127.0.0.1:8000``.
+                resolved transport's default path on ``127.0.0.1:8001``.
             transport: ``"streamable-http"`` or ``"sse"``. Defaults to
                 config/env value, then ``"streamable-http"``.
         """

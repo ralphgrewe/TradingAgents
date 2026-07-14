@@ -72,7 +72,8 @@ with the repo as the working directory, for example:
 ### Networked transports (streamable-http, sse)
 
 For running the server on a different machine or accessing it over a network, use one of the
-bundled start scripts (which set up the environment and launch the server on `0.0.0.0:8000`):
+bundled start scripts (which set up the environment and launch the server on `127.0.0.1:8001`;
+port 8001 keeps the memory MCP server clear of the trading simulation server on port 8000):
 
 **macOS / Linux:**
 ```bash
@@ -87,7 +88,7 @@ start_server.bat
 Alternatively, set the environment variables manually:
 
 ```bash
-MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/python mcp_server.py
+MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8001 ./venv/bin/python mcp_server.py
 ```
 
 **To point `trading_graph.py` at a networked server:**
@@ -96,12 +97,12 @@ MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/
 running against a networked transport, point it at the server via:
 
 ```bash
-TRADINGAGENTS_MEMORY_MCP_URL=http://<host>:8000/mcp ./venv/bin/tradingagents  # streamable-http (default path: /mcp)
-TRADINGAGENTS_MEMORY_MCP_URL=http://<host>:8000/sse TRADINGAGENTS_MEMORY_MCP_TRANSPORT=sse ./venv/bin/tradingagents  # SSE (default path: /sse)
+TRADINGAGENTS_MEMORY_MCP_URL=http://<host>:8001/mcp ./venv/bin/tradingagents  # streamable-http (default path: /mcp)
+TRADINGAGENTS_MEMORY_MCP_URL=http://<host>:8001/sse TRADINGAGENTS_MEMORY_MCP_TRANSPORT=sse ./venv/bin/tradingagents  # SSE (default path: /sse)
 ```
 
 If the server is on `localhost` and the client is on the same machine, the default connection
-parameters work automatically (both default to `http://127.0.0.1:8000` with the appropriate
+parameters work automatically (both default to `http://127.0.0.1:8001` with the appropriate
 path for the resolved transport).
 
 **To register the server with Claude agents (Claude Desktop, Claude Code):**
@@ -115,7 +116,7 @@ For **streamable-http** (recommended):
 {
   "mcpServers": {
     "tradingagents-memory": {
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:8001/mcp"
     }
   }
 }
@@ -126,7 +127,7 @@ For **SSE**:
 {
   "mcpServers": {
     "tradingagents-memory": {
-      "url": "http://localhost:8000/sse"
+      "url": "http://localhost:8001/sse"
     }
   }
 }
@@ -140,8 +141,8 @@ that environment.
 **Environment variables:**
 - `MCP_TRANSPORT`: Transport type (`"stdio"` default, or `"streamable-http"`, `"sse"`).
 - `FASTMCP_HOST`: Host/interface to bind to for networked transports (`"127.0.0.1"` default).
-- `FASTMCP_PORT`: Port to bind to for networked transports (`"8000"` default).
-- `TRADINGAGENTS_MEMORY_MCP_URL`: Full server URL for `trading_graph.py` / `MemoryMCPClient` (e.g. `"http://127.0.0.1:8000/mcp"`). If unset, the client derives a default from the *resolved* transport's FastMCP mount path (`/mcp` or `/sse`) on `127.0.0.1:8000` — a hardcoded client-side default, independent of the server's `FASTMCP_HOST`/`FASTMCP_PORT` bind settings (only relevant if server and client happen to both run locally with defaults).
+- `FASTMCP_PORT`: Port to bind to for networked transports (`"8001"` default).
+- `TRADINGAGENTS_MEMORY_MCP_URL`: Full server URL for `trading_graph.py` / `MemoryMCPClient` (e.g. `"http://127.0.0.1:8001/mcp"`). If unset, the client derives a default from the *resolved* transport's FastMCP mount path (`/mcp` or `/sse`) on `127.0.0.1:8001` — a hardcoded client-side default, independent of the server's `FASTMCP_HOST`/`FASTMCP_PORT` bind settings (only relevant if server and client happen to both run locally with defaults).
 - `TRADINGAGENTS_MEMORY_MCP_TRANSPORT`: Transport type for the memory client (`"streamable-http"` default, or `"sse"`) — selects which client implementation connects (`streamable_http_client` vs `sse_client`). Resolved **independently** of `TRADINGAGENTS_MEMORY_MCP_URL`: each of URL and transport follows its own precedence (explicit `MemoryMCPClient(...)` argument > this env var > built-in default — see `_resolve_connection` in `tradingagents/memory/mcp_client.py`), so setting a URL does not disable transport resolution — you must set both together when they need to match (as in the SSE example above).
 
 ## More detail

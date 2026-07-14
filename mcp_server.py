@@ -19,7 +19,7 @@ Usage:
     python mcp_server.py
 
     # Networked transports (streamable-http, sse) via env vars
-    MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 python mcp_server.py
+    MCP_TRANSPORT=streamable-http FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8001 python mcp_server.py
     # or use the provided start_server.sh script
 
 Claude Desktop config example (stdio):
@@ -36,7 +36,7 @@ Claude Desktop config example (stdio):
 Environment variables:
     MCP_TRANSPORT: Transport type (default "stdio"). Options: "stdio", "streamable-http", "sse".
     FASTMCP_HOST: Host to bind to for networked transports (default "127.0.0.1").
-    FASTMCP_PORT: Port to bind to for networked transports (default "8000").
+    FASTMCP_PORT: Port to bind to for networked transports (default "8001").
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 # ── read transport and network configuration from environment ──────────────────
 _mcp_transport = os.environ.get("MCP_TRANSPORT", "stdio")
 _fastmcp_host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
-_fastmcp_port = os.environ.get("FASTMCP_PORT", "8000")
+_fastmcp_port = os.environ.get("FASTMCP_PORT", "8001")
 
 # Module logger, defined unconditionally — same convention used elsewhere in
 # this codebase (trading_graph.py, dataflows/interface.py, memory/resolve.py,
