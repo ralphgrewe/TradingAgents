@@ -88,11 +88,11 @@ class TestWriteReportTreeWithEnvelopes:
         }
 
     def test_per_analyst_files_keep_raw_json(self, tmp_path):
-        """Individual .md files stay machine-parseable (raw envelope, no fencing)."""
+        """Individual .json files stay machine-parseable (raw envelope, no fencing)."""
         save_path = tmp_path / "report"
         write_report_tree(self._final_state(), "NVDA", save_path)
 
-        market_text = (save_path / "1_analysts" / "market.md").read_text()
+        market_text = (save_path / "1_analysts" / "market.json").read_text()
         assert json.loads(market_text)["signal"] == "BUY"
 
     def test_complete_report_renders_envelopes_readably(self, tmp_path):

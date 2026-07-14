@@ -45,10 +45,10 @@ class TestWriteReportTree:
         report_file = write_report_tree(_final_state(), "AAPL", save_path)
 
         assert report_file == save_path / "complete_report.md"
-        assert (save_path / "1_analysts" / "market.md").read_text() == "Market looks bullish."
+        assert (save_path / "1_analysts" / "market.json").read_text() == "Market looks bullish."
         assert (save_path / "1_analysts" / "sentiment.md").read_text() == "Sentiment is positive."
-        assert (save_path / "1_analysts" / "news.md").read_text() == "No major news."
-        assert (save_path / "1_analysts" / "fundamentals.md").read_text() == "Fundamentals are solid."
+        assert (save_path / "1_analysts" / "news.json").read_text() == "No major news."
+        assert (save_path / "1_analysts" / "fundamentals.json").read_text() == "Fundamentals are solid."
         assert (save_path / "2_research" / "bull.md").exists()
         assert (save_path / "2_research" / "bear.md").exists()
         assert (save_path / "2_research" / "manager.md").exists()
@@ -68,7 +68,7 @@ class TestWriteReportTree:
         state = {"market_report": "Only market report available."}
         write_report_tree(state, "MSFT", save_path)
 
-        assert (save_path / "1_analysts" / "market.md").exists()
+        assert (save_path / "1_analysts" / "market.json").exists()
         assert not (save_path / "2_research").exists()
         assert not (save_path / "3_trading").exists()
         assert not (save_path / "4_risk").exists()
@@ -105,7 +105,7 @@ class TestCliSaveReportToDisk:
 
         # Markdown tree came from write_report_tree.
         assert report_file == save_path / "complete_report.md"
-        assert (save_path / "1_analysts" / "market.md").exists()
+        assert (save_path / "1_analysts" / "market.json").exists()
 
         # JSON export layered on top.
         json_file = save_path / "trading_recommendation.json"
@@ -152,7 +152,7 @@ class TestReportGeneratorSaveReportToDisk:
         report_file, structured_data = save_report_to_disk(state, "NVDA", save_path)
 
         assert report_file == save_path / "complete_report.md"
-        assert (save_path / "1_analysts" / "market.md").exists()
+        assert (save_path / "1_analysts" / "market.json").exists()
         assert (save_path / "5_portfolio" / "decision.md").exists()
 
         assert structured_data["rating"] == "HOLD"
