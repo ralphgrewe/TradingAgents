@@ -194,8 +194,15 @@ def main():
                 print("Error: Each stock should have a 'ticker' field")
                 sys.exit(1)
 
-    # Compute the run date once, before the per-ticker loop
-    run_date = datetime.date.today() if not args.use_dates_from_json else None
+    # Compute the run date once, before the per-ticker loop. Resolved as an
+    # ISO string (not a datetime.date) to match the convention used
+    # everywhere else dates flow through this codebase (cli/main.py,
+    # tradingagents/graph/propagation.py, tradingagents/agents/utils/memory.py,
+    # tradingagents/memory/mcp_client.py all treat dates as "YYYY-MM-DD"
+    # strings). A raw datetime.date here would fail to JSON-serialize in the
+    # consolidated trading_summary.json and would break the memory MCP
+    # client's JSON-RPC store_decision call.
+    run_date = datetime.date.today().isoformat() if not args.use_dates_from_json else None
 
     # Configure Trading Agents with the specified LLM provider
     config = DEFAULT_CONFIG.copy()
