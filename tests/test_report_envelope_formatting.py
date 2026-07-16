@@ -1,8 +1,8 @@
 """Tests for issue #33: non-LLM consumers of the JSON-envelope analyst reports.
 
-`market_report`/`fundamentals_report`/`news_report` are JSON envelope strings
-since #30-#32; `sentiment_report` (social analyst) and every other text field
-(debate history, trader plan, final decision) intentionally remain prose.
+`market_report`/`fundamentals_report`/`news_report`/`sentiment_report` are all
+JSON envelope strings since #30-#32 and #71; every other text field (debate
+history, trader plan, final decision) intentionally remains prose.
 `tradingagents/reporting.py`'s `format_report_preview`/`format_report_markdown`
 detect which shape a field is and render it accordingly; this module checks
 those helpers directly plus their use in `write_report_tree`, the CLI's
@@ -82,7 +82,7 @@ class TestWriteReportTreeWithEnvelopes:
     def _final_state(self):
         return {
             "market_report": _envelope(summary="Technical picture is bullish"),
-            "sentiment_report": "Sentiment is upbeat on social media.",
+            "sentiment_report": _envelope(summary="Sentiment is upbeat on social media.", signal="BUY", confidence="MEDIUM"),
             "news_report": _envelope(summary="Headlines skew positive", signal="HOLD"),
             "fundamentals_report": _envelope(summary="Fairly valued", signal="HOLD", confidence="MEDIUM"),
         }
@@ -95,8 +95,11 @@ class TestWriteReportTreeWithEnvelopes:
         market_text = (save_path / "1_analysts" / "market.json").read_text()
         assert json.loads(market_text)["signal"] == "BUY"
 
+        sentiment_text = (save_path / "1_analysts" / "sentiment.json").read_text()
+        assert json.loads(sentiment_text)["signal"] == "BUY"
+
     def test_complete_report_renders_envelopes_readably(self, tmp_path):
-        """The consolidated report fences JSON envelopes and keeps prose untouched."""
+        """The consolidated report fences JSON envelopes, including sentiment (#71)."""
         save_path = tmp_path / "report"
         report_file = write_report_tree(self._final_state(), "NVDA", save_path)
         complete = report_file.read_text()
@@ -120,7 +123,10 @@ class TestCliMessageBufferWithEnvelopes:
         buf = MessageBuffer()
         buf.init_for_analysis(["market", "social", "news", "fundamentals"])
         buf.update_report_section("market_report", _envelope(summary="Technical picture is bullish"))
-        buf.update_report_section("sentiment_report", "Sentiment is upbeat on social media.")
+        buf.update_report_section(
+            "sentiment_report",
+            _envelope(summary="Sentiment is upbeat on social media.", signal="BUY", confidence="MEDIUM"),
+        )
 
         assert "```json" in buf.final_report
         assert "**Signal:** BUY" in buf.final_report
@@ -143,12 +149,14 @@ class TestRunTradingAgentsDisplaySummary:
 
         final_state = {
             "market_report": _envelope(summary="Technical picture is bullish"),
-            "sentiment_report": "Sentiment is upbeat on social media.",
+            "sentiment_report": _envelope(
+                summary="Sentiment is upbeat on social media.", signal="BUY", confidence="MEDIUM"
+            ),
         }
         display_summary(final_state, "NVDA")
         out = capsys.readouterr().out
 
         assert "[BUY/HIGH] Technical picture is bullish" in out
-        assert "Sentiment is upbeat on social media." in out
+        assert "[BUY/MEDIUM] Sentiment is upbeat on social media." in out
         # The raw envelope's opening brace should not leak into the one-liner.
         assert '{\n  "skill"' not in out

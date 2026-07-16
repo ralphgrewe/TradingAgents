@@ -46,7 +46,7 @@ class TestWriteReportTree:
 
         assert report_file == save_path / "complete_report.md"
         assert (save_path / "1_analysts" / "market.json").read_text() == "Market looks bullish."
-        assert (save_path / "1_analysts" / "sentiment.md").read_text() == "Sentiment is positive."
+        assert (save_path / "1_analysts" / "sentiment.json").read_text() == "Sentiment is positive."
         assert (save_path / "1_analysts" / "news.json").read_text() == "No major news."
         assert (save_path / "1_analysts" / "fundamentals.json").read_text() == "Fundamentals are solid."
         assert (save_path / "2_research" / "bull.md").exists()

@@ -14,15 +14,33 @@ the LLM is invoked and injects them into the prompt as structured blocks:
   3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
 
 The agent does not use tool-calling; the data is in the prompt from
-turn 0. The LLM produces the sentiment report in a single invocation.
+turn 0.
+
+Since issue #71, the sentiment report is a JSON envelope (per
+``skills/SCHEMA.md``), matching the market/news/fundamentals analysts:
+Python parses the pre-fetched blocks into count/availability fields
+(``sentiment_computation.py``), the LLM provides a structured per-source
+directional read plus a cross-source synthesis, and Python derives the
+top-level ``signal``/``confidence`` from that structured output. A second,
+small LLM call writes the one-line ``summary`` consistent with the derived
+signal/confidence.
 
 See: https://github.com/TauricResearch/TradingAgents/issues/557
 """
 
+import json
 from datetime import datetime, timedelta
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from pydantic import ValidationError
 
+from tradingagents.agents.analysts.sentiment_computation import (
+    SentimentAnalystOutput,
+    build_details,
+    build_json_envelope,
+    build_sources_skeleton,
+    derive_signal_and_confidence,
+)
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
@@ -40,8 +58,9 @@ def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
     Pre-fetches news + StockTwits + Reddit data, injects them into the
-    prompt as structured blocks, and produces a sentiment report in a
-    single LLM call.
+    prompt as structured blocks, and produces a JSON-envelope sentiment
+    report (``sentiment_report``) from a structured LLM call plus
+    Python-derived signal/confidence.
     """
 
     def sentiment_analyst_node(state):
@@ -57,6 +76,14 @@ def create_sentiment_analyst(llm):
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
 
+        # Step 1: Python-side count/availability computation from the
+        # already-fetched blocks (never trust the LLM to count).
+        sources_skeleton = build_sources_skeleton(news_block, stocktwits_block, reddit_block)
+
+        # Default fallback details: Python-computed counts, null directions.
+        # Used verbatim if the LLM call/parse/validation fails below.
+        details = build_details(start_date, end_date, sources_skeleton, llm_output=None)
+
         system_message = _build_system_message(
             ticker=ticker,
             start_date=start_date,
@@ -70,10 +97,7 @@ def create_sentiment_analyst(llm):
             [
                 (
                     "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    "\n{system_message}\n"
+                    "{system_message}\n"
                     "For your reference, the current date is {current_date}. {instrument_context}",
                 ),
                 MessagesPlaceholder(variable_name="messages"),
@@ -85,16 +109,89 @@ def create_sentiment_analyst(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         # No bind_tools — the data is already in the prompt; a single LLM
-        # call produces the report directly.
+        # call produces the structured analysis directly.
         chain = prompt | llm
         result = chain.invoke(state["messages"])
 
+        # Step 2: Parse + validate the LLM's structured JSON output. Any
+        # failure (bad JSON, schema mismatch) falls back to the
+        # Python-only `details` built above rather than crashing the run.
+        if result and hasattr(result, "content") and result.content:
+            llm_response = str(result.content).strip()
+            try:
+                parsed = json.loads(llm_response)
+                llm_output = SentimentAnalystOutput(**parsed)
+                details = build_details(start_date, end_date, sources_skeleton, llm_output=llm_output)
+            except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
+                pass  # keep the Python-only fallback `details` from above
+
+        signal, confidence = derive_signal_and_confidence(details)
+
+        # Step 3: A separate, small LLM call writes the one-line summary
+        # consistent with the derived signal/confidence (same pattern as
+        # the news/market analysts).
+        llm_summary = _write_summary(llm, state, ticker, signal, confidence, details)
+
+        envelope_json = build_json_envelope(
+            signal=signal,
+            confidence=confidence,
+            summary=llm_summary,
+            details=details,
+            ticker=ticker,
+            date=end_date,
+        )
+
         return {
-            "messages": [result],
-            "sentiment_report": result.content,
+            "messages": [],
+            "sentiment_report": envelope_json,
         }
 
     return sentiment_analyst_node
+
+
+def _write_summary(llm, state, ticker, signal, confidence, details) -> str:
+    """Ask the LLM for a one-line summary consistent with the derived
+    signal/confidence; fall back to a generic Python-built line on failure.
+    """
+    overall_direction = details.get("overall_direction")
+    caveats = details.get("data_quality", {}).get("caveats", [])
+    sources_available = details.get("data_quality", {}).get("sources_available", 0)
+
+    fallback_summary = (
+        f"Sentiment read from {sources_available} of 3 sources"
+        + (f"; overall direction {overall_direction}" if overall_direction else "")
+        + (f" ({'; '.join(caveats)})" if caveats else "")
+    )
+
+    if not signal or not confidence:
+        return fallback_summary
+
+    summary_system = f"""Write a single-line summary of the sentiment analysis for {ticker}:
+- Signal: {signal}, confidence: {confidence}
+- Overall direction: {overall_direction}
+- Sources available: {sources_available} of 3
+- Data quality caveats: {caveats}
+
+Example: "Retail chatter and Reddit engagement lean bullish despite muted news coverage — cautious BUY"
+
+Write only the one-line summary, nothing else.""" + get_language_instruction()
+
+    summary_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", summary_system),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
+    summary_chain = summary_prompt | llm
+
+    try:
+        summary_result = summary_chain.invoke({"messages": state["messages"]})
+        if summary_result and hasattr(summary_result, "content") and summary_result.content:
+            return str(summary_result.content).strip()
+    except Exception:
+        pass
+
+    return fallback_summary
 
 
 def _build_system_message(
@@ -107,7 +204,7 @@ def _build_system_message(
     reddit_block: str,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""You are a financial market sentiment analyst. Your task is to analyze sentiment for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
@@ -144,22 +241,36 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 5. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
 
-6. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder, the sentiment read is less robust — flag this caveat explicitly. If the sources are silent on a given subreddit, say so.
+6. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder / empty result, set that source's direction and confidence to null — do not guess. If the sources are silent on a given subreddit, say so via divergences/narratives rather than fabricating a read.
 
 7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
 
-8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+8. **Past sentiment is not predictive.** Your read is signal for the trader to weigh alongside fundamentals and technicals, not a price call.
 
 ## Output
 
-Produce a sentiment report covering, in order:
+Return ONLY a valid JSON object matching this structure (no markdown, no prose, no code fences):
+{{
+  "news": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
+  "stocktwits": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
+  "reddit": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
+  "overall_direction": "BULLISH|BEARISH|NEUTRAL|MIXED",
+  "divergences": ["<=160 chars", ...] (up to 3),
+  "narratives": ["...", ...] (up to 3),
+  "catalysts": ["...", ...] (up to 3),
+  "risks": ["...", ...] (up to 3)
+}}
 
-1. **Overall sentiment direction** — Bullish / Bearish / Neutral / Mixed — with a brief confidence note based on data quality and sample size.
-2. **Source-by-source breakdown** — what each of news / StockTwits / Reddit is telling you, with specific evidence (cite message counts, ratios, notable posts).
-3. **Divergences, alignments, and key narratives** across sources.
-4. **Catalysts and risks** surfaced by the data.
-5. **Markdown table** at the end summarizing key sentiment signals, their direction, source, and supporting evidence.
+For a source with no usable data (an "<unavailable>" placeholder or an empty result above), set that source's "direction" and "confidence" to null and "key_items" to an empty list.
 
+The JSON keys and the enum values above (POSITIVE/NEUTRAL/NEGATIVE, BULLISH/BEARISH/NEUTRAL/MIXED) must stay exactly as written, in English, regardless of output language. Only the free-text fields (key_items, divergences, narratives, catalysts, risks) follow the language instruction below, if any.
+
+Do NOT:
+- Include markdown tables, headings, or narrative prose in your response
+- Wrap the JSON in a code fence
+- Fabricate data for a source that returned no results
+- Adjust your read based on past context or memory
+- Compute or state counts/ratios yourself — those are already computed for you elsewhere; focus on interpreting direction and evidence
 {get_language_instruction()}"""
 
 

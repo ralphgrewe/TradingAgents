@@ -86,9 +86,9 @@ def display_summary(final_state, ticker):
     print(f"ANALYSIS SUMMARY FOR {ticker}")
     print(f"{'='*60}")
 
-    # Analyst Reports. market/news/fundamentals are JSON envelopes (#30-#32);
-    # format_report_preview prefers the envelope's signal/confidence/summary
-    # over a truncated raw-JSON snippet. sentiment_report stays prose.
+    # Analyst Reports. market/news/fundamentals/sentiment are all JSON
+    # envelopes (#30-#32, #71); format_report_preview prefers the envelope's
+    # signal/confidence/summary over a truncated raw-JSON snippet.
     if any(final_state.get(f"{analyst}_report") for analyst in ["market", "sentiment", "news", "fundamentals"]):
         print("\n📊 ANALYST TEAM REPORTS:")
         if final_state.get("market_report"):

@@ -5,14 +5,14 @@ plus a consolidated ``complete_report.md`` under ``save_path``. The CLI and
 ``TradingAgentsGraph.save_reports`` both call this, so a headless / API run
 produces the same on-disk report tree a CLI run does.
 
-Since #30-#32, ``market_report``/``fundamentals_report``/``news_report`` are
-JSON envelope strings (``skill``/``ticker``/``date``/``signal``/``confidence``/
-``summary``/``details``, see skills/SCHEMA.md) and are saved as ``.json`` files;
-``sentiment_report`` (social analyst) and every other text field handled here
-(debate history, trader plan, final decision) intentionally remain prose and are
-saved as ``.md`` files. The ``format_report_*`` helpers below detect which shape
-a given field is and render/preview it accordingly, so mixed-format reports flow
-through the same code path without special-casing per analyst.
+Since #30-#32 and #71, ``market_report``/``fundamentals_report``/``news_report``/
+``sentiment_report`` are all JSON envelope strings (``skill``/``ticker``/``date``/
+``signal``/``confidence``/``summary``/``details``, see skills/SCHEMA.md) and are
+saved as ``.json`` files; every other text field handled here (debate history,
+trader plan, final decision) intentionally remains prose and is saved as ``.md``.
+The ``format_report_*`` helpers below detect which shape a given field is and
+render/preview it accordingly, so mixed-format reports flow through the same
+code path without special-casing per analyst.
 """
 
 import json
@@ -20,11 +20,11 @@ from datetime import datetime
 from pathlib import Path
 
 # Static mapping of analyst field names to their output file extensions.
-# JSON envelopes (since #30-#32) are saved as .json; prose fields as .md.
+# JSON envelopes (since #30-#32, #71) are saved as .json; prose fields as .md.
 # Update this mapping as more analysts migrate to JSON-envelope output.
 _ANALYST_REPORT_EXTENSIONS = {
     "market_report": ".json",      # JSON envelope since #30
-    "sentiment_report": ".md",     # prose
+    "sentiment_report": ".json",   # JSON envelope since #71
     "news_report": ".json",        # JSON envelope since #32
     "fundamentals_report": ".json", # JSON envelope since #31
 }
@@ -49,8 +49,8 @@ def format_report_preview(report: str, max_len: int = 150) -> str:
 
     For JSON envelopes, prefer the envelope's own ``signal``/``confidence``/
     ``summary`` over a truncated raw-JSON snippet (which would just show
-    ``{\\n  "skill": ...``). Prose fields (``sentiment_report``, debate
-    history, trader plan, final decision) are truncated unchanged.
+    ``{\\n  "skill": ...``). Prose fields (debate history, trader plan,
+    final decision) are truncated unchanged.
     """
     text = report or ""
     envelope = _try_parse_envelope(text)
