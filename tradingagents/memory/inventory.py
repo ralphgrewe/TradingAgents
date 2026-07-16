@@ -140,54 +140,41 @@ def _format_resolved_status(resolved_at: Any) -> str:
 
 
 def _format_ticker_entries_text(ticker: str, entries: list[dict[str, Any]]) -> str:
-    """Render detailed entries for a ticker as a plain-text table."""
+    """Render detailed entries for a ticker as a hybrid text format.
+
+    Each entry is displayed with a compact header line showing short fields,
+    followed by indented blocks for thesis and lesson (untruncated).
+    """
     if not entries:
         return f"No entries for ticker {ticker}."
 
     lines = [f"Entries for {ticker} ({len(entries)} total):"]
     lines.append("")
 
-    # Column widths (estimated for readability)
-    col_specs = [
-        ("Agent", "agent", 15),
-        ("Date", "decision_date", 12),
-        ("Signal", "signal", 12),
-        ("Conf.", "confidence", 8),
-        ("Thesis", "thesis", 40),
-        ("Status", None, 10),  # computed from resolved_at
-        ("Forward Return", "forward_return", 14),
-        ("Lesson", "lesson", 50),
-    ]
-
-    # Print header
-    header_parts = [name.ljust(width) for name, _, width in col_specs]
-    lines.append("  ".join(header_parts))
-    lines.append("  ".join("-" * width for _, _, width in col_specs))
-
-    # Print rows
     for entry in entries:
-        row_parts = []
-        for _col_name, field, width in col_specs:
-            if field is None:
-                # Special handling for status
-                value = _format_resolved_status(entry.get("resolved_at"))
-            else:
-                value = entry.get(field)
-                if field == "confidence":
-                    value = _format_confidence(value)
-                elif field == "forward_return":
-                    value = "n/a" if value is None else f"{value:+.2%}"
-                elif value is None:
-                    value = ""
-                else:
-                    value = str(value)
+        # Compact header line: agent, date, signal, confidence, status, forward_return
+        agent = entry.get("agent", "")
+        date = entry.get("decision_date", "")
+        signal = entry.get("signal", "")
+        confidence = _format_confidence(entry.get("confidence"))
+        status = _format_resolved_status(entry.get("resolved_at"))
+        forward_return = "n/a" if entry.get("forward_return") is None else f"{entry['forward_return']:+.2%}"
 
-            # Truncate long strings
-            if len(str(value)) > width:
-                value = str(value)[: width - 3] + "..."
-            row_parts.append(str(value).ljust(width))
+        header_line = f"{agent}  {date}  {signal}  {confidence}  {status}  {forward_return}"
+        lines.append(header_line)
 
-        lines.append("  ".join(row_parts))
+        # Thesis block (indented)
+        thesis = entry.get("thesis")
+        thesis_text = "(none)" if thesis is None else thesis
+        lines.append(f"  Thesis: {thesis_text}")
+
+        # Lesson block (indented)
+        lesson = entry.get("lesson")
+        lesson_text = "(none)" if lesson is None else lesson
+        lines.append(f"  Lesson: {lesson_text}")
+
+        # Blank line between entries
+        lines.append("")
 
     return "\n".join(lines)
 

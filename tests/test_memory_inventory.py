@@ -2,7 +2,11 @@
 
 from datetime import datetime, timezone
 
-from tradingagents.memory.inventory import get_inventory, get_ticker_entries
+from tradingagents.memory.inventory import (
+    get_inventory,
+    get_ticker_entries,
+    _format_ticker_entries_text,
+)
 from tradingagents.memory.store import get_connection, store_decision
 
 
@@ -296,3 +300,262 @@ def test_inventory_and_entries_consistency(tmp_path):
 
     assert inventory["total"] == total_from_breakdown
     assert inventory["total"] == 8
+
+
+# ---------------------------------------------------------------------------
+# Text formatter: _format_ticker_entries_text (issue #73)
+# ---------------------------------------------------------------------------
+
+
+def test_format_ticker_entries_text_no_entries():
+    """Formatter should return 'No entries' message for empty list."""
+    output = _format_ticker_entries_text("NVDA", [])
+    assert output == "No entries for ticker NVDA."
+
+
+def test_format_ticker_entries_text_header_and_structure():
+    """Formatter should include header and have correct structure per entry."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": 0.90,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": "Strong momentum",
+            "lesson": "Pattern held",
+        }
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Should have header
+    assert "Entries for NVDA (1 total):" in output
+    # Should have compact line with short fields
+    assert "quant  2026-01-01  Buy  0.9  pending  n/a" in output
+    # Should have thesis and lesson blocks
+    assert "  Thesis: Strong momentum" in output
+    assert "  Lesson: Pattern held" in output
+
+
+def test_format_ticker_entries_text_null_thesis_and_lesson():
+    """Formatter should render null thesis/lesson as '(none)'."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": None,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": None,
+            "lesson": None,
+        }
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    assert "  Thesis: (none)" in output
+    assert "  Lesson: (none)" in output
+
+
+def test_format_ticker_entries_text_forward_return_formatting():
+    """Formatter should render forward_return as '+.2%' or 'n/a'."""
+    entries_resolved = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": 0.90,
+            "resolved_at": "2026-01-11T00:00:00Z",
+            "forward_return": 0.0523,  # 5.23%
+            "thesis": None,
+            "lesson": None,
+        }
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries_resolved)
+    assert "+5.23%" in output
+
+    # Test negative return
+    entries_negative = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Sell",
+            "confidence": 0.85,
+            "resolved_at": "2026-01-11T00:00:00Z",
+            "forward_return": -0.0325,  # -3.25%
+            "thesis": None,
+            "lesson": None,
+        }
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries_negative)
+    assert "-3.25%" in output
+
+
+def test_format_ticker_entries_text_status_resolved_vs_pending():
+    """Formatter should show 'resolved' or 'pending' based on resolved_at."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": 0.90,
+            "resolved_at": "2026-01-11T00:00:00Z",
+            "forward_return": 0.05,
+            "thesis": None,
+            "lesson": None,
+        },
+        {
+            "agent": "technical",
+            "decision_date": "2026-01-02",
+            "signal": "Hold",
+            "confidence": 0.60,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": None,
+            "lesson": None,
+        },
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Find the line with quant (resolved)
+    lines = output.split("\n")
+    quant_line = [l for l in lines if l.startswith("quant")][0]
+    assert "resolved" in quant_line
+
+    # Find the line with technical (pending)
+    technical_line = [l for l in lines if l.startswith("technical")][0]
+    assert "pending" in technical_line
+
+
+def test_format_ticker_entries_text_long_thesis_and_lesson_not_truncated(tmp_path):
+    """Formatter should not truncate thesis and lesson, even if very long."""
+    db_path = _db_path(tmp_path)
+    long_thesis = "This is a very long thesis " * 10  # Intentionally long
+    long_lesson = "This is a very long lesson " * 10
+
+    _seed_resolved(
+        db_path,
+        "quant",
+        "NVDA",
+        "2026-01-01",
+        "Buy",
+        0.90,
+        0.05,
+        thesis=long_thesis,
+        lesson=long_lesson,
+    )
+
+    entries = get_ticker_entries("NVDA", db_path=db_path)
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Both should appear in full in the output
+    assert long_thesis in output
+    assert long_lesson in output
+    # Should NOT be truncated (no "..." at the end)
+    assert long_thesis + "..." not in output
+    assert long_lesson + "..." not in output
+
+
+def test_format_ticker_entries_text_multiline_thesis_and_lesson():
+    """Formatter should handle thesis/lesson with newlines."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": 0.90,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": "Strong momentum\n\nBased on:\n- Volume increase\n- Price breakout",
+            "lesson": "Pattern worked\nStock rallied 5% in next week",
+        }
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Both multiline texts should be preserved
+    assert "Strong momentum\n\nBased on:\n- Volume increase\n- Price breakout" in output
+    assert "Pattern worked\nStock rallied 5% in next week" in output
+
+
+def test_format_ticker_entries_text_multiple_entries_spacing():
+    """Formatter should have blank lines between entries."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": 0.90,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": "Thesis 1",
+            "lesson": "Lesson 1",
+        },
+        {
+            "agent": "fundamental",
+            "decision_date": "2026-01-02",
+            "signal": "Sell",
+            "confidence": 0.80,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": "Thesis 2",
+            "lesson": "Lesson 2",
+        },
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Should have 2 entries with blank lines between them
+    assert "Entries for NVDA (2 total):" in output
+    # Check that entries are separated
+    lines = output.split("\n")
+    # Find line indices
+    quant_idx = next(i for i, l in enumerate(lines) if l.startswith("quant"))
+    fund_idx = next(i for i, l in enumerate(lines) if l.startswith("fundamental"))
+    # There should be blank lines in between
+    assert quant_idx < fund_idx
+    assert "" in lines[quant_idx : fund_idx + 1]
+
+
+def test_format_ticker_entries_text_confidence_formatting():
+    """Formatter should use _format_confidence for null/numeric confidence."""
+    entries = [
+        {
+            "agent": "quant",
+            "decision_date": "2026-01-01",
+            "signal": "Buy",
+            "confidence": None,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": None,
+            "lesson": None,
+        },
+        {
+            "agent": "technical",
+            "decision_date": "2026-01-02",
+            "signal": "Hold",
+            "confidence": 0.5,
+            "resolved_at": None,
+            "forward_return": None,
+            "thesis": None,
+            "lesson": None,
+        },
+    ]
+
+    output = _format_ticker_entries_text("NVDA", entries)
+
+    # Find lines with confidence
+    lines = output.split("\n")
+    quant_line = [l for l in lines if l.startswith("quant")][0]
+    tech_line = [l for l in lines if l.startswith("technical")][0]
+
+    # quant should have "n/a" for confidence
+    assert "n/a" in quant_line
+    # technical should have "0.5"
+    assert "0.5" in tech_line
