@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    format_analyst_reports_section,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import (
@@ -41,56 +42,6 @@ def _extract_trade_setup(market_report: Any) -> dict | None:
     return envelope.get("details", {}).get("trade_setup")
 
 
-def _format_analyst_reports_section(
-    market_report: Any, sentiment_report: Any, news_report: Any, fundamentals_report: Any
-) -> str:
-    """Format the four analyst reports with reading instructions for JSON envelopes.
-
-    Returns a formatted section to include in the prompt, or an empty string if all
-    reports are missing/empty. Gracefully omits individual reports that are empty.
-    """
-    # Collect non-empty reports
-    reports_to_include = []
-
-    if market_report and isinstance(market_report, str):
-        reports_to_include.append(
-            f"Market research report (JSON envelope): {market_report}"
-        )
-
-    if sentiment_report and isinstance(sentiment_report, str):
-        reports_to_include.append(
-            f"Social media sentiment report (JSON envelope): {sentiment_report}"
-        )
-
-    if news_report and isinstance(news_report, str):
-        reports_to_include.append(f"Latest world affairs news (JSON envelope): {news_report}")
-
-    if fundamentals_report and isinstance(fundamentals_report, str):
-        reports_to_include.append(
-            f"Company fundamentals report (JSON envelope): {fundamentals_report}"
-        )
-
-    # If no reports available, return empty
-    if not reports_to_include:
-        return ""
-
-    # Build the section with reading instructions
-    section = """The analyst reports below are structured JSON envelopes
-(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the
-`summary` for the headline takeaway and cite specific `details` fields
-(e.g. technical indicator values and the `trade_setup`, news headline counts
-and the conservative/risky ratings, per-source sentiment directions and key
-items, or the fundamentals value/growth sub-signals) as supporting evidence —
-do not just restate the raw JSON.
-
-Analyst Reports:
-"""
-    for report in reports_to_include:
-        section += f"{report}\n"
-
-    return section
-
-
 def create_trader(llm):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
 
@@ -115,8 +66,8 @@ def create_trader(llm):
         sentiment_report = state.get("sentiment_report")
         news_report = state.get("news_report")
         fundamentals_report = state.get("fundamentals_report")
-        analyst_reports_section = _format_analyst_reports_section(
-            market_report, sentiment_report, news_report, fundamentals_report
+        analyst_reports_section = format_analyst_reports_section(
+            market_report, sentiment_report, news_report, fundamentals_report, asset_type=asset_type
         )
         reports_line = f"\n\n{analyst_reports_section}" if analyst_reports_section else ""
 

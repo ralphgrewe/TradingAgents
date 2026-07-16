@@ -5,6 +5,13 @@ Tests verify that:
 2. Portfolio manager prompt receives all four analyst reports with reading instructions
 3. Missing/empty reports are handled gracefully (omitted from output)
 4. JSON envelope reading instructions are included in both prompts
+5. The fundamentals report label is asset-type aware (crypto phrasing), matching
+   the pattern already used by bull_researcher.py / bear_researcher.py
+
+``_format_analyst_reports_section`` originally lived duplicated in both
+``trader.py`` and ``portfolio_manager.py``; it now lives once as
+``format_analyst_reports_section`` in ``tradingagents.agents.utils.agent_utils``
+and both modules import it from there (design-review follow-up on cf49861).
 """
 
 import json
@@ -12,14 +19,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tradingagents.agents.managers.portfolio_manager import (
-    _format_analyst_reports_section as pm_format,
-    create_portfolio_manager,
+from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+from tradingagents.agents.trader.trader import create_trader
+from tradingagents.agents.utils.agent_utils import (
+    format_analyst_reports_section as shared_format,
 )
-from tradingagents.agents.trader.trader import (
-    _format_analyst_reports_section as trader_format,
-    create_trader,
-)
+
+# Both trader.py and portfolio_manager.py call the same shared helper, so the
+# section-formatting tests exercise it directly once instead of duplicating
+# per-module.
+trader_format = shared_format
+pm_format = shared_format
 
 
 def _make_sample_market_report():
@@ -242,6 +252,36 @@ class TestPortfolioManagerAnalystReportsSection:
         assert result == ""
 
 
+@pytest.mark.unit
+class TestFormatAnalystReportsSectionAssetTypeLabel:
+    """format_analyst_reports_section's fundamentals label should be asset-type
+    aware, matching the pattern bull_researcher.py / bear_researcher.py already
+    use (issue #77 design-review follow-up)."""
+
+    def test_stock_uses_company_fundamentals_label_by_default(self):
+        fundamentals = _make_sample_fundamentals_report()
+
+        result = shared_format(None, None, None, fundamentals)
+
+        assert "Company fundamentals report (JSON envelope):" in result
+        assert "Asset fundamentals report" not in result
+
+    def test_stock_asset_type_uses_company_fundamentals_label(self):
+        fundamentals = _make_sample_fundamentals_report()
+
+        result = shared_format(None, None, None, fundamentals, asset_type="stock")
+
+        assert "Company fundamentals report (JSON envelope):" in result
+
+    def test_crypto_asset_type_uses_crypto_aware_label(self):
+        fundamentals = _make_sample_fundamentals_report()
+
+        result = shared_format(None, None, None, fundamentals, asset_type="crypto")
+
+        assert "Asset fundamentals report (may be unavailable for crypto) (JSON envelope):" in result
+        assert "Company fundamentals report" not in result
+
+
 def _make_trader_state(**overrides):
     """Create a minimal state for trader testing."""
     state = {
@@ -330,6 +370,48 @@ class TestTraderPromptAssembly:
             # These should not be present
             assert "Social media sentiment report (JSON envelope):" not in user_message
             assert "Company fundamentals report (JSON envelope):" not in user_message
+
+    def test_trader_uses_crypto_fundamentals_label_for_crypto_asset_type(self):
+        """Trader prompt should use the crypto-aware fundamentals label when
+        asset_type is crypto, matching bull_researcher.py's pattern (issue #77
+        design-review follow-up)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY BTC-USD"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.trader.trader.bind_structured", return_value=None):
+            trader_node = create_trader(llm)
+            state = _make_trader_state(asset_type="crypto")
+            trader_node(state)
+
+            call_args = llm.invoke.call_args
+            messages = call_args[0][0]
+            user_message = messages[1]["content"]
+
+            assert (
+                "Asset fundamentals report (may be unavailable for crypto) (JSON envelope):"
+                in user_message
+            )
+            assert "Company fundamentals report (JSON envelope):" not in user_message
+
+    def test_trader_uses_company_fundamentals_label_for_stock_asset_type(self):
+        """Explicit stock asset_type should keep the company-fundamentals label."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY AAPL"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.trader.trader.bind_structured", return_value=None):
+            trader_node = create_trader(llm)
+            state = _make_trader_state(asset_type="stock")
+            trader_node(state)
+
+            call_args = llm.invoke.call_args
+            messages = call_args[0][0]
+            user_message = messages[1]["content"]
+
+            assert "Company fundamentals report (JSON envelope):" in user_message
 
 
 def _make_pm_state(**overrides):
@@ -447,3 +529,44 @@ class TestPortfolioManagerPromptAssembly:
             # These should still be present (requirement: keep investment_plan)
             assert "investment plan: **Bullish outlook from research team**" in prompt
             assert "Trader's transaction proposal: **BUY 100 shares at $195**" in prompt
+
+    def test_pm_uses_crypto_fundamentals_label_for_crypto_asset_type(self):
+        """PM prompt should use the crypto-aware fundamentals label when
+        asset_type is crypto, matching bull_researcher.py's pattern (issue #77
+        design-review follow-up)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state(asset_type="crypto")
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            assert (
+                "Asset fundamentals report (may be unavailable for crypto) (JSON envelope):"
+                in prompt
+            )
+            assert "Company fundamentals report (JSON envelope):" not in prompt
+
+    def test_pm_uses_company_fundamentals_label_when_asset_type_missing(self):
+        """PM should default to the stock-style label when asset_type is absent
+        from state, matching the trader's default and bull_researcher.py."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state()
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            assert "Company fundamentals report (JSON envelope):" in prompt

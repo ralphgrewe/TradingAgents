@@ -10,70 +10,20 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
-from typing import Any
-
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    format_analyst_reports_section,
     get_language_instruction,
 )
 from tradingagents.agents.utils.structured import bind_structured
-
-
-def _format_analyst_reports_section(
-    market_report: Any, sentiment_report: Any, news_report: Any, fundamentals_report: Any
-) -> str:
-    """Format the four analyst reports with reading instructions for JSON envelopes.
-
-    Returns a formatted section to include in the prompt, or an empty string if all
-    reports are missing/empty. Gracefully omits individual reports that are empty.
-    """
-    # Collect non-empty reports
-    reports_to_include = []
-
-    if market_report and isinstance(market_report, str):
-        reports_to_include.append(
-            f"Market research report (JSON envelope): {market_report}"
-        )
-
-    if sentiment_report and isinstance(sentiment_report, str):
-        reports_to_include.append(
-            f"Social media sentiment report (JSON envelope): {sentiment_report}"
-        )
-
-    if news_report and isinstance(news_report, str):
-        reports_to_include.append(f"Latest world affairs news (JSON envelope): {news_report}")
-
-    if fundamentals_report and isinstance(fundamentals_report, str):
-        reports_to_include.append(
-            f"Company fundamentals report (JSON envelope): {fundamentals_report}"
-        )
-
-    # If no reports available, return empty
-    if not reports_to_include:
-        return ""
-
-    # Build the section with reading instructions
-    section = """The analyst reports below are structured JSON envelopes
-(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the
-`summary` for the headline takeaway and cite specific `details` fields
-(e.g. technical indicator values and the `trade_setup`, news headline counts
-and the conservative/risky ratings, per-source sentiment directions and key
-items, or the fundamentals value/growth sub-signals) as supporting evidence —
-do not just restate the raw JSON.
-
-Analyst Reports:
-"""
-    for report in reports_to_include:
-        section += f"{report}\n"
-
-    return section
 
 
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
+        asset_type = state.get("asset_type", "stock")
         instrument_context = build_instrument_context(state["company_of_interest"])
 
         history = state["risk_debate_state"]["history"]
@@ -93,8 +43,8 @@ def create_portfolio_manager(llm):
         sentiment_report = state.get("sentiment_report")
         news_report = state.get("news_report")
         fundamentals_report = state.get("fundamentals_report")
-        analyst_reports_section = _format_analyst_reports_section(
-            market_report, sentiment_report, news_report, fundamentals_report
+        analyst_reports_section = format_analyst_reports_section(
+            market_report, sentiment_report, news_report, fundamentals_report, asset_type=asset_type
         )
         reports_line = f"{analyst_reports_section}\n\n" if analyst_reports_section else ""
 
