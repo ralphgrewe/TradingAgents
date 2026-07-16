@@ -48,6 +48,16 @@ def create_portfolio_manager(llm):
         )
         reports_line = f"{analyst_reports_section}\n\n" if analyst_reports_section else ""
 
+        # Format research/trader context lines: omit if empty (in "none" research stage mode)
+        context_lines = []
+        if research_plan and isinstance(research_plan, str) and research_plan.strip():
+            context_lines.append(f"- Research Manager's investment plan: **{research_plan}**")
+        if trader_plan and isinstance(trader_plan, str) and trader_plan.strip():
+            context_lines.append(f"- Trader's transaction proposal: **{trader_plan}**")
+        research_trader_line = "\n".join(context_lines)
+        if research_trader_line:
+            research_trader_line += "\n"
+
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
@@ -62,9 +72,7 @@ def create_portfolio_manager(llm):
 - **Sell**: Exit position or avoid entry
 
 **Context:**
-- Research Manager's investment plan: **{research_plan}**
-- Trader's transaction proposal: **{trader_plan}**
-{lessons_line}{reports_line}
+{research_trader_line}{lessons_line}{reports_line}
 **Risk Analysts Debate History:**
 {history}
 

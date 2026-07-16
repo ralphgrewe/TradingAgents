@@ -71,6 +71,11 @@ def create_trader(llm):
         )
         reports_line = f"\n\n{analyst_reports_section}" if analyst_reports_section else ""
 
+        # Format investment plan section: omit if empty (in "none" research stage mode)
+        plan_line = ""
+        if investment_plan and isinstance(investment_plan, str) and investment_plan.strip():
+            plan_line = f"\n\nProposed Investment Plan: {investment_plan}"
+
         messages = [
             {
                 "role": "system",
@@ -87,10 +92,10 @@ def create_trader(llm):
                 "role": "user",
                 "content": (
                     f"Based on a comprehensive analysis by a team of analysts, here is an investment "
-                    f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
+                    f"assessment tailored for {company_name}. {instrument_context} This assessment incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "
-                    f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}"
+                    f"social media sentiment. Use this as a foundation for evaluating your next "
+                    f"trading decision.{plan_line}"
                     f"{trade_setup_line}{reports_line}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),

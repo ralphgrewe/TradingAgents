@@ -24,12 +24,11 @@ This module verifies:
 
 from __future__ import annotations
 
-import tradingagents.graph.setup as graph_setup_module
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.prebuilt import ToolNode
 
-import pytest
-
+import tradingagents.graph.setup as graph_setup_module
 from tradingagents.graph.conditional_logic import ConditionalLogic
 from tradingagents.graph.setup import GraphSetup
 
@@ -159,12 +158,16 @@ def _install_stub_node_factories(monkeypatch):
     )
 
 
-def _make_graph_setup():
+def _make_graph_setup(research_stage="debate"):
     """A GraphSetup whose `tool_nodes` dict only has a "social" entry.
 
     Deliberately omits "market"/"news"/"fundamentals" keys: if `setup_graph()`
     still looked those up (the pre-fix behavior), building the graph would
     raise `KeyError` before we ever get to running it.
+
+    The research_stage parameter controls whether to include the Bull/Bear/
+    Research Manager nodes (default "debate" for this test to exercise the
+    full pipeline).
     """
     tool_nodes = {"social": ToolNode([_dummy_tool])}
     conditional_logic = ConditionalLogic(max_debate_rounds=1, max_risk_discuss_rounds=1)
@@ -173,6 +176,7 @@ def _make_graph_setup():
         deep_thinking_llm=None,
         tool_nodes=tool_nodes,
         conditional_logic=conditional_logic,
+        research_stage=research_stage,
     )
 
 

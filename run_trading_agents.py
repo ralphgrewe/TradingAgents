@@ -148,9 +148,8 @@ def main():
     args = parser.parse_args()
 
     # Validate provider and model requirements
-    if args.llm_provider.lower() != 'ollama':
-        if not args.deep_think_llm or not args.quick_think_llm:
-            parser.error(f"--llm-provider {args.llm_provider} requires both --deep-think-llm and --quick-think-llm")
+    if args.llm_provider.lower() != 'ollama' and (not args.deep_think_llm or not args.quick_think_llm):
+        parser.error(f"--llm-provider {args.llm_provider} requires both --deep-think-llm and --quick-think-llm")
 
     if args.portfolio and (not args.style or not args.depot_id):
         print("Error: --portfolio requires both --style and --depot-id")
@@ -218,9 +217,7 @@ def main():
     if args.quick_think_llm:
         config["quick_think_llm"] = args.quick_think_llm
 
-    # Use same research depth as CLI default, Medium research depth
-    config["max_debate_rounds"] = 3
-    config["max_risk_discuss_rounds"] = 3
+    # Respect configured debate/risk rounds (do not override with hardcoded values)
 
     # Initialize Trading Agents with explicit analyst selection (same as CLI)
     # These are the same analysts that CLI uses by default

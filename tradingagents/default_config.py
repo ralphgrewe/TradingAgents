@@ -22,6 +22,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
     "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
     "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
+    "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
 }
 
 
@@ -83,6 +84,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
+    # Research stage mode: "debate" keeps Bull/Bear/Research Manager debate;
+    # "none" bypasses the debate and sends analyst outputs directly to the trader
+    "research_stage": "none",
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
