@@ -97,21 +97,46 @@ _REDDIT_ENGAGEMENT_RE = re.compile(r"(\d+)↑\s*·\s*(\d+)c")
 _NEWS_HEADLINE_RE = re.compile(r"^### ", re.MULTILINE)
 
 
-def compute_news_counts(block: str) -> dict:
+def compute_news_counts(block) -> dict:
     """Parse the pre-fetched news block into ``{available, headline_count, reason}``.
 
     Headlines are yfinance-format ``### <title> (source: ...)`` lines
     (see ``tradingagents/dataflows/yfinance_news.py``); a fetch/routing
-    error surfaces as an ``"Error fetching news..."`` string.
+    error surfaces as an ``"Error fetching news..."`` string, and a genuinely
+    empty result as ``"No news found..."``.
+
+    ``get_news`` is vendor-routed (``data_vendors.news_data``; default
+    ``yfinance``, alternative ``alpha_vantage``) and ``route_to_vendor`` does
+    NOT normalize output across vendors — ``alpha_vantage_news.get_news``
+    returns a dict/JSON payload, and a no-coverage route yields a
+    ``"NO_DATA_AVAILABLE: ..."`` sentinel string, neither of which is the
+    yfinance ``"### "`` prose this parser recognizes. Rather than silently
+    reporting such a block as a confirmed-empty ``available`` source (issue
+    #71, acceptance criterion 4), any block that matches no recognized
+    yfinance shape is surfaced as ``available: false`` with a caveat reason,
+    so a vendor-format mismatch shows up in ``data_quality.caveats`` instead
+    of masquerading as "no news".
     """
-    stripped = (block or "").strip()
+    # Non-string vendor responses (e.g. alpha_vantage's dict/JSON payload) are
+    # by definition not the yfinance text format — flag, don't crash or miscount.
+    if not isinstance(block, str):
+        return {"available": False, "headline_count": 0, "reason": "unrecognized news format"}
+    stripped = block.strip()
     if not stripped:
         return {"available": False, "headline_count": 0, "reason": "empty response"}
     if stripped.startswith("Error fetching news"):
         return {"available": False, "headline_count": 0, "reason": stripped[:80]}
+    if stripped.startswith("NO_DATA_AVAILABLE"):
+        return {"available": False, "headline_count": 0, "reason": stripped[:80]}
     if stripped.startswith("No news found"):
         return {"available": True, "headline_count": 0, "reason": None}
     count = len(_NEWS_HEADLINE_RE.findall(stripped))
+    if count == 0:
+        # Non-empty, no recognized sentinel, and zero "### " headlines: the
+        # block is in an unexpected format (a non-yfinance vendor payload, an
+        # unknown sentinel, etc.). Never present it as confirmed-empty
+        # available data — surface it as unavailable + caveat (criterion 4).
+        return {"available": False, "headline_count": 0, "reason": "unrecognized news format"}
     return {"available": True, "headline_count": count, "reason": None}
 
 

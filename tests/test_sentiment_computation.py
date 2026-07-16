@@ -59,6 +59,41 @@ class TestComputeNewsCounts:
         result = compute_news_counts(None)
         assert result["available"] is False
 
+    def test_alpha_vantage_dict_payload_is_unavailable_not_silent_zero(self):
+        # get_news is vendor-routed; alpha_vantage returns a dict, not the
+        # yfinance "### " prose. It must surface as unavailable + a caveat
+        # reason, never as a confirmed-empty available source (issue #71).
+        block = {"feed": [{"title": "Q2 beat"}], "items": "1"}
+        result = compute_news_counts(block)
+        assert result["available"] is False
+        assert result["headline_count"] == 0
+        assert result["reason"] == "unrecognized news format"
+
+    def test_alpha_vantage_json_string_payload_is_unavailable(self):
+        # A JSON string with real headlines but no "### " markers must not be
+        # miscounted as zero-but-available — it is an unrecognized format.
+        block = '{"feed": [{"title": "Q2 beat estimates"}, {"title": "New launch"}]}'
+        result = compute_news_counts(block)
+        assert result["available"] is False
+        assert result["headline_count"] == 0
+        assert result["reason"] == "unrecognized news format"
+
+    def test_no_data_available_sentinel_is_unavailable(self):
+        # route_to_vendor's cross-vendor NO_DATA sentinel must degrade to
+        # unavailable, carrying its reason into the caveat.
+        block = "NO_DATA_AVAILABLE: No usable market data for 'AAPL' from any configured vendor."
+        result = compute_news_counts(block)
+        assert result["available"] is False
+        assert result["headline_count"] == 0
+        assert "NO_DATA_AVAILABLE" in result["reason"]
+
+    def test_unrecognized_prose_is_unavailable(self):
+        # Non-empty text that is neither a known sentinel nor "### " headlines.
+        result = compute_news_counts("Some unexpected vendor blurb with no headlines.")
+        assert result["available"] is False
+        assert result["headline_count"] == 0
+        assert result["reason"] == "unrecognized news format"
+
 
 # ---------------------------------------------------------------------------
 # compute_stocktwits_counts
@@ -171,6 +206,20 @@ class TestBuildSourcesSkeleton:
         assert skeleton["news"]["available"] is False
         assert skeleton["stocktwits"]["available"] is False
         assert skeleton["reddit"]["available"] is False
+
+    def test_non_yfinance_news_block_surfaces_caveat_in_details(self):
+        """AC4 end-to-end: an alpha_vantage-style news payload must produce a
+        news caveat, not a silent zero-headline available source (issue #71)."""
+        skeleton = build_sources_skeleton(
+            {"feed": [{"title": "Q2 beat"}]},  # alpha_vantage dict payload
+            "<no StockTwits messages found for $AAPL>",
+            "<no Reddit posts found mentioning AAPL in the past 7 days>",
+        )
+        assert skeleton["news"]["available"] is False
+        details = build_details("2026-07-01", "2026-07-08", skeleton, llm_output=None)
+        caveats = details["data_quality"]["caveats"]
+        assert any("News unavailable" in c for c in caveats)
+        assert details["sources"]["news"]["available"] is False
 
 
 # ---------------------------------------------------------------------------
