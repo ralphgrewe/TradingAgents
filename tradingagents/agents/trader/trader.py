@@ -13,6 +13,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     format_analyst_reports_section,
     get_language_instruction,
+    is_present_text,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -73,7 +74,7 @@ def create_trader(llm):
 
         # Format investment plan section: omit if empty (in "none" research stage mode)
         plan_line = ""
-        if investment_plan and isinstance(investment_plan, str) and investment_plan.strip():
+        if is_present_text(investment_plan):
             plan_line = f"\n\nProposed Investment Plan: {investment_plan}"
 
         messages = [

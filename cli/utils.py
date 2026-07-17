@@ -160,7 +160,13 @@ def select_analysts(asset_type: AssetType = AssetType.STOCK) -> list[AnalystType
 
 
 def select_research_depth() -> int:
-    """Select research depth using an interactive selection."""
+    """Select research depth using an interactive selection.
+
+    Sets ``max_debate_rounds``, which only matters when ``research_stage``
+    is ``"debate"`` (via ``TRADINGAGENTS_RESEARCH_STAGE``) — under the
+    default ``"none"``, the bull/bear/research-manager debate stage never
+    runs, so this selection has no effect on that run.
+    """
 
     # Define research depth options with their corresponding values
     DEPTH_OPTIONS = [

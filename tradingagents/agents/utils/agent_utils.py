@@ -105,6 +105,19 @@ def format_analyst_reports_section(
     return section
 
 
+def is_present_text(value: Any) -> bool:
+    """True if ``value`` is a non-empty, non-whitespace-only string.
+
+    Shared predicate for the "omit this section rather than interpolate an
+    empty string" pattern used across prompt assembly — e.g. the trader/PM
+    prompts omitting the investment-plan section when ``research_stage ==
+    "none"`` leaves ``investment_plan``/``trader_investment_plan`` empty by
+    design (issue #79), mirroring how :func:`format_analyst_reports_section`
+    already drops missing/non-string analyst reports (issue #77).
+    """
+    return bool(value) and isinstance(value, str) and value.strip() != ""
+
+
 def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 

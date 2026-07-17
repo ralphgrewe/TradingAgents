@@ -564,7 +564,11 @@ def get_user_selections():
     # Step 5: Research depth
     console.print(
         create_question_box(
-            "Step 5: Research Depth", "Select your research depth level"
+            "Step 5: Research Depth",
+            "Select your research depth level "
+            "(only takes effect if research_stage is set to \"debate\" via "
+            "TRADINGAGENTS_RESEARCH_STAGE; the default \"none\" skips the "
+            "bull/bear debate stage entirely, making this a no-op)",
         )
     )
     selected_research_depth = select_research_depth()

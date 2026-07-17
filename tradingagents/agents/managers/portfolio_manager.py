@@ -15,6 +15,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     format_analyst_reports_section,
     get_language_instruction,
+    is_present_text,
 )
 from tradingagents.agents.utils.structured import bind_structured
 
@@ -50,9 +51,9 @@ def create_portfolio_manager(llm):
 
         # Format research/trader context lines: omit if empty (in "none" research stage mode)
         context_lines = []
-        if research_plan and isinstance(research_plan, str) and research_plan.strip():
+        if is_present_text(research_plan):
             context_lines.append(f"- Research Manager's investment plan: **{research_plan}**")
-        if trader_plan and isinstance(trader_plan, str) and trader_plan.strip():
+        if is_present_text(trader_plan):
             context_lines.append(f"- Trader's transaction proposal: **{trader_plan}**")
         research_trader_line = "\n".join(context_lines)
         if research_trader_line:
