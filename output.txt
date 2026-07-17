@@ -1,0 +1,17 @@
+/home/ralph/projects/TradingAgents-Prompts/tradingagents/llm_clients/openai_client.py:272: RuntimeWarning: Model 'ministral-8b-latest' is not in the known model list for provider 'mistral'. Continuing anyway.
+  self.warn_if_unknown_model()
+/home/ralph/projects/TradingAgents-Prompts/tradingagents/llm_clients/openai_client.py:272: RuntimeWarning: Model 'ministral-3b-latest' is not in the known model list for provider 'mistral'. Continuing anyway.
+  self.warn_if_unknown_model()
+Reddit RSS 429 for r/stocks · AAPL — backing off 5.0s then retrying once
+Reddit RSS fetch failed for r/stocks · AAPL: HTTP Error 429: Too Many Requests
+Reddit RSS 429 for r/investing · AAPL — backing off 5.0s then retrying once
+Reddit RSS fetch failed for r/investing · AAPL: HTTP Error 429: Too Many Requests
+
+Processing AAPL for date 2026-07-17...
+
+── Msg Clear Market ──
+================================ Human Message =================================
+
+Continue
+
+Fatal error processing AAPL: [AttributeError] 'HumanMessage' object has no attribute 'tool_calls'

@@ -23,6 +23,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
     "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
     "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
+    "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
+    "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
+    "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
 }
 
 
@@ -87,6 +90,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Research stage mode: "debate" keeps Bull/Bear/Research Manager debate;
     # "none" bypasses the debate and sends analyst outputs directly to the trader
     "research_stage": "none",
+    # Research web search settings
+    "research_web_search": True,           # Enable/disable web search for live runs
+    "research_search_queries_max": 4,      # Maximum number of search queries
+    "research_evidence_token_budget": 3000, # Token budget for assembled evidence pack
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -116,6 +123,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+        "web_search": "tavily",              # Options: tavily (needs TAVILY_API_KEY)
     },
     # Perplexity-specific configuration
     "perplexity_model": "sonar-pro",
