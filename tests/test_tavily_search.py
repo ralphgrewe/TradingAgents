@@ -14,6 +14,7 @@ from tradingagents.dataflows.tavily_search import (
     get_web_search_results,
     build_evidence_pack,
     is_web_search_allowed,
+    TavilySearchError,
 )
 from tradingagents.dataflows.errors import VendorNotConfiguredError
 
@@ -62,26 +63,49 @@ class TavilySearchTests(unittest.TestCase):
         self.assertEqual(results[0]["score"], 0.95)
 
     def test_search_handles_api_request_failure(self):
-        """API request failure raises VendorNotConfiguredError."""
+        """API request failure raises TavilySearchError, not VendorNotConfiguredError."""
         import requests
         with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
             with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
                 mock_post.side_effect = requests.exceptions.RequestException("Network error")
 
-                with self.assertRaises(VendorNotConfiguredError) as ctx:
+                with self.assertRaises(TavilySearchError) as ctx:
                     get_web_search_results("test query")
                 self.assertIn("Tavily API request failed", str(ctx.exception))
+                self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
 
     def test_search_handles_json_parse_error(self):
-        """JSON parsing error raises VendorNotConfiguredError."""
+        """JSON parsing error raises TavilySearchError, not VendorNotConfiguredError."""
         with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
             with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
                 mock_post.return_value.json.side_effect = ValueError("Invalid JSON")
                 mock_post.return_value.raise_for_status.return_value = None
 
-                with self.assertRaises(VendorNotConfiguredError) as ctx:
+                with self.assertRaises(TavilySearchError) as ctx:
                     get_web_search_results("test query")
                 self.assertIn("Error parsing Tavily response", str(ctx.exception))
+                self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
+
+    def test_missing_key_and_http_failure_are_distinct_exception_types(self):
+        """Missing-API-key and HTTP/JSON failures raise distinguishable exception types.
+
+        This is the crux of design-review finding #2: callers must be able to
+        tell "disabled, no API key" apart from a generic degraded-search
+        outcome by exception type, not by string-matching the message.
+        """
+        import requests
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(VendorNotConfiguredError) as key_ctx:
+                get_web_search_results("test query")
+        self.assertNotIsInstance(key_ctx.exception, TavilySearchError)
+
+        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
+            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("boom")
+                with self.assertRaises(TavilySearchError) as http_ctx:
+                    get_web_search_results("test query")
+        self.assertNotIsInstance(http_ctx.exception, VendorNotConfiguredError)
 
     def test_search_handles_missing_fields(self):
         """Missing fields in response are handled gracefully."""
@@ -144,6 +168,28 @@ class EvidencePackBuilderTests(unittest.TestCase):
         self.assertEqual(len(pack), 1)
         # First one (higher score) should be kept
         self.assertEqual(pack[0]["title"], "Article A")
+
+    def test_dedupe_keeps_highest_scoring_duplicate_regardless_of_query_order(self):
+        """Dedup keeps the highest-scoring duplicate even when it is NOT seen first.
+
+        Design-review finding #3: dedup must sort (score desc, then URL) before
+        deduping, so the outcome doesn't depend on which query happens to be
+        iterated first. Here the *lower*-scoring duplicate is listed first.
+        """
+        url = "https://example.com/article"
+        results = [
+            [
+                {"title": "Lower score, seen first", "url": url, "content": "Text", "score": 0.50}
+            ],
+            [
+                {"title": "Higher score, seen second", "url": url, "content": "Text", "score": 0.95}
+            ],
+        ]
+        pack = build_evidence_pack(results, set())
+
+        self.assertEqual(len(pack), 1)
+        self.assertEqual(pack[0]["title"], "Higher score, seen second")
+        self.assertEqual(pack[0]["score"], 0.95)
 
     def test_dedupes_against_already_cited_urls(self):
         """URLs already cited are excluded from pack."""

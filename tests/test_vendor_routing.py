@@ -120,6 +120,30 @@ class VendorRoutingTests(unittest.TestCase):
                 self.assertRaises(ValueError):
             interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
 
+    def test_web_search_missing_api_key_degrades_through_standard_dispatch(self):
+        # Issue #83 design-review finding #1: web_search must be an optional
+        # category, so the real get_web_search_results (which raises
+        # VendorNotConfiguredError when TAVILY_API_KEY is unset) degrades to a
+        # sentinel through the *actual* route_to_vendor dispatch path, instead
+        # of aborting the run. Uses the real vendor impl (no mock.patch.dict
+        # override) to exercise the real exception path end to end.
+        set_config({"data_vendors": {"web_search": "tavily"}})
+        with mock.patch.dict("os.environ", {}, clear=True):
+            result = interface.route_to_vendor("get_web_search_results", "AAPL news")
+        self.assertIn("DATA_UNAVAILABLE", result)
+        self.assertIn("web_search", result)
+
+    def test_web_search_http_failure_degrades_through_standard_dispatch(self):
+        # Same as above, but for the generic HTTP/JSON failure path
+        # (TavilySearchError) rather than the missing-API-key path.
+        set_config({"data_vendors": {"web_search": "tavily"}})
+        with self._route_method(
+            "get_web_search_results", {"tavily": _raises(ValueError("network boom"))}
+        ):
+            result = interface.route_to_vendor("get_web_search_results", "AAPL news")
+        self.assertIn("DATA_UNAVAILABLE", result)
+        self.assertIn("web_search", result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,7 +97,9 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+# web_search is likewise optional: a missing TAVILY_API_KEY or an HTTP failure
+# must degrade to "search unavailable" rather than aborting the run (issue #83).
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "web_search"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {

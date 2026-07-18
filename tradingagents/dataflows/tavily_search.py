@@ -9,7 +9,7 @@ from datetime import datetime
 
 import requests
 
-from .errors import VendorNotConfiguredError
+from .errors import VendorError, VendorNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 TAVILY_BASE_URL = "https://api.tavily.com/search"
 TAVILY_TOPIC = "news"
 TAVILY_MAX_RESULTS = 3
+
+
+class TavilySearchError(VendorError):
+    """A Tavily request failed or its response could not be parsed.
+
+    Distinct from ``VendorNotConfiguredError``, which is reserved for the
+    "no API key" case. Keeping these separate lets callers (the Researcher
+    node, follow-up issue #85) tell "search disabled" apart from "search
+    degraded" without string-matching the exception message.
+    """
 
 
 def get_web_search_results(query: str) -> list[dict] | str:
@@ -27,7 +37,11 @@ def get_web_search_results(query: str) -> list[dict] | str:
 
     Returns:
         List of search results with keys: title, url, content, score.
-        Returns a string error message if the API key is missing or the request fails.
+
+    Raises:
+        VendorNotConfiguredError: TAVILY_API_KEY is not set.
+        TavilySearchError: the HTTP request failed or the response could not
+            be parsed.
 
     Each result dict contains:
         - title (str): Article title
@@ -58,7 +72,7 @@ def get_web_search_results(query: str) -> list[dict] | str:
     except requests.exceptions.RequestException as e:
         error_msg = f"Tavily API request failed: {e}"
         logger.warning(error_msg)
-        raise VendorNotConfiguredError(error_msg) from e
+        raise TavilySearchError(error_msg) from e
 
     try:
         data = response.json()
@@ -75,12 +89,12 @@ def get_web_search_results(query: str) -> list[dict] | str:
 
         return results
 
-    except VendorNotConfiguredError:
+    except TavilySearchError:
         raise
     except Exception as e:
         error_msg = f"Error parsing Tavily response: {e}"
         logger.warning(error_msg)
-        raise VendorNotConfiguredError(error_msg) from e
+        raise TavilySearchError(error_msg) from e
 
 
 def build_evidence_pack(
@@ -103,19 +117,22 @@ def build_evidence_pack(
     Returns:
         List of evidence dicts with keys: id, title, url, content, score.
     """
-    # Flatten and dedupe by URL
+    # Flatten, then sort deterministically (score descending, then URL
+    # ascending) *before* deduping. Sorting first guarantees that when the
+    # same URL appears in multiple queries with different scores, the
+    # highest-scoring instance is the one kept — the dedup outcome must not
+    # depend on which query happens to be iterated first.
+    all_results = [result for result_list in query_results_list for result in result_list]
+    all_results.sort(key=lambda r: (-r.get("score", 0.0), r.get("url", "")))
+
     seen_urls = set(already_cited_urls)
     unique_results = []
 
-    for result_list in query_results_list:
-        for result in result_list:
-            url = result.get("url", "")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                unique_results.append(result)
-
-    # Sort deterministically: score descending, then URL ascending
-    unique_results.sort(key=lambda r: (-r.get("score", 0.0), r.get("url", "")))
+    for result in all_results:
+        url = result.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_results.append(result)
 
     # Truncate to token budget (chars/4 heuristic)
     assembled_pack = []
