@@ -440,19 +440,32 @@ class TradingAgentsGraph:
         # failures propagate — the memory MCP server is a hard dependency for a
         # run to complete, not a best-effort side write.
         #
-        # The research_manager stage is conditional on research_stage (#79): in
-        # "none" mode no Bull/Bear/Research Manager node ever runs and
-        # investment_plan stays "" by design (see propagation.py), so storing a
-        # decision here would fabricate a research_manager row indistinguishable
-        # from a real one — parse_rating("") silently defaults to "Hold", which
-        # would later surface as a nonsensical "past lesson" via query.py. Guard
-        # on research_stage itself, not on "is investment_plan empty", since a
-        # "debate"-mode run could in principle produce a genuinely thin plan.
+        # The research stage is conditional on research_stage (#79, #85): in
+        # "none" mode no research node ever runs and investment_plan stays "" by design
+        # (see propagation.py), so storing a decision here would fabricate a row
+        # indistinguishable from a real one — parse_rating("") silently defaults to
+        # "Hold", which would later surface as a nonsensical "past lesson" via query.py.
+        # Guard on research_stage itself, not on "is investment_plan empty", since a
+        # run could in principle produce a genuinely thin plan.
+        #
+        # "debate" mode stores under agent="research_manager"; "researcher" mode
+        # stores under agent="researcher" (no continuity with research_manager rows).
         research_stage = self.config.get("research_stage", "none")
-        if research_stage != "none":
+        if research_stage == "debate":
             research_signal = parse_rating(final_state.get("investment_plan", ""))
             self._memory_client.store_decision(
                 agent="research_manager",
+                ticker=company_name,
+                date=trade_date,
+                signal=research_signal,
+                confidence=None,
+                key_drivers=None,
+                thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
+            )
+        elif research_stage == "researcher":
+            research_signal = parse_rating(final_state.get("investment_plan", ""))
+            self._memory_client.store_decision(
+                agent="researcher",
                 ticker=company_name,
                 date=trade_date,
                 signal=research_signal,

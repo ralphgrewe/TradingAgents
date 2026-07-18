@@ -58,6 +58,7 @@ class Propagator:
             "sentiment_report": "",
             "news_report": "",
             "investment_plan": "",
+            "researcher_evidence": "",
             "trader_investment_plan": "",
         }
 
