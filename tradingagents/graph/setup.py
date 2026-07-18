@@ -1,11 +1,25 @@
 # TradingAgents/graph/setup.py
 
-from typing import Any, Dict
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from tradingagents.agents import *
-from tradingagents.agents.analysts.perplexity_news_analyst import create_perplexity_news_analyst
+from tradingagents.agents import (
+    create_aggressive_debator,
+    create_bear_researcher,
+    create_bull_researcher,
+    create_conservative_debator,
+    create_fundamentals_analyst,
+    create_market_analyst,
+    create_msg_delete,
+    create_neutral_debator,
+    create_news_analyst,
+    create_portfolio_manager,
+    create_research_manager,
+    create_sentiment_analyst,
+    create_trader,
+)
 from tradingagents.agents.utils.agent_states import AgentState
 
 from .analyst_execution import build_analyst_execution_plan
@@ -19,7 +33,7 @@ class GraphSetup:
         self,
         quick_thinking_llm: Any,
         deep_thinking_llm: Any,
-        tool_nodes: Dict[str, ToolNode],
+        tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
         analyst_concurrency_limit: int = 1,
     ):
@@ -31,7 +45,7 @@ class GraphSetup:
         self.analyst_concurrency_limit = analyst_concurrency_limit
 
     def setup_graph(
-        self, selected_analysts=["market", "social", "news", "fundamentals"]
+        self, selected_analysts=None
     ):
         """Set up and compile the agent workflow graph.
 
@@ -41,8 +55,12 @@ class GraphSetup:
                 - "social": Social media analyst
                 - "news": News analyst
                 - "fundamentals": Fundamentals analyst
-                - "perplexity_news": Perplexity-based news analyst (uses Agent API)
+
+            ("perplexity_news" is not yet wired into the execution plan —
+            see ANALYST_NODE_SPECS in analyst_execution.py.)
         """
+        if selected_analysts is None:
+            selected_analysts = ["market", "social", "news", "fundamentals"]
         plan = build_analyst_execution_plan(
             selected_analysts,
             concurrency_limit=self.analyst_concurrency_limit,
@@ -55,12 +73,11 @@ class GraphSetup:
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
         }
 
-        if "perplexity_news" in selected_analysts:
-            analyst_nodes["perplexity_news"] = create_perplexity_news_analyst(
-                self.quick_thinking_llm
-            )
-            delete_nodes["perplexity_news"] = create_msg_delete()
-            tool_nodes["perplexity_news"] = self.tool_nodes["perplexity_news"]
+        # NOTE: "perplexity_news" is not in ANALYST_NODE_SPECS (see
+        # analyst_execution.py), so build_analyst_execution_plan() above
+        # already raises ValueError before this point if it's selected —
+        # wiring it into the node graph is pre-existing unfinished work,
+        # tracked as a follow-up rather than fixed here.
 
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
@@ -81,7 +98,8 @@ class GraphSetup:
         for spec in plan.specs:
             workflow.add_node(spec.agent_node, analyst_factories[spec.key]())
             workflow.add_node(spec.clear_node, create_msg_delete())
-            workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
+            if spec.tool_node is not None:
+                workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
 
         # Add other nodes
         workflow.add_node("Bull Researcher", bull_researcher_node)
@@ -100,16 +118,27 @@ class GraphSetup:
         # Connect analysts in sequence
         for i, spec in enumerate(plan.specs):
             current_analyst = spec.agent_node
-            current_tools = spec.tool_node
             current_clear = spec.clear_node
 
-            # Add conditional edges for current analyst
-            workflow.add_conditional_edges(
-                current_analyst,
-                getattr(self.conditional_logic, f"should_continue_{spec.key}"),
-                [current_tools, current_clear],
-            )
-            workflow.add_edge(current_tools, current_analyst)
+            if spec.tool_node is not None:
+                # This analyst still makes real tool calls (currently only
+                # "social"): keep the conditional round trip through its
+                # ToolNode.
+                current_tools = spec.tool_node
+                workflow.add_conditional_edges(
+                    current_analyst,
+                    getattr(self.conditional_logic, f"should_continue_{spec.key}"),
+                    [current_tools, current_clear],
+                )
+                workflow.add_edge(current_tools, current_analyst)
+            else:
+                # No tool round trip (market/news/fundamentals compute
+                # deterministically and never call tools, so they add no new
+                # message — see #37). Wire straight to the clear node
+                # instead of routing through a `tool_calls`-checking
+                # conditional edge, which would crash on the stale
+                # HumanMessage left over from the previous node.
+                workflow.add_edge(current_analyst, current_clear)
 
             # Connect to next analyst or to Bull Researcher if this is the last analyst
             if i < len(plan.specs) - 1:

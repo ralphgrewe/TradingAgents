@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
 
 import questionary
 from dotenv import find_dotenv, set_key
@@ -24,11 +23,25 @@ ANALYST_ORDER = [
 CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 
 
+def is_valid_ticker_input(value: str) -> bool:
+    """Whether a ticker entry is acceptable (charset + length).
+
+    Allows the characters Yahoo symbols use, including ``=`` for futures/forex
+    like ``GC=F`` and ``EURUSD=X`` (#980), and ``^`` for indices. Empty input is
+    allowed (it defaults to SPY downstream).
+    """
+    v = value.strip()
+    return not v or (all(ch.isalnum() or ch in "._-^=" for ch in v) and len(v) <= 32)
+
+
 def get_ticker() -> str:
     """Prompt the user to enter a ticker symbol."""
     ticker = questionary.text(
         f"Enter the exact ticker symbol to analyze ({TICKER_INPUT_EXAMPLES}):",
-        validate=lambda x: len(x.strip()) > 0 or "Please enter a valid ticker symbol.",
+        validate=lambda x: (
+            is_valid_ticker_input(x)
+            or "Please enter a valid ticker symbol, e.g. AAPL, 000404.SZ, 0700.HK, GC=F."
+        ),
         style=questionary.Style(
             [
                 ("text", "fg:green"),
@@ -37,28 +50,41 @@ def get_ticker() -> str:
         ),
     ).ask()
 
-    if not ticker:
+    if ticker is None:
         console.print("\n[red]No ticker symbol provided. Exiting...[/red]")
         exit(1)
 
-    return normalize_ticker_symbol(ticker)
+    return normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
 
 
 def normalize_ticker_symbol(ticker: str) -> str:
-    """Normalize ticker input while preserving exchange suffixes."""
-    return ticker.strip().upper()
+    """Resolve user input to its canonical Yahoo symbol (single source of truth).
+
+    Delegates to the data layer's ``normalize_symbol`` so the symbol the CLI
+    passes through the pipeline is exactly the one the data path will price
+    (e.g. ``BTCUSD`` -> ``BTC-USD``, ``XAUUSD`` -> ``GC=F``). Falls back to the
+    plain upper-case if the data layer is unavailable.
+    """
+    try:
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+        return normalize_symbol(ticker)
+    except Exception:
+        return ticker.strip().upper()
 
 
 def detect_asset_type(ticker: str) -> AssetType:
-    normalized_ticker = ticker.strip().upper()
-    if normalized_ticker.endswith(CRYPTO_SUFFIXES):
+    """Classify on the canonical symbol so e.g. BTCUSD and BTC-USDT both read as
+    crypto (#981/#982), matching what the data path will actually fetch."""
+    canonical = normalize_ticker_symbol(ticker)
+    if canonical.endswith(CRYPTO_SUFFIXES):
         return AssetType.CRYPTO
     return AssetType.STOCK
 
 
 def filter_analysts_for_asset_type(
-    analysts: List[AnalystType], asset_type: AssetType
-) -> List[AnalystType]:
+    analysts: list[AnalystType], asset_type: AssetType
+) -> list[AnalystType]:
     if asset_type != AssetType.CRYPTO:
         return analysts
     return [
@@ -101,7 +127,7 @@ def get_analysis_date() -> str:
     return date.strip()
 
 
-def select_analysts(asset_type: AssetType = AssetType.STOCK) -> List[AnalystType]:
+def select_analysts(asset_type: AssetType = AssetType.STOCK) -> list[AnalystType]:
     """Select analysts using an interactive checkbox."""
     available_analysts = filter_analysts_for_asset_type(
         [value for _, value in ANALYST_ORDER],
@@ -165,7 +191,7 @@ def select_research_depth() -> int:
     return choice
 
 
-def _fetch_openrouter_models() -> List[Tuple[str, str]]:
+def _fetch_openrouter_models() -> list[tuple[str, str]]:
     """Fetch available models from the OpenRouter API."""
     import requests
     try:
@@ -279,6 +305,7 @@ def select_llm_provider() -> tuple[str, str | None]:
         ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
         ("Azure OpenAI", "azure", None),
         ("Ollama", "ollama", ollama_url),
+        ("Intel XPU", "intel_xpu", None),
     ]
 
     choice = questionary.select(
@@ -296,7 +323,7 @@ def select_llm_provider() -> tuple[str, str | None]:
             ]
         ),
     ).ask()
-    
+
     if choice is None:
         console.print("\n[red]No LLM provider selected. Exiting...[/red]")
         exit(1)
@@ -446,7 +473,7 @@ def ask_minimax_region() -> tuple[str, str]:
 
 
 def confirm_ollama_endpoint(url: str) -> None:
-    """Show the resolved Ollama endpoint after provider selection.
+    r"""Show the resolved Ollama endpoint after provider selection.
 
     Surfaces three things the user benefits from seeing before model
     selection: which URL we'll actually hit, where it came from
@@ -475,7 +502,7 @@ def confirm_ollama_endpoint(url: str) -> None:
         )
 
 
-def ensure_api_key(provider: str) -> Optional[str]:
+def ensure_api_key(provider: str) -> str | None:
     """Make sure the API key for `provider` is available in the environment.
 
     If the env var is already set, returns its value untouched. Otherwise

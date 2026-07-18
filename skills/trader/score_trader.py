@@ -15,9 +15,17 @@ Prints JSON with keys:
   conflicts, signal, confidence
 
 Exit 0 on success, 1 on error.
+
+The scoring math lives in `compute(fund, news, quant)`, a pure function of
+the three loaded analyst envelopes with no memory/context input — `main()`
+is a thin CLI wrapper around it. `build_key_drivers` is a separate pure
+helper (issue #11) used by `SKILL.md`'s memory wiring to build the
+`key_drivers` payload for `memory_store_decision` from this script's
+`result` plus the `rationale`/`risk_note` prose written afterward.
 """
 
-import json, sys
+import json
+import sys
 from pathlib import Path
 
 
@@ -47,21 +55,48 @@ def aggregate(signals_subset):
     return score_to_signal(total)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: score_trader.py <run_dir>", file=sys.stderr)
-        sys.exit(1)
+# ── memory wiring (issue #11) ────────────────────────────────────────────────
+#
+# The trader skill is wired into the shared memory core in issue #11, one
+# tier above the three analyst skills (quant #8, fundamental #9, news #10):
+# it synthesizes their signals rather than producing one from raw data
+# itself. `conf_weight` above already is this module's HIGH/MEDIUM/LOW ->
+# numeric convention (the same one skills/quant/compute_indicators.py's and
+# skills/fundamental/compute_ratios.py's `confidence_to_score` reuse) — no
+# second mapping is added here. `build_key_drivers` mirrors those two
+# modules' helper of the same name: a pure reshaping function, with no
+# memory/context parameter, so it is structurally incapable of feeding
+# injected lessons back into the composite score.
 
-    run_dir = Path(sys.argv[1])
 
-    try:
-        fund  = load(run_dir / "fundamental-analyst.json")
-        news  = load(run_dir / "financial-news-analyst.json")
-        quant = load(run_dir / "quant-indicator-analyst.json")
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+def build_key_drivers(result, rationale=None, risk_note=None):
+    """Build the `key_drivers` payload for `memory_store_decision` (issue #11):
+    `composite_score`, `analyst_aggregates`, and `conflicts` taken verbatim
+    from `compute()`'s `result`, plus the `rationale`/`risk_note` prose
+    written by the Haiku subagent in SKILL.md Steps 3-6 (not part of
+    `result` — passed in separately since they are not computed by this
+    script). No new derivation — every value here already exists elsewhere
+    in the trader envelope."""
+    return {
+        "composite_score": result.get("composite_score"),
+        "analyst_aggregates": result.get("analyst_aggregates"),
+        "conflicts": result.get("conflicts", []),
+        "rationale": rationale,
+        "risk_note": risk_note,
+    }
 
+
+def compute(fund, news, quant):
+    """Compute the trader's composite score/signal/confidence (Steps 2-5 of
+    SKILL.md) from the three already-loaded analyst envelopes.
+
+    Pure function of its arguments only — deliberately takes no memory /
+    past-context input, so the deterministic composite-score logic here can
+    never be influenced by injected lessons (issue #11's "Verify"
+    requirement: `signal`/`confidence` unchanged by the memory addition,
+    mirroring issue #8/#9's `compute()` functions). `main()` is a thin CLI
+    wrapper around this.
+    """
     fd = fund["details"]
     nd = news["details"]
     qd = quant["details"]
@@ -187,6 +222,25 @@ def main():
         "confidence": confidence,
     }
 
+    return result
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: score_trader.py <run_dir>", file=sys.stderr)
+        sys.exit(1)
+
+    run_dir = Path(sys.argv[1])
+
+    try:
+        fund  = load(run_dir / "fundamental-analyst.json")
+        news  = load(run_dir / "financial-news-analyst.json")
+        quant = load(run_dir / "quant-indicator-analyst.json")
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    result = compute(fund, news, quant)
     print(json.dumps(result, indent=2))
 
 

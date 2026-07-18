@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import functools
+import json
+from typing import Any
 
 from langchain_core.messages import AIMessage
 
@@ -13,8 +15,30 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
-    invoke_structured_or_freetext,
 )
+
+
+def _extract_trade_setup(market_report: Any) -> dict | None:
+    """Pull the Market Analyst's quant ``trade_setup`` out of ``market_report``.
+
+    ``market_report`` is a JSON envelope (``skill``/``ticker``/``date``/``signal``/
+    ``confidence``/``summary``/``details``, see skills/SCHEMA.md) since #30. Its
+    ``details.trade_setup`` (``bias``/``entry_trigger``/``stop_loss``/
+    ``stop_loss_formula``/``take_profit``/``risk_reward``) is the only
+    deterministically-computed entry/stop-loss guidance available anywhere in
+    the pipeline, so the Trader surfaces it directly rather than re-deriving
+    price levels from prose. Returns ``None`` if ``market_report`` isn't a
+    parseable envelope or has no trade_setup (e.g. OHLCV was unavailable).
+    """
+    if not isinstance(market_report, str):
+        return None
+    try:
+        envelope = json.loads(market_report)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    return envelope.get("details", {}).get("trade_setup")
 
 
 def create_trader(llm):
@@ -26,13 +50,25 @@ def create_trader(llm):
         instrument_context = build_instrument_context(company_name, asset_type)
         investment_plan = state["investment_plan"]
 
+        trade_setup = _extract_trade_setup(state.get("market_report"))
+        trade_setup_line = ""
+        if trade_setup:
+            trade_setup_line = (
+                "\n\nQuant trade setup from the Market Analyst (JSON, computed "
+                "deterministically from technical indicators — prefer its numeric "
+                "`stop_loss` for your stop_loss field, and use `entry_trigger`/"
+                f"`take_profit`/`risk_reward` to inform entry_price and reasoning): {json.dumps(trade_setup)}"
+            )
+
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan."
+                    "Anchor your reasoning in the analysts' reports and the research plan. "
+                    "When a quant trade setup is provided below, ground your entry_price and "
+                    "stop_loss fields in it instead of guessing numeric levels."
                     + get_language_instruction()
                 ),
             },
@@ -43,7 +79,8 @@ def create_trader(llm):
                     f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "
                     f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}"
+                    f"{trade_setup_line}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },
@@ -64,7 +101,7 @@ def create_trader(llm):
             except Exception:
                 # Fall back to free-text generation
                 pass
-        
+
         # Free-text fallback
         trader_plan = llm.invoke(messages).content
         return {

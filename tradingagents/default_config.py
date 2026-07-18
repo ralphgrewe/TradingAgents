@@ -17,6 +17,11 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_SIMULATION_SERVER_COMMAND": "simulation_server_command",
+    "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
+    "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
+    "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
 }
 
 
@@ -28,6 +33,9 @@ def _coerce(value: str, reference):
         return int(value)
     if isinstance(reference, float):
         return float(value)
+    if isinstance(reference, list):
+        # For lists, parse as space/comma-separated values
+        return [x.strip() for x in value.replace(",", " ").split() if x.strip()]
     return value
 
 
@@ -64,8 +72,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
-    # Temperature control for sampling randomness (0.0 = deterministic, 2.0 = very creative)
-    "temperature": 0.7,
+    # Sampling temperature, forwarded to every provider when set. None leaves
+    # each provider at its own default. Lower values reduce run-to-run
+    # variation on models that honor it; reasoning models largely ignore it
+    # and no setting makes LLM output bit-identical across runs.
+    "temperature": None,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
@@ -98,7 +109,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance, perplexity
+        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
+        "prediction_markets": "polymarket",  # Options: polymarket (keyless)
     },
     # Perplexity-specific configuration
     "perplexity_model": "sonar-pro",
@@ -124,4 +137,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
         ".AX":  "^AXJO",    # Australia (ASX 200)
         "":     "SPY",      # default for US-listed tickers (no suffix)
     },
+    # McpTradingSimulation client configuration (issue #34)
+    # When not set, SimulationClient auto-detects from sibling ../McpTradingSimulation checkout.
+    # Override via TRADINGAGENTS_SIMULATION_SERVER_COMMAND and TRADINGAGENTS_SIMULATION_SERVER_ARGS
+    # env vars if running on a different machine/checkout layout.
+    "simulation_server_command": None,   # Path to Python interpreter (e.g. /path/to/venv/bin/python)
+    "simulation_server_args": None,      # List of args: ["/path/to/mcp_server.py"]
+    # MemoryMCPClient configuration (issue #51) — networked client for the
+    # memory core's MCP server (mcp_server.py run under start_server.sh).
+    # When memory_mcp_url is None, MemoryMCPClient derives a default from
+    # memory_mcp_transport ("http://127.0.0.1:8000/mcp" for streamable-http,
+    # "http://127.0.0.1:8000/sse" for sse) — see tradingagents/memory/mcp_client.py.
+    "memory_mcp_url": None,
+    "memory_mcp_transport": "streamable-http",   # Options: streamable-http, sse
 })

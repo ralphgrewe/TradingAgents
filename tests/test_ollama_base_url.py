@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
-
-# ---- openai_client side: _resolve_provider_base_url -----------------------
+# ---- openai_client side: OPENAI_COMPATIBLE_PROVIDERS registry -------------
+#
+# The standalone ``_resolve_provider_base_url`` helper was replaced by
+# upstream's ``ProviderSpec`` registry (issue #15): the env-var override is
+# now declared per-provider via ``ProviderSpec.base_url_env`` and resolved
+# inline, at call time, inside ``OpenAIClient.get_llm()``. These tests cover
+# the same observable behavior end-to-end through the client instead of a
+# now-removed internal function.
 
 
 def _reload_client():
@@ -18,29 +22,35 @@ def _reload_client():
 def test_resolver_returns_default_when_env_unset(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     mod = _reload_client()
-    assert mod._resolve_provider_base_url("ollama") == "http://localhost:11434/v1"
+    llm = mod.OpenAIClient(model="llama3.1", provider="ollama").get_llm()
+    assert str(llm.openai_api_base) == "http://localhost:11434/v1"
 
 
 def test_resolver_returns_env_when_set(monkeypatch):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://remote-ollama:11434/v1")
     mod = _reload_client()
-    assert mod._resolve_provider_base_url("ollama") == "http://remote-ollama:11434/v1"
+    llm = mod.OpenAIClient(model="llama3.1", provider="ollama").get_llm()
+    assert str(llm.openai_api_base) == "http://remote-ollama:11434/v1"
 
 
 def test_resolver_evaluation_is_call_time(monkeypatch):
     """Setting the env AFTER module import must still take effect."""
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     mod = _reload_client()
+    client = mod.OpenAIClient(model="llama3.1", provider="ollama")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://late-set:11434/v1")
-    assert mod._resolve_provider_base_url("ollama") == "http://late-set:11434/v1"
+    llm = client.get_llm()
+    assert str(llm.openai_api_base) == "http://late-set:11434/v1"
 
 
 def test_resolver_does_not_affect_other_providers(monkeypatch):
     """OLLAMA_BASE_URL should NOT leak into xai/deepseek/etc."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://elsewhere/v1")
     mod = _reload_client()
-    assert mod._resolve_provider_base_url("xai") == "https://api.x.ai/v1"
-    assert mod._resolve_provider_base_url("deepseek") == "https://api.deepseek.com"
+    xai_llm = mod.OpenAIClient(model="grok-4", provider="xai", api_key="k").get_llm()
+    deepseek_llm = mod.OpenAIClient(model="deepseek-chat", provider="deepseek", api_key="k").get_llm()
+    assert str(xai_llm.openai_api_base) == "https://api.x.ai/v1"
+    assert str(deepseek_llm.openai_api_base) == "https://api.deepseek.com"
 
 
 def test_client_get_llm_picks_up_env(monkeypatch):

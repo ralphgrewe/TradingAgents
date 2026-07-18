@@ -20,12 +20,15 @@ def _reload_with_env(monkeypatch, **overrides):
 
 def test_no_env_uses_built_in_defaults(monkeypatch):
     dc = _reload_with_env(monkeypatch)
-    assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
-    assert dc.DEFAULT_CONFIG["deep_think_llm"] == "gpt-5.4"
-    assert dc.DEFAULT_CONFIG["quick_think_llm"] == "gpt-5.4-mini"
+    # Fork deliberately defaults to a local-first provider rather than
+    # upstream's openai/gpt-5.x (see issue #16).
+    assert dc.DEFAULT_CONFIG["llm_provider"] == "ollama"
+    assert dc.DEFAULT_CONFIG["deep_think_llm"] == "ministral-3:8b"
+    assert dc.DEFAULT_CONFIG["quick_think_llm"] == "ministral-3:3b"
     assert dc.DEFAULT_CONFIG["backend_url"] is None
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
+    assert dc.DEFAULT_CONFIG["temperature"] is None
 
 
 def test_string_overrides(monkeypatch):
@@ -75,8 +78,25 @@ def test_empty_env_value_is_passthrough(monkeypatch):
         TRADINGAGENTS_LLM_PROVIDER="",
         TRADINGAGENTS_MAX_DEBATE_ROUNDS="",
     )
-    assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
+    assert dc.DEFAULT_CONFIG["llm_provider"] == "ollama"
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
+
+
+def test_temperature_override_passthrough(monkeypatch):
+    """TRADINGAGENTS_TEMPERATURE overrides the None default.
+
+    The default value (None) gives ``_coerce`` no type to coerce to, so the
+    raw string passes through unchanged here; ``TradingAgentsGraph.
+    _get_provider_kwargs`` is responsible for the float() cast at the point
+    of use (see tests/test_temperature_config.py's docstring / issue #16).
+    """
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_TEMPERATURE="0.3")
+    assert dc.DEFAULT_CONFIG["temperature"] == "0.3"
+
+
+def test_temperature_empty_env_is_passthrough(monkeypatch):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_TEMPERATURE="")
+    assert dc.DEFAULT_CONFIG["temperature"] is None
 
 
 def test_invalid_int_raises(monkeypatch):

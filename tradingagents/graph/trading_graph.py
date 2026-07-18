@@ -1,51 +1,42 @@
 # TradingAgents/graph/trading_graph.py
 
+import json
 import logging
 import os
-from pathlib import Path
-import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, Tuple, List, Optional
+from pathlib import Path
+from typing import Any
 
 import yfinance as yf
-
-logger = logging.getLogger(__name__)
-
 from langgraph.prebuilt import ToolNode
 
-from tradingagents.llm_clients import create_llm_client
-
-from tradingagents.agents import *
-from tradingagents.agents.analysts.perplexity_news_analyst import create_perplexity_news_analyst
-from tradingagents.default_config import DEFAULT_CONFIG
+# Import the new abstract tool methods from agent_utils.
+#
+# Only get_news is imported here: it's the one tool still wired to a live
+# ToolNode ("social" — see _create_tool_nodes below). market/news/
+# fundamentals compute deterministically and never call tools (#37), so
+# their former ToolNode tool lists (get_stock_data, get_indicators,
+# get_verified_market_snapshot, get_global_news, get_insider_transactions,
+# get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement)
+# were dropped along with the dead ToolNodes they backed.
+from tradingagents.agents.utils.agent_utils import get_news
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.agents.utils.agent_states import (
-    AgentState,
-    InvestDebateState,
-    RiskDebateState,
-)
+from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.config import set_config
-
-# Import the new abstract tool methods from agent_utils
-from tradingagents.agents.utils.agent_utils import (
-    get_stock_data,
-    get_indicators,
-    get_fundamentals,
-    get_balance_sheet,
-    get_cashflow,
-    get_income_statement,
-    get_news,
-    get_insider_transactions,
-    get_global_news
-)
+from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.llm_clients import create_llm_client
+from tradingagents.memory.mcp_client import MemoryMCPClient
+from tradingagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
-from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
+from .setup import GraphSetup
 from .signal_processing import SignalProcessor
+
+logger = logging.getLogger(__name__)
 
 
 class TradingAgentsGraph:
@@ -53,10 +44,10 @@ class TradingAgentsGraph:
 
     def __init__(
         self,
-        selected_analysts=["market", "social", "news", "fundamentals"],
+        selected_analysts=None,
         debug=False,
-        config: Dict[str, Any] = None,
-        callbacks: Optional[List] = None,
+        config: dict[str, Any] = None,
+        callbacks: list | None = None,
     ):
         """Initialize the trading agents graph and components.
 
@@ -71,6 +62,8 @@ class TradingAgentsGraph:
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
         """
+        if selected_analysts is None:
+            selected_analysts = ["market", "social", "news", "fundamentals"]
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
@@ -104,7 +97,7 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
-        
+
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -135,14 +128,14 @@ class TradingAgentsGraph:
         self.log_states_dict = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
-        # Register the perplexity_news_analyst creator with the module
-        # This allows it to be imported via create_perplexity_news_analyst
-        
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
+        # Networked memory MCP client (#53) — connected once per propagate()
+        # run and torn down at the end of that run; see propagate().
+        self._memory_client: MemoryMCPClient | None = None
 
-    def _get_provider_kwargs(self) -> Dict[str, Any]:
+    def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
@@ -162,45 +155,29 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
-        # Temperature is supported by all providers
+        # Temperature is supported by all providers. Cast through float() so a
+        # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config
+        # default is None, so default_config.py's type-driven coercion can't
+        # infer float and passes the raw string through untouched.
         temperature = self.config.get("temperature")
         if temperature is not None:
-            kwargs["temperature"] = temperature
+            kwargs["temperature"] = float(temperature)
 
         return kwargs
 
-    def _create_tool_nodes(self) -> Dict[str, ToolNode]:
-        """Create tool nodes for different data sources using abstract methods."""
+    def _create_tool_nodes(self) -> dict[str, ToolNode]:
+        """Create tool nodes for different data sources using abstract methods.
+
+        market/news/fundamentals have no entries here: those analysts compute
+        deterministically and never call tools, so `GraphSetup.setup_graph()`
+        wires them straight to their "Msg Clear" node with no ToolNode round
+        trip (#37). Only "social" (sentiment) still makes real tool calls.
+        """
         return {
-            "market": ToolNode(
-                [
-                    # Core stock data tools
-                    get_stock_data,
-                    # Technical indicators
-                    get_indicators,
-                ]
-            ),
             "social": ToolNode(
                 [
                     # News tools for social media analysis
                     get_news,
-                ]
-            ),
-            "news": ToolNode(
-                [
-                    # News and insider information
-                    get_news,
-                    get_global_news,
-                    get_insider_transactions,
-                ]
-            ),
-            "fundamentals": ToolNode(
-                [
-                    # Fundamental analysis tools
-                    get_fundamentals,
-                    get_balance_sheet,
-                    get_cashflow,
-                    get_income_statement,
                 ]
             ),
             "perplexity_news": ToolNode(
@@ -236,7 +213,7 @@ class TradingAgentsGraph:
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
         benchmark: str = "SPY",
-    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+    ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
         ``benchmark`` is the index used as the alpha baseline (resolved by the
@@ -244,12 +221,17 @@ class TradingAgentsGraph:
         actual_holding_days)`` or ``(None, None, None)`` if price data is
         unavailable (too recent, delisted, or network error).
         """
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
             end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
             end_str = end.strftime("%Y-%m-%d")
 
-            stock = yf.Ticker(ticker).history(start=trade_date, end=end_str)
+            # Normalize so the realized-return lookup hits the same instrument
+            # the analysis priced (e.g. XAUUSD -> GC=F) (#984). The benchmark is
+            # already a canonical Yahoo symbol from ``_resolve_benchmark``.
+            stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
             bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
             if len(stock) < 2 or len(bench) < 2:
@@ -328,31 +310,59 @@ class TradingAgentsGraph:
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
 
-        # Recompile with a checkpointer if the user opted in.
-        if self.config.get("checkpoint_enabled"):
-            self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
-            )
-            saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
+        # Connect to the networked memory MCP server (#53) for the SQLite memory
+        # core's resolve-pending call and this run's store-decision calls. This
+        # is a hard dependency: an unreachable server (MemoryMCPConnectionError)
+        # or a failing tool call (MemoryMCPToolError) both propagate and fail
+        # the run rather than being logged and swallowed — a deliberate
+        # behavior change from the prior in-process warn-and-continue pattern.
+        with MemoryMCPClient() as memory_client:
+            self._memory_client = memory_client
 
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
+            # Resolve any pending decisions in the SQLite memory core.
+            memory_client.resolve_pending(ticker=company_name)
+
+            # Recompile with a checkpointer if the user opted in.
+            if self.config.get("checkpoint_enabled"):
+                self._checkpointer_ctx = get_checkpointer(
+                    self.config["data_cache_dir"], company_name
                 )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+                saver = self._checkpointer_ctx.__enter__()
+                self.graph = self.workflow.compile(checkpointer=saver)
 
-        try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
-        finally:
-            if self._checkpointer_ctx is not None:
-                self._checkpointer_ctx.__exit__(None, None, None)
-                self._checkpointer_ctx = None
-                self.graph = self.workflow.compile()
+                step = checkpoint_step(
+                    self.config["data_cache_dir"], company_name, str(trade_date)
+                )
+                if step is not None:
+                    logger.info(
+                        "Resuming from step %d for %s on %s", step, company_name, trade_date
+                    )
+                else:
+                    logger.info("Starting fresh for %s on %s", company_name, trade_date)
+
+            try:
+                return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            finally:
+                if self._checkpointer_ctx is not None:
+                    self._checkpointer_ctx.__exit__(None, None, None)
+                    self._checkpointer_ctx = None
+                    self.graph = self.workflow.compile()
+                self._memory_client = None
+
+    def save_reports(self, final_state, ticker, save_path=None) -> Path:
+        """Write the markdown report tree for a completed run, like the CLI does.
+
+        Programmatic callers get the same on-disk reports the CLI produces. Pass
+        an explicit ``save_path`` or let it default under ``results_dir``.
+        """
+        if save_path is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = (
+                Path(self.config["results_dir"])
+                / "reports"
+                / f"{safe_ticker_component(ticker)}_{stamp}"
+            )
+        return write_report_tree(final_state, ticker, save_path)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
@@ -369,18 +379,44 @@ class TradingAgentsGraph:
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if self.debug:
-            trace = []
-            for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
-            # Streamed chunks are per-node deltas. Merge them so the returned
-            # state matches what graph.invoke() yields in the non-debug path.
-            final_state = {}
-            for chunk in trace:
-                final_state.update(chunk)
+            last_printed_message = None
+            # Start with the initial state in case the graph yields no "values"
+            # chunk at all (e.g. an empty/no-op graph) — kept in sync with the
+            # non-debug path's starting point.
+            final_state = dict(init_agent_state)
+
+            # Combine "values" and "updates" modes: "updates" chunks carry
+            # {node_name: state_delta} so we can label each printed message
+            # with its originating node, while "values" chunks carry the full,
+            # already-reduced state after each step (LangGraph applies each
+            # channel's reducer — e.g. `add_messages` for `messages` — before
+            # yielding a "values" chunk). Taking the last "values" chunk as the
+            # final state means we never have to hand-reimplement reducer
+            # semantics: it matches graph.invoke()'s output exactly, unlike
+            # last-write-wins merging of raw "updates" deltas.
+            debug_args = {**args, "stream_mode": ["values", "updates"]}
+            for mode, chunk in self.graph.stream(init_agent_state, **debug_args):
+                if mode == "values":
+                    final_state = chunk
+                    continue
+
+                # mode == "updates": chunk is {node_name: state_delta}
+                for node_name, state_delta in chunk.items():
+                    # Check if this node delta has messages
+                    if state_delta.get("messages"):
+                        current_message = state_delta["messages"][-1]
+
+                        # Deduplicate: only print if message content or type differs
+                        # Create a key from message type and content for comparison
+                        message_key = (
+                            type(current_message).__name__,
+                            current_message.content,
+                        )
+                        if last_printed_message is None or last_printed_message != message_key:
+                            # Print node name header
+                            print(f"\n── {node_name} ──")
+                            current_message.pretty_print()
+                            last_printed_message = message_key
         else:
             final_state = self.graph.invoke(init_agent_state, **args)
 
@@ -395,6 +431,44 @@ class TradingAgentsGraph:
             ticker=company_name,
             trade_date=trade_date,
             final_trade_decision=final_state["final_trade_decision"],
+        )
+
+        # Store decisions in SQLite memory core (via the memory MCP client, #53)
+        # for the three decision-bearing stages. Each stage's signal is derived
+        # via parse_rating from its own output text. Connection/tool failures
+        # propagate — the memory MCP server is a hard dependency for a run to
+        # complete, not a best-effort side write.
+        research_signal = parse_rating(final_state.get("investment_plan", ""))
+        self._memory_client.store_decision(
+            agent="research_manager",
+            ticker=company_name,
+            date=trade_date,
+            signal=research_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
+        )
+
+        trader_signal = parse_rating(final_state.get("trader_investment_plan", ""))
+        self._memory_client.store_decision(
+            agent="trader",
+            ticker=company_name,
+            date=trade_date,
+            signal=trader_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("trader_investment_plan", "")[:500],  # truncate for DB
+        )
+
+        pm_signal = parse_rating(final_state.get("final_trade_decision", ""))
+        self._memory_client.store_decision(
+            agent="portfolio_manager",
+            ticker=company_name,
+            date=trade_date,
+            signal=pm_signal,
+            confidence=None,
+            key_drivers=None,
+            thesis=final_state.get("final_trade_decision", "")[:500],  # truncate for DB
         )
 
         # Clear checkpoint on successful completion to avoid stale state.

@@ -15,8 +15,27 @@ class AnalystExecutionPlanTests(unittest.TestCase):
         self.assertEqual([spec.key for spec in plan.specs], ["news", "market"])
         self.assertEqual(plan.concurrency_limit, 2)
         self.assertEqual(plan.specs[0].agent_node, "News Analyst")
-        self.assertEqual(plan.specs[0].tool_node, "tools_news")
+        # news has no tool round trip (#37): it computes deterministically
+        # and never calls tools, so it has no ToolNode to route into.
+        self.assertIsNone(plan.specs[0].tool_node)
         self.assertEqual(plan.specs[0].clear_node, "Msg Clear News")
+
+    def test_only_social_has_a_tool_node(self):
+        # market/news/fundamentals compute deterministically and never call
+        # tools (#37), so they no longer have a ToolNode to round-trip
+        # through. "social" (sentiment) still makes real tool calls, so it's
+        # the only spec with a non-None tool_node.
+        plan = build_analyst_execution_plan(["market", "social", "news", "fundamentals"])
+        tool_nodes_by_key = {spec.key: spec.tool_node for spec in plan.specs}
+        self.assertEqual(
+            tool_nodes_by_key,
+            {
+                "market": None,
+                "social": "tools_social",
+                "news": None,
+                "fundamentals": None,
+            },
+        )
 
     def test_rejects_unknown_analyst_keys(self):
         with self.assertRaises(ValueError):

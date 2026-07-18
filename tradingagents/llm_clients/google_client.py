@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -20,7 +20,7 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
 class GoogleClient(BaseLLMClient):
     """Client for Google Gemini models."""
 
-    def __init__(self, model: str, base_url: Optional[str] = None, **kwargs):
+    def __init__(self, model: str, base_url: str | None = None, **kwargs):
         super().__init__(model, base_url, **kwargs)
 
     def get_llm(self) -> Any:
@@ -31,7 +31,7 @@ class GoogleClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in ("timeout", "max_retries", "callbacks", "http_client", "http_async_client", "temperature"):
+        for key in ("timeout", "max_retries", "temperature", "callbacks", "http_client", "http_async_client"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 

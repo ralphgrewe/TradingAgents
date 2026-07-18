@@ -29,11 +29,19 @@ Key points to focus on:
 - Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.
 - Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
 
+The market, news, and fundamentals reports below are structured JSON envelopes
+(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the
+`summary` for the headline takeaway and cite specific `details` fields (e.g.
+technical indicator values and the `trade_setup`, news headline counts and the
+conservative/risky ratings, or the fundamentals value/growth sub-signals) as
+supporting evidence — do not just restate the raw JSON. The social media
+sentiment report remains free-form prose.
+
 Resources available:
-Market research report: {market_research_report}
-Social media sentiment report: {sentiment_report}
-Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
+Market research report (JSON envelope): {market_research_report}
+Social media sentiment report (prose): {sentiment_report}
+Latest world affairs news (JSON envelope): {news_report}
+{fundamentals_label} (JSON envelope): {fundamentals_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
