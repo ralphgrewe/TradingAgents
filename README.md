@@ -24,11 +24,30 @@ python -m venv venv
 `run_trading_agents.py` runs the full agent pipeline for one or more tickers from a JSON file and
 prints the resulting decision.
 
+### Research stages
+
+By default, the system uses `research_stage=none`, skipping the research stage entirely and sending
+analyst reports directly to the trader. For richer analysis, two alternative modes are available:
+
+- **`research_stage=debate`** (deprecated): Bull and Bear researchers debate with a Research Manager
+  judge. Set via `TRADINGAGENTS_RESEARCH_STAGE=debate`.
+- **`research_stage=researcher`** (recommended): A single Researcher node synthesizes analyst reports
+  and live web search evidence. When `trade_date == today`, web search runs via the Tavily API
+  (requires `TAVILY_API_KEY`); historical dates degrade gracefully (no searches, metadata line
+  shows "disabled (historical date)").
+  - Config keys: `research_web_search` (enable/disable, default True), `research_search_queries_max`
+    (default 4), `research_evidence_token_budget` (default 3000), `data_vendors["web_search"]`
+    (default "tavily" — needs `TAVILY_API_KEY`).
+  - Set via `TRADINGAGENTS_RESEARCH_STAGE=researcher`.
+
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:
 
 ```bash
 echo '[{"ticker": "AAPL"}, {"ticker": "MSFT"}]' > stocks.json
 ./venv/bin/python run_trading_agents.py stocks.json --show-summary
+
+# With researcher mode and live web search:
+TRADINGAGENTS_RESEARCH_STAGE=researcher ./venv/bin/python run_trading_agents.py stocks.json --show-summary
 ```
 
 The `"date"` field is optional and ignored in default mode. The script computes today's date once

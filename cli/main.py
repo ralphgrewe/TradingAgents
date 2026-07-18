@@ -567,8 +567,9 @@ def get_user_selections():
             "Step 5: Research Depth",
             "Select your research depth level "
             "(only takes effect if research_stage is set to \"debate\" via "
-            "TRADINGAGENTS_RESEARCH_STAGE; the default \"none\" skips the "
-            "bull/bear debate stage entirely, making this a no-op)",
+            "TRADINGAGENTS_RESEARCH_STAGE; the default \"none\" skips research entirely, "
+            "\"researcher\" uses a single node with optional web search). "
+            "Setting max debate/risk rounds below.",
         )
     )
     selected_research_depth = select_research_depth()

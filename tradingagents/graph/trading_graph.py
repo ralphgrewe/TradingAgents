@@ -506,7 +506,7 @@ class TradingAgentsGraph:
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
-        self.log_states_dict[str(trade_date)] = {
+        log_dict = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
             "market_report": final_state.get("market_report", ""),
@@ -514,7 +514,14 @@ class TradingAgentsGraph:
             "news_report": final_state.get("news_report", ""),
             "perplexity_news_report": final_state.get("perplexity_news_report", ""),
             "fundamentals_report": final_state.get("fundamentals_report", ""),
-            "investment_debate_state": {
+            "trader_investment_decision": final_state["trader_investment_plan"],
+            "investment_plan": final_state["investment_plan"],
+            "final_trade_decision": final_state["final_trade_decision"],
+        }
+
+        # Include investment_debate_state when in debate mode
+        if final_state.get("investment_debate_state"):
+            log_dict["investment_debate_state"] = {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],
                 "history": final_state["investment_debate_state"]["history"],
@@ -524,18 +531,21 @@ class TradingAgentsGraph:
                 "judge_decision": final_state["investment_debate_state"][
                     "judge_decision"
                 ],
-            },
-            "trader_investment_decision": final_state["trader_investment_plan"],
-            "risk_debate_state": {
-                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
-                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
-                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-                "history": final_state["risk_debate_state"]["history"],
-                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
-            },
-            "investment_plan": final_state["investment_plan"],
-            "final_trade_decision": final_state["final_trade_decision"],
+            }
+
+        # Include researcher_evidence when in researcher mode
+        if final_state.get("researcher_evidence"):
+            log_dict["researcher_evidence"] = final_state["researcher_evidence"]
+
+        log_dict["risk_debate_state"] = {
+            "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
+            "conservative_history": final_state["risk_debate_state"]["conservative_history"],
+            "neutral_history": final_state["risk_debate_state"]["neutral_history"],
+            "history": final_state["risk_debate_state"]["history"],
+            "judge_decision": final_state["risk_debate_state"]["judge_decision"],
         }
+
+        self.log_states_dict[str(trade_date)] = log_dict
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.
