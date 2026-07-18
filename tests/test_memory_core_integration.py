@@ -301,6 +301,22 @@ class TestResearchStageMemoryGuard:
         assert _store_call(fake_client, "research_manager")["signal"] == "Buy"
         assert _store_call(fake_client, "research_manager")["thesis"] == final_state["investment_plan"]
 
+    def test_researcher_mode_stores_under_researcher_key(self, tmp_path):
+        """research_stage='researcher' (#85): the decision is stored under the
+        'researcher' agent key — not 'research_manager' — with no continuity
+        implied between the two modes' rows."""
+        final_state = _make_final_state(investment_plan="Rating: Buy\nResearcher brief.")
+        fake_client = FakeMemoryMCPClient()
+        mock_graph = self._mock_graph(tmp_path, final_state, fake_client, "researcher")
+
+        TradingAgentsGraph._run_graph(mock_graph, "NVDA", "2026-01-10", asset_type="stock")
+
+        agents = [c["agent"] for c in fake_client.store_calls]
+        assert agents == ["researcher", "trader", "portfolio_manager"]
+        assert "research_manager" not in agents
+        assert _store_call(fake_client, "researcher")["signal"] == "Buy"
+        assert _store_call(fake_client, "researcher")["thesis"] == final_state["investment_plan"]
+
 
 # ---------------------------------------------------------------------------
 # Resolve path: resolve_pending called before graph runs, via the MCP client

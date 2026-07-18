@@ -1,18 +1,24 @@
 """Researcher node: plan–execute–synthesize pipeline for bull/bear research with web search.
 
 Part of research_stage="researcher" mode (#85). Single-shot from the graph's perspective —
-exactly two LLM calls (plan + synthesis), no tool loop, no conditional edges. Everything
-between the calls is deterministic Python.
+exactly two LLM calls (plan + synthesis) *when the gate is open*, one LLM call (synthesis
+only) when it's closed — no tool loop, no conditional edges. Everything between the calls
+is deterministic Python.
 
 Pipeline:
-1. **Plan call** (quick-thinking LLM): input is the four analyst envelopes + instrument context;
-   output is a small JSON list of ≤`research_search_queries_max` queries, each labeled
-   `bull`/`bear`/`neutral`. Python validates ≥1 bull-seeking and ≥1 bear-seeking query;
-   on violation, patches in template fallbacks.
-2. **Execute** (no LLM): gate check first (date gate ∧ `research_web_search` ∧ key present).
-   If open, runs queries via the `web_search` vendor and builds the evidence pack; if closed,
-   empty pack + the reason for the metadata line.
-3. **Synthesis call** (deep-thinking LLM, structured output): envelopes + evidence pack + rubric
+1. **Gate check** (no LLM, evaluated first): date gate (`is_web_search_allowed`) ∧
+   `research_web_search` config ∧ `TAVILY_API_KEY` present. If closed, skip straight to
+   synthesis with an empty evidence pack and the appropriate "disabled (...)" reason —
+   no plan call, no search calls at all (tool-less arm-B mode: synthesis only).
+2. **Plan call** (quick-thinking LLM, gate-open only): input is the four analyst envelopes +
+   instrument context; output is a small JSON list of ≤`research_search_queries_max` queries,
+   each labeled `bull`/`bear`/`neutral`. Python validates ≥1 bull-seeking and ≥1 bear-seeking
+   query and enforces the `research_search_queries_max` cap; on violation, patches in
+   template fallbacks (truncating original queries first, if needed, to keep the mandatory
+   fallbacks within the cap).
+3. **Execute** (no LLM, gate-open only): runs the validated queries via the `web_search`
+   vendor and builds the evidence pack (budget `research_evidence_token_budget`).
+4. **Synthesis call** (deep-thinking LLM, structured output): envelopes + evidence pack + rubric
    → `ResearchBrief`. Prompt rules (per #78 §8): any argument that cannot be source-tagged must
    be dropped; numeric claims only quoted from tagged sources; must not re-summarize envelopes
    without tagging as envelope-sourced.
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -66,30 +73,58 @@ class ResearchPlan(BaseModel):
     )
 
 
-def _validate_and_patch_plan(plan_queries: list[dict]) -> tuple[list[dict], bool]:
-    """Validate the plan has ≥1 bull-seeking and ≥1 bear-seeking query.
+def _validate_and_patch_plan(
+    plan_queries: list[dict], queries_max: int | None = None
+) -> tuple[list[dict], bool]:
+    """Validate the plan has ≥1 bull-seeking and ≥1 bear-seeking query, and that it
+    does not exceed ``queries_max`` (the configured ``research_search_queries_max``).
 
-    If the plan violates these constraints, patches in template fallbacks.
-    Returns (patched_queries, was_patched).
+    Two-phase, in this order:
+    1. Truncate to ``queries_max`` first (if set) — a plan longer than the cap has
+       its tail dropped.
+    2. *Then* check bull/bear balance on the truncated result (not the pre-truncation
+       list) — truncation can itself remove the only bull or bear query, so checking
+       balance before truncating would miss that. If either is still missing, patch
+       in a template fallback, dropping further tail entries from the truncated
+       result first to keep the final length within ``queries_max``.
+
+    ``queries_max=None`` skips the cap entirely (back-compat for callers that don't
+    have a config value handy). Returns (patched_queries, was_patched).
     """
-    has_bull = any(q.get("type") == "bull" for q in plan_queries)
-    has_bear = any(q.get("type") == "bear" for q in plan_queries)
+    original = list(plan_queries)
+    was_patched = False
 
-    if has_bull and has_bear:
-        return plan_queries, False
+    if queries_max is not None and len(original) > queries_max:
+        original = original[:queries_max]
+        was_patched = True
 
-    # Patch in fallbacks
-    patched = list(plan_queries)
+    has_bull = any(q.get("type") == "bull" for q in original)
+    has_bear = any(q.get("type") == "bear" for q in original)
+
+    fallbacks = []
     if not has_bull:
-        patched.append({"query": "bull case catalysts opportunities upside", "type": "bull"})
+        fallbacks.append({"query": "bull case catalysts opportunities upside", "type": "bull"})
     if not has_bear:
-        patched.append({"query": "risks short thesis downside bearish", "type": "bear"})
+        fallbacks.append({"query": "risks short thesis downside bearish", "type": "bear"})
 
-    logger.warning(
-        "Plan validation failed (has_bull=%s, has_bear=%s); patching fallbacks",
-        has_bull, has_bear,
-    )
-    return patched, True
+    if fallbacks:
+        was_patched = True
+        if queries_max is not None:
+            # Reserve room for the mandatory fallbacks; drop the tail of the
+            # (already-truncated) original queries first.
+            keep = max(queries_max - len(fallbacks), 0)
+            if len(original) > keep:
+                original = original[:keep]
+
+    patched = original + fallbacks
+
+    if was_patched:
+        logger.warning(
+            "Plan validation failed or exceeded cap (has_bull=%s, has_bear=%s, "
+            "queries_max=%s); patching/truncating",
+            has_bull, has_bear, queries_max,
+        )
+    return patched, was_patched
 
 
 def create_researcher(quick_thinking_llm, deep_thinking_llm):
@@ -119,64 +154,82 @@ def create_researcher(quick_thinking_llm, deep_thinking_llm):
         )
         reports_line = f"{analyst_reports_section}\n\n" if analyst_reports_section else ""
 
-        # ===== STEP 1: PLAN CALL (quick-thinking LLM) =====
-        plan_prompt = f"""As the Researcher, design a targeted web search plan to strengthen the bull and bear cases.
+        # ===== STEP 1: GATE CHECK (no LLM, evaluated BEFORE the plan call) =====
+        # Gate = date gate ∧ research_web_search config ∧ API key present. Checked
+        # first so a closed gate skips the plan call entirely (tool-less arm-B
+        # mode: synthesis only) — not just the search execution. Priority order
+        # matches the metadata line: date, then config, then key presence.
+        web_search_enabled = config.get("research_web_search", True)
+        date_is_today = is_web_search_allowed(trade_date, today)
+        api_key_present = bool(os.environ.get("TAVILY_API_KEY"))
+        queries_max = config.get("research_search_queries_max", 4)
+
+        if not date_is_today:
+            gate_outcome = "disabled (historical date)"
+            web_search_status = "disabled (historical date)"
+            gate_open = False
+            logger.info("Web search disabled: trade_date=%s is not today", trade_date)
+        elif not web_search_enabled:
+            gate_outcome = "disabled (config)"
+            web_search_status = "disabled (config)"
+            gate_open = False
+            logger.info("Web search disabled: research_web_search=False in config")
+        elif not api_key_present:
+            gate_outcome = "disabled (no API key)"
+            web_search_status = "disabled (no API key)"
+            gate_open = False
+            logger.info("Web search disabled: TAVILY_API_KEY not set")
+        else:
+            gate_outcome = None  # resolved after execution below
+            web_search_status = "enabled"
+            gate_open = True
+
+        plan_queries: list[dict] = []
+        was_patched = False
+        evidence_pack: list[dict] = []
+
+        if gate_open:
+            # ===== STEP 2: PLAN CALL (quick-thinking LLM) — gate-open only =====
+            plan_prompt = f"""As the Researcher, design a targeted web search plan to strengthen the bull and bear cases.
 
 {instrument_context}
 
 ---
 
-{reports_line}**Task**: Generate a list of 2–4 web search queries that will surface evidence for:
+{reports_line}**Task**: Generate a list of up to {queries_max} web search queries that will surface evidence for:
 - The bullish case (catalysts, growth opportunities, positive signals)
 - The bearish case (risks, competitive threats, headwinds)
 - Optional neutral queries for baseline/comparison data
 
+Include at least one query targeting the bullish case and at least one targeting the bearish case.
 Each query should be specific and focused. Avoid vague or overlapping searches.{get_language_instruction()}"""
 
-        try:
-            plan_response = quick_thinking_llm.invoke(plan_prompt)
-            plan_text = plan_response.content if hasattr(plan_response, "content") else str(plan_response)
+            try:
+                plan_response = quick_thinking_llm.invoke(plan_prompt)
+                plan_text = plan_response.content if hasattr(plan_response, "content") else str(plan_response)
 
-            # Extract JSON from the response (wrapped in ```json...```  or direct JSON)
-            if "```json" in plan_text:
-                json_start = plan_text.index("```json") + 7
-                json_end = plan_text.index("```", json_start)
-                plan_json_str = plan_text[json_start:json_end].strip()
-            elif "```" in plan_text:
-                json_start = plan_text.index("```") + 3
-                json_end = plan_text.index("```", json_start)
-                plan_json_str = plan_text[json_start:json_end].strip()
-            else:
-                plan_json_str = plan_text
+                # Extract JSON from the response (wrapped in ```json...```  or direct JSON)
+                if "```json" in plan_text:
+                    json_start = plan_text.index("```json") + 7
+                    json_end = plan_text.index("```", json_start)
+                    plan_json_str = plan_text[json_start:json_end].strip()
+                elif "```" in plan_text:
+                    json_start = plan_text.index("```") + 3
+                    json_end = plan_text.index("```", json_start)
+                    plan_json_str = plan_text[json_start:json_end].strip()
+                else:
+                    plan_json_str = plan_text
 
-            plan_data = json.loads(plan_json_str)
-            plan_queries = plan_data.get("queries", [])
-        except Exception as e:
-            logger.warning("Failed to parse plan response: %s. Using empty plan.", e)
-            plan_queries = []
+                plan_data = json.loads(plan_json_str)
+                plan_queries = plan_data.get("queries", [])
+            except Exception as e:
+                logger.warning("Failed to parse plan response: %s. Using empty plan.", e)
+                plan_queries = []
 
-        # Validate and patch the plan
-        plan_queries, was_patched = _validate_and_patch_plan(plan_queries)
+            # Validate and patch the plan (bull/bear balance + queries_max cap)
+            plan_queries, was_patched = _validate_and_patch_plan(plan_queries, queries_max)
 
-        # ===== STEP 2: EXECUTE (deterministic Python, no LLM) =====
-        # Gate check: date must be today, web_search must be enabled, API key must be set
-        web_search_enabled = config.get("research_web_search", True)
-        date_is_today = is_web_search_allowed(trade_date, today)
-
-        gate_outcome = None
-        evidence_pack = []
-        web_search_status = "enabled"
-
-        if not date_is_today:
-            gate_outcome = "disabled (historical date)"
-            web_search_status = "disabled (historical date)"
-            logger.info("Web search disabled: trade_date=%s is not today", trade_date)
-        elif not web_search_enabled:
-            gate_outcome = "disabled (config)"
-            web_search_status = "disabled (config)"
-            logger.info("Web search disabled: research_web_search=False in config")
-        else:
-            # Gate is open: run web search and build evidence pack
+            # ===== STEP 3: EXECUTE (deterministic Python, no LLM) =====
             try:
                 query_results_list = []
                 for query_item in plan_queries:
@@ -215,6 +268,11 @@ Each query should be specific and focused. Avoid vague or overlapping searches.{
                 gate_outcome = f"error ({type(e).__name__})"
                 web_search_status = "disabled (vendor error)"
                 evidence_pack = []
+        else:
+            logger.info(
+                "Web search gate closed (%s); skipping plan call (tool-less arm-B mode).",
+                gate_outcome,
+            )
 
         # Build researcher_evidence metadata for full-state log
         researcher_evidence_dict = {
