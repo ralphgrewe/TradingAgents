@@ -519,8 +519,10 @@ class TradingAgentsGraph:
             "final_trade_decision": final_state["final_trade_decision"],
         }
 
-        # Include investment_debate_state when in debate mode
-        if final_state.get("investment_debate_state"):
+        # Include investment_debate_state when in debate mode. Gated on research_stage,
+        # not dict truthiness: the state dict is always seeded (non-empty) regardless of
+        # mode, so a truthiness check here would always pass.
+        if self.config.get("research_stage") == "debate":
             log_dict["investment_debate_state"] = {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],

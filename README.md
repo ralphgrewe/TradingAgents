@@ -29,7 +29,7 @@ prints the resulting decision.
 By default, the system uses `research_stage=none`, skipping the research stage entirely and sending
 analyst reports directly to the trader. For richer analysis, two alternative modes are available:
 
-- **`research_stage=debate`** (deprecated): Bull and Bear researchers debate with a Research Manager
+- **`research_stage=debate`**: Bull and Bear researchers debate with a Research Manager
   judge. Set via `TRADINGAGENTS_RESEARCH_STAGE=debate`.
 - **`research_stage=researcher`** (recommended): A single Researcher node synthesizes analyst reports
   and live web search evidence. When `trade_date == today`, web search runs via the Tavily API

@@ -83,7 +83,7 @@ V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
 - Analyst reports flow directly to the Trader (no research stage).
 - Fastest path, lowest LLM cost.
 
-**Mode: `"debate"` (deprecated)**
+**Mode: `"debate"`**
 - Bull and Bear researchers debate the analyst reports, culminating in a Research Manager verdict.
 - Config: `max_debate_rounds` (default 1) controls debate length.
 - Memory stored under agent key `"research_manager"`.
