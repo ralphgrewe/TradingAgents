@@ -21,7 +21,7 @@ class ConditionalLogic:
         """
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_social"
         return "Msg Clear Sentiment"
 
@@ -29,7 +29,7 @@ class ConditionalLogic:
         """Determine if perplexity news analysis should continue."""
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_perplexity_news"
         return "Msg Clear Perplexity News"
 
