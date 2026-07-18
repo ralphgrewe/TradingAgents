@@ -29,6 +29,7 @@ from .y_finance import (
     get_YFin_data_online,
 )
 from .yfinance_news import get_global_news_yfinance, get_news_yfinance
+from .tavily_search import get_web_search_results
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
+    },
+    "web_search": {
+        "description": "Web search for news and current information",
+        "tools": [
+            "get_web_search_results",
+        ]
     }
 }
 
@@ -82,6 +89,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "tavily",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +97,9 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+# web_search is likewise optional: a missing TAVILY_API_KEY or an HTTP failure
+# must degrade to "search unavailable" rather than aborting the run (issue #83).
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "web_search"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +150,10 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # web_search
+    "get_web_search_results": {
+        "tavily": get_web_search_results,
     },
 }
 

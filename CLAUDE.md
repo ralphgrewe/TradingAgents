@@ -32,14 +32,21 @@ Always use the project virtualenv (`./venv`), never system Python.
 # Run by marker (unit / integration / smoke — see pyproject.toml)
 ./venv/bin/pytest -m unit
 
+# Lint (CI runs this with a strict rule set over the full repo)
+./venv/bin/ruff check .
+
 # Launch the interactive CLI
 ./venv/bin/tradingagents            # installed entry point
 ./venv/bin/python -m cli.main       # equivalent, run from source
 
+# Run one or more tickers non-interactively from a JSON file (see README.md)
+echo '[{"ticker": "AAPL", "date": "2024-01-15"}]' > stocks.json
+./venv/bin/python run_trading_agents.py stocks.json --show-summary
+
 # Run the MCP server
 ./venv/bin/python mcp_server.py               # stdio transport (default)
 ./start_server.sh                             # networked transport (streamable-http)
-MCP_TRANSPORT=sse FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8000 ./venv/bin/python mcp_server.py  # SSE transport
+MCP_TRANSPORT=sse FASTMCP_HOST=0.0.0.0 FASTMCP_PORT=8001 ./venv/bin/python mcp_server.py  # SSE transport
 
 # Structured-output smoke test against a real provider (costs API credits)
 OPENAI_API_KEY=... ./venv/bin/python scripts/smoke_structured_output.py openai
@@ -52,17 +59,56 @@ values for every provider's API-key env var, and `mock_llm_client` patches
 ## Architecture: the LangGraph pipeline
 
 Five sequential stages, defined in `tradingagents/graph/setup.py` and gated by
-`tradingagents/graph/conditional_logic.py`:
+`tradingagents/graph/conditional_logic.py`. The research stage (II) can be configured via
+`research_stage` config key (env var `TRADINGAGENTS_RESEARCH_STAGE`):
 
 ```
 I.   ANALYST TEAM   → selected analysts run in sequence (default: market → social → news →
                        fundamentals), each loops with its own tools until it writes one report
-II.  RESEARCH TEAM  → Bull vs Bear debate (alternating, `max_debate_rounds`) → Research Manager
-                       writes a structured verdict (`investment_plan`)
+II.  RESEARCH STAGE → configured by research_stage:
+     - "researcher" (default): single Researcher node synthesizes analyst reports + live web search
+       evidence (when trade_date == today, via Tavily API; historical dates degrade to
+       synthesis-only with metadata "disabled (historical date)")
+     - "debate": Bull vs Bear debate (alternating, `max_debate_rounds`) → Research Manager
+       writes a structured verdict (`investment_plan`)
+     - "none": skip research entirely, send analyst reports directly to trader
 III. TRADER         → turns the research plan into a concrete trade proposal
 IV.  RISK TEAM       → Aggressive → Conservative → Neutral debate (`max_risk_discuss_rounds`)
 V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
 ```
+
+### Research stage modes in detail
+
+**Mode: `"researcher"` (default, recommended for analysis depth)**
+- Single Researcher node plan–execute–synthesize pipeline:
+  1. **Plan** (quick-thinking LLM): reads analyst envelopes + instrument context, outputs
+     up to `research_search_queries_max` web search queries (≥1 bull-seeking, ≥1 bear-seeking).
+  2. **Gate check** (no LLM): if `trade_date == today` AND `research_web_search=True` AND
+     `TAVILY_API_KEY` is set, gate opens for search; otherwise synthesis-only. Metadata line
+     in brief reflects gate outcome: "enabled" or "disabled (reason)".
+  3. **Execute** (no LLM): runs queries via Tavily API, assembles evidence pack (budget
+     `research_evidence_token_budget` tokens).
+  4. **Synthesize** (deep-thinking LLM, structured output): combines analyst envelopes +
+     evidence pack into a `ResearchBrief` (bull/bear arguments, rating, confidence,
+     new_information). Each argument must be source-tagged to an envelope or web evidence ID.
+- Config:
+  - `research_web_search` (default True): enable/disable web search.
+  - `research_search_queries_max` (default 4): max queries per plan.
+  - `research_evidence_token_budget` (default 3000): token budget for evidence assembly.
+  - `data_vendors["web_search"]` (default "tavily"): web search vendor. Requires
+    `TAVILY_API_KEY` env var when enabled.
+- Memory stored under agent key `"researcher"`.
+- Output: `investment_plan` (rendered brief with metadata line), `researcher_evidence`
+  (JSON dict with query plan, gate outcomes, evidence pack for full-state log).
+
+**Mode: `"debate"`**
+- Bull and Bear researchers debate the analyst reports, culminating in a Research Manager verdict.
+- Config: `max_debate_rounds` (default 1) controls debate length.
+- Memory stored under agent key `"research_manager"`.
+
+**Mode: `"none"`**
+- Analyst reports flow directly to the Trader (no research stage).
+- Fastest path, lowest LLM cost.
 
 Key files:
 - `agent_states.py` — the shared `AgentState` TypedDict every node reads/writes. Analyst reports
@@ -147,6 +193,28 @@ table at the top of that file — coercion is driven by the *existing default's*
 override by adding one row there, not by touching CLI/entry-point code. `set_config` /`get_config`
 in `tradingagents/dataflows/config.py` hold the live, process-global copy that agent tool code
 reads from.
+
+### Research stage configuration
+
+- **`research_stage`** (env: `TRADINGAGENTS_RESEARCH_STAGE`, default `"researcher"`): which research
+  pipeline to run — `"researcher"` (analyst → researcher node with optional web search → trader),
+  `"debate"` (analyst → bull/bear debate → research manager → trader), or `"none"` (analyst → trader).
+- **`research_web_search`** (env: `TRADINGAGENTS_RESEARCH_WEB_SEARCH`, default `True`): enable
+  live web search in researcher mode (when `trade_date == today`). Requires `TAVILY_API_KEY`.
+- **`research_search_queries_max`** (env: `TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX`, default
+  `4`): max web search queries the researcher plan can request (researcher mode only).
+- **`research_evidence_token_budget`** (env: `TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET`,
+  default `3000`): token budget for assembling the evidence pack from search results (researcher
+  mode only).
+- **`data_vendors["web_search"]`** (config key, default `"tavily"`): which vendor to use for web
+  search. Currently only "tavily" is implemented, and it requires `TAVILY_API_KEY` to be set
+  in the environment.
+
+### Accessing configuration in code
+
+Inside agents and tools, call `get_config()` from `tradingagents.dataflows.config` to read the
+live config dict. Changes made to the dict after startup do not affect existing references —
+calling `set_config(new_dict)` updates the global copy for subsequent `get_config()` calls.
 
 ## Conventions from prior work (see `LEARNINGS.md`)
 

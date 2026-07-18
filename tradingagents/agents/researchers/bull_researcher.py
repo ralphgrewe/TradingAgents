@@ -1,4 +1,8 @@
-from tradingagents.agents.utils.agent_utils import get_language_instruction
+from tradingagents.agents.utils.agent_utils import (
+    ANALYST_REPORTS_READING_INSTRUCTIONS,
+    fundamentals_report_label,
+    get_language_instruction,
+)
 
 
 def create_bull_researcher(llm):
@@ -14,11 +18,7 @@ def create_bull_researcher(llm):
         fundamentals_report = state["fundamentals_report"]
         asset_type = state.get("asset_type", "stock")
         target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
-        )
+        fundamentals_label = fundamentals_report_label(asset_type)
 
         prompt = f"""You are a Bull Analyst advocating for investing in the {target_label}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
 
@@ -29,17 +29,11 @@ Key points to focus on:
 - Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.
 - Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
 
-The market, news, and fundamentals reports below are structured JSON envelopes
-(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the
-`summary` for the headline takeaway and cite specific `details` fields (e.g.
-technical indicator values and the `trade_setup`, news headline counts and the
-conservative/risky ratings, or the fundamentals value/growth sub-signals) as
-supporting evidence — do not just restate the raw JSON. The social media
-sentiment report remains free-form prose.
+{ANALYST_REPORTS_READING_INSTRUCTIONS}
 
 Resources available:
 Market research report (JSON envelope): {market_research_report}
-Social media sentiment report (prose): {sentiment_report}
+Social media sentiment report (JSON envelope): {sentiment_report}
 Latest world affairs news (JSON envelope): {news_report}
 {fundamentals_label} (JSON envelope): {fundamentals_report}
 Conversation history of the debate: {history}

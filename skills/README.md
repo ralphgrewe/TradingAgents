@@ -103,8 +103,16 @@ no technical data in the fundamentals skill, no fundamentals in the news skill.
 **Social Media / Sentiment Analyst** (`skills/` — to build)
 - Goal: analyze social posts, sentiment scores, recent company-specific news;
   gauge short-term collective investor behavior.
-- Tools in original: `get_news` (company-scoped).
-- Output: `sentiment_report` — prose + Markdown summary table.
+- Tools in original: `get_news` (company-scoped), plus pre-fetched StockTwits
+  and Reddit blocks.
+- Output: `sentiment_report` — JSON envelope (since #71), matching the
+  market/news/fundamentals analysts: Python parses the pre-fetched
+  news/StockTwits/Reddit blocks into per-source counts and availability, the
+  LLM supplies a per-source directional read (POSITIVE/NEUTRAL/NEGATIVE) plus
+  a cross-source synthesis (overall direction, divergences, narratives,
+  catalysts, risks), and Python derives the top-level `signal`/`confidence`
+  from the per-source directions (see
+  `tradingagents/agents/analysts/sentiment_computation.py`).
 
 **News Analyst** (`skills/news/` — exists)
 - Goal: macro + world-affairs + company news relevant to trading.

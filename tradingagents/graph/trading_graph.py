@@ -114,6 +114,7 @@ class TradingAgentsGraph:
             self.tool_nodes,
             self.conditional_logic,
             analyst_concurrency_limit=self.config.get("analyst_concurrency_limit", 1),
+            research_stage=self.config.get("research_stage", "none"),
         )
 
         self.propagator = Propagator(
@@ -434,20 +435,44 @@ class TradingAgentsGraph:
         )
 
         # Store decisions in SQLite memory core (via the memory MCP client, #53)
-        # for the three decision-bearing stages. Each stage's signal is derived
-        # via parse_rating from its own output text. Connection/tool failures
-        # propagate — the memory MCP server is a hard dependency for a run to
-        # complete, not a best-effort side write.
-        research_signal = parse_rating(final_state.get("investment_plan", ""))
-        self._memory_client.store_decision(
-            agent="research_manager",
-            ticker=company_name,
-            date=trade_date,
-            signal=research_signal,
-            confidence=None,
-            key_drivers=None,
-            thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
-        )
+        # for the decision-bearing stages that actually ran. Each stage's signal
+        # is derived via parse_rating from its own output text. Connection/tool
+        # failures propagate — the memory MCP server is a hard dependency for a
+        # run to complete, not a best-effort side write.
+        #
+        # The research stage is conditional on research_stage (#79, #85): in
+        # "none" mode no research node ever runs and investment_plan stays "" by design
+        # (see propagation.py), so storing a decision here would fabricate a row
+        # indistinguishable from a real one — parse_rating("") silently defaults to
+        # "Hold", which would later surface as a nonsensical "past lesson" via query.py.
+        # Guard on research_stage itself, not on "is investment_plan empty", since a
+        # run could in principle produce a genuinely thin plan.
+        #
+        # "debate" mode stores under agent="research_manager"; "researcher" mode
+        # stores under agent="researcher" (no continuity with research_manager rows).
+        research_stage = self.config.get("research_stage", "none")
+        if research_stage == "debate":
+            research_signal = parse_rating(final_state.get("investment_plan", ""))
+            self._memory_client.store_decision(
+                agent="research_manager",
+                ticker=company_name,
+                date=trade_date,
+                signal=research_signal,
+                confidence=None,
+                key_drivers=None,
+                thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
+            )
+        elif research_stage == "researcher":
+            research_signal = parse_rating(final_state.get("investment_plan", ""))
+            self._memory_client.store_decision(
+                agent="researcher",
+                ticker=company_name,
+                date=trade_date,
+                signal=research_signal,
+                confidence=None,
+                key_drivers=None,
+                thesis=final_state.get("investment_plan", "")[:500],  # truncate for DB
+            )
 
         trader_signal = parse_rating(final_state.get("trader_investment_plan", ""))
         self._memory_client.store_decision(
@@ -481,7 +506,7 @@ class TradingAgentsGraph:
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
-        self.log_states_dict[str(trade_date)] = {
+        log_dict = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
             "market_report": final_state.get("market_report", ""),
@@ -489,7 +514,16 @@ class TradingAgentsGraph:
             "news_report": final_state.get("news_report", ""),
             "perplexity_news_report": final_state.get("perplexity_news_report", ""),
             "fundamentals_report": final_state.get("fundamentals_report", ""),
-            "investment_debate_state": {
+            "trader_investment_decision": final_state["trader_investment_plan"],
+            "investment_plan": final_state["investment_plan"],
+            "final_trade_decision": final_state["final_trade_decision"],
+        }
+
+        # Include investment_debate_state when in debate mode. Gated on research_stage,
+        # not dict truthiness: the state dict is always seeded (non-empty) regardless of
+        # mode, so a truthiness check here would always pass.
+        if self.config.get("research_stage") == "debate":
+            log_dict["investment_debate_state"] = {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],
                 "history": final_state["investment_debate_state"]["history"],
@@ -499,18 +533,21 @@ class TradingAgentsGraph:
                 "judge_decision": final_state["investment_debate_state"][
                     "judge_decision"
                 ],
-            },
-            "trader_investment_decision": final_state["trader_investment_plan"],
-            "risk_debate_state": {
-                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
-                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
-                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-                "history": final_state["risk_debate_state"]["history"],
-                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
-            },
-            "investment_plan": final_state["investment_plan"],
-            "final_trade_decision": final_state["final_trade_decision"],
+            }
+
+        # Include researcher_evidence when in researcher mode
+        if final_state.get("researcher_evidence"):
+            log_dict["researcher_evidence"] = final_state["researcher_evidence"]
+
+        log_dict["risk_debate_state"] = {
+            "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
+            "conservative_history": final_state["risk_debate_state"]["conservative_history"],
+            "neutral_history": final_state["risk_debate_state"]["neutral_history"],
+            "history": final_state["risk_debate_state"]["history"],
+            "judge_decision": final_state["risk_debate_state"]["judge_decision"],
         }
+
+        self.log_states_dict[str(trade_date)] = log_dict
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.

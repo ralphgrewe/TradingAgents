@@ -20,6 +20,7 @@ from tradingagents.agents import (
     create_sentiment_analyst,
     create_trader,
 )
+from tradingagents.agents.researchers.researcher import create_researcher
 from tradingagents.agents.utils.agent_states import AgentState
 
 from .analyst_execution import build_analyst_execution_plan
@@ -36,6 +37,7 @@ class GraphSetup:
         tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
         analyst_concurrency_limit: int = 1,
+        research_stage: str = "none",
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
@@ -43,6 +45,7 @@ class GraphSetup:
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
         self.analyst_concurrency_limit = analyst_concurrency_limit
+        self.research_stage = research_stage
 
     def setup_graph(
         self, selected_analysts=None
@@ -83,6 +86,7 @@ class GraphSetup:
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
         bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
         research_manager_node = create_research_manager(self.deep_thinking_llm)
+        researcher_node = create_researcher(self.quick_thinking_llm, self.deep_thinking_llm)
         trader_node = create_trader(self.quick_thinking_llm)
 
         # Create risk analysis nodes
@@ -101,10 +105,13 @@ class GraphSetup:
             if spec.tool_node is not None:
                 workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
 
-        # Add other nodes
-        workflow.add_node("Bull Researcher", bull_researcher_node)
-        workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Manager", research_manager_node)
+        # Add other nodes (research stage, risk management, final decision)
+        if self.research_stage == "debate":
+            workflow.add_node("Bull Researcher", bull_researcher_node)
+            workflow.add_node("Bear Researcher", bear_researcher_node)
+            workflow.add_node("Research Manager", research_manager_node)
+        elif self.research_stage == "researcher":
+            workflow.add_node("Researcher", researcher_node)
         workflow.add_node("Trader", trader_node)
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
         workflow.add_node("Neutral Analyst", neutral_analyst)
@@ -140,30 +147,44 @@ class GraphSetup:
                 # HumanMessage left over from the previous node.
                 workflow.add_edge(current_analyst, current_clear)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
+            # Connect to next analyst or to research/trader stage if this is the last analyst
             if i < len(plan.specs) - 1:
                 workflow.add_edge(current_clear, plan.specs[i + 1].agent_node)
             else:
-                workflow.add_edge(current_clear, "Bull Researcher")
+                # Last analyst routes based on research_stage:
+                # "debate" -> Bull Researcher
+                # "researcher" -> Researcher
+                # "none" -> Trader (skip research entirely)
+                if self.research_stage == "debate":
+                    next_node = "Bull Researcher"
+                elif self.research_stage == "researcher":
+                    next_node = "Researcher"
+                else:
+                    next_node = "Trader"
+                workflow.add_edge(current_clear, next_node)
 
-        # Add remaining edges
-        workflow.add_conditional_edges(
-            "Bull Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bear Researcher": "Bear Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Bear Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bull Researcher": "Bull Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_edge("Research Manager", "Trader")
+        # Add research stage edges (debate mode or researcher mode)
+        if self.research_stage == "debate":
+            workflow.add_conditional_edges(
+                "Bull Researcher",
+                self.conditional_logic.should_continue_debate,
+                {
+                    "Bear Researcher": "Bear Researcher",
+                    "Research Manager": "Research Manager",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Bear Researcher",
+                self.conditional_logic.should_continue_debate,
+                {
+                    "Bull Researcher": "Bull Researcher",
+                    "Research Manager": "Research Manager",
+                },
+            )
+            workflow.add_edge("Research Manager", "Trader")
+        elif self.research_stage == "researcher":
+            workflow.add_edge("Researcher", "Trader")
+
         workflow.add_edge("Trader", "Aggressive Analyst")
         workflow.add_conditional_edges(
             "Aggressive Analyst",

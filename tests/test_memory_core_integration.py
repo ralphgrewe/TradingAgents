@@ -120,9 +120,13 @@ def _store_call(fake, agent):
 class TestMemoryCoreStorageIntegration:
     """Test that _run_graph stores decisions for all three decision-bearing stages."""
 
-    def _mock_graph(self, tmp_path, final_state, fake_client):
+    def _mock_graph(self, tmp_path, final_state, fake_client, research_stage="debate"):
         mock_graph = MagicMock()
-        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": research_stage,
+        }
         mock_graph.memory_log = MagicMock()
         mock_graph.log_states_dict = {}
         mock_graph.debug = False
@@ -213,6 +217,105 @@ class TestMemoryCoreStorageIntegration:
         for call in fake_client.store_calls:
             assert call["confidence"] is None
             assert call["key_drivers"] is None
+
+
+# ---------------------------------------------------------------------------
+# research_stage="none" (#79): no fabricated research_manager decision
+# ---------------------------------------------------------------------------
+
+class TestResearchStageMemoryGuard:
+    """Test that the research_manager store_decision call is skipped when
+    research_stage == "none" (no Bull/Bear/Research Manager node ran, so
+    investment_plan is empty by design — not a genuine thin plan), and still
+    happens normally in "debate" mode."""
+
+    def _mock_graph(self, tmp_path, final_state, fake_client, research_stage):
+        mock_graph = MagicMock()
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": research_stage,
+        }
+        mock_graph.memory_log = MagicMock()
+        mock_graph.log_states_dict = {}
+        mock_graph.debug = False
+        mock_graph.signal_processor = MagicMock()
+        mock_graph.signal_processor.process_signal.return_value = "Buy"
+        mock_graph.propagator = MagicMock()
+        mock_graph.propagator.create_initial_state.return_value = final_state
+        mock_graph.propagator.get_graph_args.return_value = {}
+        mock_graph.graph = MagicMock()
+        mock_graph.graph.invoke.return_value = final_state
+        mock_graph._memory_client = fake_client
+        return mock_graph
+
+    def test_none_mode_skips_research_manager_store(self, tmp_path):
+        """research_stage='none': investment_plan is empty by design and no
+        research_manager decision is stored — only trader and portfolio_manager."""
+        final_state = _make_final_state(investment_plan="")
+        fake_client = FakeMemoryMCPClient()
+        mock_graph = self._mock_graph(tmp_path, final_state, fake_client, "none")
+
+        TradingAgentsGraph._run_graph(mock_graph, "NVDA", "2026-01-10", asset_type="stock")
+
+        agents = [c["agent"] for c in fake_client.store_calls]
+        assert agents == ["trader", "portfolio_manager"]
+        assert not any(c["agent"] == "research_manager" for c in fake_client.store_calls)
+
+    def test_none_mode_defaults_when_research_stage_key_absent(self, tmp_path):
+        """If research_stage is missing from config entirely, it defaults to
+        "none" (matching the production default in default_config.py and the
+        GraphSetup wiring), so the research_manager store is still skipped."""
+        final_state = _make_final_state(investment_plan="")
+        fake_client = FakeMemoryMCPClient()
+        mock_graph = MagicMock()
+        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.memory_log = MagicMock()
+        mock_graph.log_states_dict = {}
+        mock_graph.debug = False
+        mock_graph.signal_processor = MagicMock()
+        mock_graph.signal_processor.process_signal.return_value = "Buy"
+        mock_graph.propagator = MagicMock()
+        mock_graph.propagator.create_initial_state.return_value = final_state
+        mock_graph.propagator.get_graph_args.return_value = {}
+        mock_graph.graph = MagicMock()
+        mock_graph.graph.invoke.return_value = final_state
+        mock_graph._memory_client = fake_client
+
+        TradingAgentsGraph._run_graph(mock_graph, "NVDA", "2026-01-10", asset_type="stock")
+
+        agents = [c["agent"] for c in fake_client.store_calls]
+        assert "research_manager" not in agents
+
+    def test_debate_mode_still_stores_research_manager(self, tmp_path):
+        """research_stage='debate': the research_manager decision is still
+        stored, with a signal parsed from a genuine (non-empty) investment_plan."""
+        final_state = _make_final_state(investment_plan="Rating: Buy\nStrong fundamentals.")
+        fake_client = FakeMemoryMCPClient()
+        mock_graph = self._mock_graph(tmp_path, final_state, fake_client, "debate")
+
+        TradingAgentsGraph._run_graph(mock_graph, "NVDA", "2026-01-10", asset_type="stock")
+
+        agents = [c["agent"] for c in fake_client.store_calls]
+        assert agents == ["research_manager", "trader", "portfolio_manager"]
+        assert _store_call(fake_client, "research_manager")["signal"] == "Buy"
+        assert _store_call(fake_client, "research_manager")["thesis"] == final_state["investment_plan"]
+
+    def test_researcher_mode_stores_under_researcher_key(self, tmp_path):
+        """research_stage='researcher' (#85): the decision is stored under the
+        'researcher' agent key — not 'research_manager' — with no continuity
+        implied between the two modes' rows."""
+        final_state = _make_final_state(investment_plan="Rating: Buy\nResearcher brief.")
+        fake_client = FakeMemoryMCPClient()
+        mock_graph = self._mock_graph(tmp_path, final_state, fake_client, "researcher")
+
+        TradingAgentsGraph._run_graph(mock_graph, "NVDA", "2026-01-10", asset_type="stock")
+
+        agents = [c["agent"] for c in fake_client.store_calls]
+        assert agents == ["researcher", "trader", "portfolio_manager"]
+        assert "research_manager" not in agents
+        assert _store_call(fake_client, "researcher")["signal"] == "Buy"
+        assert _store_call(fake_client, "researcher")["thesis"] == final_state["investment_plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +431,11 @@ class TestMemoryCoreHardFailure:
             store_side_effects=[MemoryMCPToolError("DB I/O error")]
         )
         mock_graph = MagicMock()
-        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": "debate",
+        }
         mock_graph.memory_log = MagicMock()
         mock_graph.log_states_dict = {}
         mock_graph.debug = False
@@ -356,7 +463,11 @@ class TestMemoryCoreHardFailure:
             store_side_effects=[None, MemoryMCPToolError("DB I/O error")]
         )
         mock_graph = MagicMock()
-        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": "debate",
+        }
         mock_graph.memory_log = MagicMock()
         mock_graph.log_states_dict = {}
         mock_graph.debug = False
@@ -382,7 +493,11 @@ class TestMemoryCoreHardFailure:
             store_side_effects=[None, None, MemoryMCPToolError("DB I/O error")]
         )
         mock_graph = MagicMock()
-        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": "debate",
+        }
         mock_graph.memory_log = MagicMock()
         mock_graph.log_states_dict = {}
         mock_graph.debug = False
@@ -414,7 +529,11 @@ class TestLegacyLogCompatibility:
         """_run_graph still calls memory_log.store_decision after the SQLite
         memory-core writes (now via the memory MCP client)."""
         mock_graph = MagicMock()
-        mock_graph.config = {"results_dir": str(tmp_path), "checkpoint_enabled": False}
+        mock_graph.config = {
+            "results_dir": str(tmp_path),
+            "checkpoint_enabled": False,
+            "research_stage": "debate",
+        }
         mock_graph.memory_log = MagicMock()
         mock_graph.log_states_dict = {}
         mock_graph.debug = False

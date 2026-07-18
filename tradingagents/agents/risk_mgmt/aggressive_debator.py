@@ -21,10 +21,10 @@ def create_aggressive_debator(llm):
 
 {trader_decision}
 
-Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. Incorporate insights from the following sources into your arguments. The market, news, and fundamentals reports are structured JSON envelopes (fields: `signal`, `confidence`, `summary`, `details`) — read the `summary` for the headline takeaway and cite specific `details` fields (technical indicators and `trade_setup`, news ratings and headline counts, fundamentals value/growth sub-signals) as evidence rather than restating the raw JSON. The sentiment report remains free-form prose:
+Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. Incorporate insights from the following sources into your arguments. The market, sentiment, news, and fundamentals reports are structured JSON envelopes (fields: `signal`, `confidence`, `summary`, `details`) — read the `summary` for the headline takeaway and cite specific `details` fields (technical indicators and `trade_setup`, per-source sentiment directions and key items, news ratings and headline counts, fundamentals value/growth sub-signals) as evidence rather than restating the raw JSON:
 
 Market Research Report (JSON envelope): {market_research_report}
-Social Media Sentiment Report (prose): {sentiment_report}
+Social Media Sentiment Report (JSON envelope): {sentiment_report}
 Latest World Affairs Report (JSON envelope): {news_report}
 Company Fundamentals Report (JSON envelope): {fundamentals_report}
 Here is the current conversation history: {history} Here are the last arguments from the conservative analyst: {current_conservative_response} Here are the last arguments from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.

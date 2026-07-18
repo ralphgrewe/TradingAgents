@@ -215,7 +215,7 @@ class MessageBuffer:
                 )
             if self.report_sections.get("sentiment_report"):
                 report_parts.append(
-                    f"### Social Sentiment\n{self.report_sections['sentiment_report']}"
+                    f"### Social Sentiment\n{format_report_markdown(self.report_sections['sentiment_report'])}"
                 )
             if self.report_sections.get("news_report"):
                 report_parts.append(
@@ -564,7 +564,12 @@ def get_user_selections():
     # Step 5: Research depth
     console.print(
         create_question_box(
-            "Step 5: Research Depth", "Select your research depth level"
+            "Step 5: Research Depth",
+            "Select your research depth level "
+            "(only takes effect if research_stage is set to \"debate\" via "
+            "TRADINGAGENTS_RESEARCH_STAGE; the default \"researcher\" uses a single node with optional web search, "
+            "\"none\" skips research entirely, \"debate\" runs bull/bear debate). "
+            "Setting max debate/risk rounds below.",
         )
     )
     selected_research_depth = select_research_depth()

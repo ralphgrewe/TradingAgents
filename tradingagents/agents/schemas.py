@@ -37,6 +37,14 @@ class PortfolioRating(str, Enum):
     SELL = "Sell"
 
 
+class BriefConfidence(str, Enum):
+    """Confidence level for research brief recommendation."""
+
+    HIGH = "High"
+    MEDIUM = "Medium"
+    LOW = "Low"
+
+
 class TraderAction(str, Enum):
     """3-tier transaction direction used by the Trader.
 
@@ -54,6 +62,125 @@ class TraderAction(str, Enum):
 # ---------------------------------------------------------------------------
 # Research Manager
 # ---------------------------------------------------------------------------
+
+
+class ResearchArgument(BaseModel):
+    """A single argument in a bull or bear case.
+
+    Used by ResearchBrief to structure the bull/bear debate outcomes.
+    """
+
+    statement: str = Field(
+        description=(
+            "One short sentence, 30 words or fewer, with no hedging filler. "
+            "State the finding or argument as a fact."
+        ),
+    )
+    source: str = Field(
+        description=(
+            'Exactly one of "market", "sentiment", "news", "fundamentals", '
+            'or a web evidence ID like "web:3". Indicates where the claim comes from.'
+        ),
+    )
+
+
+class ResearchBrief(BaseModel):
+    """Structured investment research output from the Researcher node.
+
+    Captures the bull and bear arguments from research, the lean direction,
+    confidence level, and any new information discovered via web research.
+    Renders to markdown that lands directly in `investment_plan` without
+    downstream prompt or parsing changes.
+    """
+
+    bull_arguments: list[ResearchArgument] = Field(
+        min_length=1,
+        max_length=5,
+        description="1–5 arguments supporting a bullish view (source-tagged).",
+    )
+    bear_arguments: list[ResearchArgument] = Field(
+        min_length=1,
+        max_length=5,
+        description="1–5 arguments supporting a bearish view (source-tagged).",
+    )
+    lean: PortfolioRating = Field(
+        description=(
+            "The overall recommendation: Buy / Overweight / Hold / Underweight / Sell. "
+            "Derived from the weight and strength of bull/bear arguments."
+        ),
+    )
+    confidence: BriefConfidence = Field(
+        description=(
+            "Confidence in the recommendation: High / Medium / Low, based on the "
+            "consistency and clarity of the research evidence."
+        ),
+    )
+    new_information: str | None = Field(
+        default=None,
+        description=(
+            "1–2 sentences on what web research added to the analysis. "
+            "None if web research was disabled or no new information was found."
+        ),
+    )
+
+
+def render_research_brief(
+    brief: ResearchBrief,
+    web_research_status: str,
+    web_research_result_count: int | None = None,
+) -> str:
+    """Render a ResearchBrief to markdown for storage and downstream prompt context.
+
+    The output preserves the label-first `**Recommendation**: {lean}` format so
+    parse_rating() in the downstream agents can extract the rating without parsing
+    the entire markdown structure.
+
+    Args:
+        brief: The ResearchBrief to render.
+        web_research_status: One of "enabled", "disabled (historical date)",
+            "disabled (no API key)", or "disabled (config)".
+        web_research_result_count: Number of web results if web research was enabled.
+    """
+    parts = [
+        f"**Recommendation**: {brief.lean.value}",
+        "",
+        "**Bull Arguments**:",
+    ]
+
+    for arg in brief.bull_arguments:
+        parts.append(f"- {arg.statement} [{arg.source}]")
+
+    parts.extend([
+        "",
+        "**Bear Arguments**:",
+    ])
+
+    for arg in brief.bear_arguments:
+        parts.append(f"- {arg.statement} [{arg.source}]")
+
+    parts.extend([
+        "",
+        f"**Confidence**: {brief.confidence.value}",
+    ])
+
+    if brief.new_information:
+        parts.extend([
+            "",
+            f"**New Information**: {brief.new_information}",
+        ])
+
+    # Build web research metadata line
+    if web_research_status == "enabled":
+        web_meta = f"Web research: enabled ({web_research_result_count} results)"
+    else:
+        web_meta = f"Web research: {web_research_status}"
+
+    parts.extend([
+        "",
+        web_meta,
+    ])
+
+    return "\n".join(parts)
 
 
 class ResearchPlan(BaseModel):

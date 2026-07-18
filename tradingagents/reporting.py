@@ -1,16 +1,16 @@
 """Reusable report-tree writer shared by the CLI and the programmatic API.
 
-Writes a run's per-section markdown (analysts, research, trading, risk,
-portfolio) plus a consolidated ``complete_report.md`` under ``save_path``. The
-CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless / API
-run produces the same on-disk report tree a CLI run does.
+Writes a run's per-section files (analysts, research, trading, risk, portfolio)
+plus a consolidated ``complete_report.md`` under ``save_path``. The CLI and
+``TradingAgentsGraph.save_reports`` both call this, so a headless / API run
+produces the same on-disk report tree a CLI run does.
 
-Since #30-#32, ``market_report``/``fundamentals_report``/``news_report`` are
-JSON envelope strings (``skill``/``ticker``/``date``/``signal``/``confidence``/
-``summary``/``details``, see skills/SCHEMA.md) rather than markdown;
-``sentiment_report`` (social analyst) and every other text field handled here
-(debate history, trader plan, final decision) intentionally remain prose. The
-``format_report_*`` helpers below detect which shape a given field is and
+Since #30-#32 and #71, ``market_report``/``fundamentals_report``/``news_report``/
+``sentiment_report`` are all JSON envelope strings (``skill``/``ticker``/``date``/
+``signal``/``confidence``/``summary``/``details``, see skills/SCHEMA.md) and are
+saved as ``.json`` files; every other text field handled here (debate history,
+trader plan, final decision) intentionally remains prose and is saved as ``.md``.
+The ``format_report_*`` helpers below detect which shape a given field is and
 render/preview it accordingly, so mixed-format reports flow through the same
 code path without special-casing per analyst.
 """
@@ -18,6 +18,16 @@ code path without special-casing per analyst.
 import json
 from datetime import datetime
 from pathlib import Path
+
+# Static mapping of analyst field names to their output file extensions.
+# JSON envelopes (since #30-#32, #71) are saved as .json; prose fields as .md.
+# Update this mapping as more analysts migrate to JSON-envelope output.
+_ANALYST_REPORT_EXTENSIONS = {
+    "market_report": ".json",      # JSON envelope since #30
+    "sentiment_report": ".json",   # JSON envelope since #71
+    "news_report": ".json",        # JSON envelope since #32
+    "fundamentals_report": ".json", # JSON envelope since #31
+}
 
 
 def _try_parse_envelope(report: str) -> dict | None:
@@ -39,8 +49,8 @@ def format_report_preview(report: str, max_len: int = 150) -> str:
 
     For JSON envelopes, prefer the envelope's own ``signal``/``confidence``/
     ``summary`` over a truncated raw-JSON snippet (which would just show
-    ``{\\n  "skill": ...``). Prose fields (``sentiment_report``, debate
-    history, trader plan, final decision) are truncated unchanged.
+    ``{\\n  "skill": ...``). Prose fields (debate history, trader plan,
+    final decision) are truncated unchanged.
     """
     text = report or ""
     envelope = _try_parse_envelope(text)
@@ -83,19 +93,23 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     analyst_parts = []
     if final_state.get("market_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "market.md").write_text(final_state["market_report"], encoding="utf-8")
+        ext = _ANALYST_REPORT_EXTENSIONS["market_report"]
+        (analysts_dir / f"market{ext}").write_text(final_state["market_report"], encoding="utf-8")
         analyst_parts.append(("Market Analyst", final_state["market_report"]))
     if final_state.get("sentiment_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "sentiment.md").write_text(final_state["sentiment_report"], encoding="utf-8")
+        ext = _ANALYST_REPORT_EXTENSIONS["sentiment_report"]
+        (analysts_dir / f"sentiment{ext}").write_text(final_state["sentiment_report"], encoding="utf-8")
         analyst_parts.append(("Sentiment Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "news.md").write_text(final_state["news_report"], encoding="utf-8")
+        ext = _ANALYST_REPORT_EXTENSIONS["news_report"]
+        (analysts_dir / f"news{ext}").write_text(final_state["news_report"], encoding="utf-8")
         analyst_parts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"], encoding="utf-8")
+        ext = _ANALYST_REPORT_EXTENSIONS["fundamentals_report"]
+        (analysts_dir / f"fundamentals{ext}").write_text(final_state["fundamentals_report"], encoding="utf-8")
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
     if analyst_parts:
         # Individual per-analyst .md files above keep the raw field (JSON

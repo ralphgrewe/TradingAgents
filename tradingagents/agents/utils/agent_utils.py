@@ -31,6 +31,93 @@ from tradingagents.agents.utils.technical_indicators_tools import (
 logger = logging.getLogger(__name__)
 
 
+ANALYST_REPORTS_READING_INSTRUCTIONS = (
+    "The analyst reports below are structured JSON envelopes\n"
+    "(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the\n"
+    "`summary` for the headline takeaway and cite specific `details` fields\n"
+    "(e.g. technical indicator values and the `trade_setup`, news headline counts\n"
+    "and the conservative/risky ratings, per-source sentiment directions and key\n"
+    "items, or the fundamentals value/growth sub-signals) as supporting evidence —\n"
+    "do not just restate the raw JSON."
+)
+"""Shared envelope-framing paragraph for prompts that inject analyst JSON reports.
+
+Reused by the bull/bear researchers, the trader, and the portfolio manager
+(issue #77) so the reading-instructions text lives in one place instead of
+being hand-copied at each call site.
+"""
+
+
+def fundamentals_report_label(asset_type: str) -> str:
+    """Return the asset-type-aware label for the fundamentals report.
+
+    Crypto assets may not have company fundamentals available, so the label
+    flags that explicitly rather than implying a stock-style report always
+    exists.
+    """
+    return (
+        "Company fundamentals report"
+        if asset_type == "stock"
+        else "Asset fundamentals report (may be unavailable for crypto)"
+    )
+
+
+def format_analyst_reports_section(
+    market_report: Any,
+    sentiment_report: Any,
+    news_report: Any,
+    fundamentals_report: Any,
+    asset_type: str = "stock",
+) -> str:
+    """Format the four analyst reports with reading instructions for JSON envelopes.
+
+    Shared by the trader and portfolio manager prompts (issue #77) — both need
+    to inject all four analyst envelopes with the same JSON-reading-instructions
+    framing the researchers use (:data:`ANALYST_REPORTS_READING_INSTRUCTIONS`).
+    Returns an empty string if all reports are missing/empty so callers can
+    omit the section entirely; individual missing/non-string reports are
+    silently dropped rather than interpolated as empty text.
+    """
+    reports_to_include = []
+
+    if market_report and isinstance(market_report, str):
+        reports_to_include.append(f"Market research report (JSON envelope): {market_report}")
+
+    if sentiment_report and isinstance(sentiment_report, str):
+        reports_to_include.append(
+            f"Social media sentiment report (JSON envelope): {sentiment_report}"
+        )
+
+    if news_report and isinstance(news_report, str):
+        reports_to_include.append(f"Latest world affairs news (JSON envelope): {news_report}")
+
+    if fundamentals_report and isinstance(fundamentals_report, str):
+        label = fundamentals_report_label(asset_type)
+        reports_to_include.append(f"{label} (JSON envelope): {fundamentals_report}")
+
+    if not reports_to_include:
+        return ""
+
+    section = f"{ANALYST_REPORTS_READING_INSTRUCTIONS}\n\nAnalyst Reports:\n"
+    for report in reports_to_include:
+        section += f"{report}\n"
+
+    return section
+
+
+def is_present_text(value: Any) -> bool:
+    """True if ``value`` is a non-empty, non-whitespace-only string.
+
+    Shared predicate for the "omit this section rather than interpolate an
+    empty string" pattern used across prompt assembly — e.g. the trader/PM
+    prompts omitting the investment-plan section when ``research_stage ==
+    "none"`` leaves ``investment_plan``/``trader_investment_plan`` empty by
+    design (issue #79), mirroring how :func:`format_analyst_reports_section`
+    already drops missing/non-string analyst reports (issue #77).
+    """
+    return bool(value) and isinstance(value, str) and value.strip() != ""
+
+
 def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 

@@ -1,9 +1,9 @@
 """Tests for issue #33: downstream consumers of the JSON-envelope analyst reports.
 
-After #30-#32, `market_report`, `fundamentals_report`, and `news_report` are
-JSON envelope strings (`skill`/`ticker`/`date`/`signal`/`confidence`/`summary`/
-`details`, see skills/SCHEMA.md) rather than markdown; `sentiment_report`
-(social analyst) intentionally remains prose. This module covers:
+After #30-#32 and #71, `market_report`, `fundamentals_report`, `news_report`,
+and `sentiment_report` are all JSON envelope strings (`skill`/`ticker`/`date`/
+`signal`/`confidence`/`summary`/`details`, see skills/SCHEMA.md) rather than
+markdown. This module covers:
 
 1. Node-level checks that the bull/bear researchers and the three risk
    debators tell the model the market/news/fundamentals reports are
@@ -116,7 +116,35 @@ def _fundamentals_envelope():
     )
 
 
-_SENTIMENT_PROSE = "Retail sentiment is cautiously optimistic with rising mention volume."
+def _sentiment_envelope():
+    return json.dumps(
+        {
+            "skill": "sentiment-analyst",
+            "ticker": "NVDA",
+            "date": "2026-07-06",
+            "signal": "BUY",
+            "confidence": "MEDIUM",
+            "summary": "Retail sentiment is cautiously optimistic with rising mention volume.",
+            "details": {
+                "sources": {
+                    "news": {"available": True, "headline_count": 4, "direction": "NEUTRAL", "confidence": 0.4, "key_items": []},
+                    "stocktwits": {"available": True, "message_count": 20, "bullish": 14, "bearish": 4, "unlabeled": 2, "direction": "POSITIVE", "confidence": 0.6, "key_items": []},
+                    "reddit": {"available": True, "post_count": 3, "top_engagement": {"score": 120, "comments": 40}, "direction": "POSITIVE", "confidence": 0.3, "key_items": []},
+                },
+                "overall_direction": "BULLISH",
+                "divergences": [],
+                "narratives": [],
+                "catalysts": [],
+                "risks": [],
+                "data_quality": {"sources_available": 3, "caveats": []},
+            },
+        },
+        indent=2,
+    )
+
+
+_SENTIMENT_ENVELOPE = _sentiment_envelope()
+_SENTIMENT_SUMMARY = "Retail sentiment is cautiously optimistic with rising mention volume."
 
 
 def _envelope_state(**overrides):
@@ -124,7 +152,7 @@ def _envelope_state(**overrides):
         "company_of_interest": "NVDA",
         "asset_type": "stock",
         "market_report": _market_envelope(),
-        "sentiment_report": _SENTIMENT_PROSE,
+        "sentiment_report": _SENTIMENT_ENVELOPE,
         "news_report": _news_envelope(),
         "fundamentals_report": _fundamentals_envelope(),
         "investment_debate_state": {
@@ -162,13 +190,13 @@ class TestResearcherPromptsExplainEnvelopeShape:
         prompt = self._run_and_capture(create_bull_researcher, _envelope_state())
         assert "JSON envelope" in prompt
         assert '"trade_setup"' in prompt
-        assert _SENTIMENT_PROSE in prompt
+        assert _SENTIMENT_SUMMARY in prompt
 
     def test_bear_prompt_mentions_json_envelope_and_embeds_reports(self):
         prompt = self._run_and_capture(create_bear_researcher, _envelope_state())
         assert "JSON envelope" in prompt
         assert '"trade_setup"' in prompt
-        assert _SENTIMENT_PROSE in prompt
+        assert _SENTIMENT_SUMMARY in prompt
 
     def test_no_placeholder_markers_leak_into_prompt(self):
         """Regression guard for the #31 f-string brace-escaping bug."""
@@ -215,7 +243,7 @@ class TestRiskDebatorPromptsExplainEnvelopeShape:
         prompt = self._run_and_capture(factory, self._risk_state())
         assert "JSON envelope" in prompt
         assert '"trade_setup"' in prompt
-        assert _SENTIMENT_PROSE in prompt
+        assert _SENTIMENT_SUMMARY in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +449,7 @@ class TestFullDownstreamPipelineWithEnvelopeReports:
         # Envelope-shaped analyst reports flowed through unchanged (nodes
         # only read them, they don't mutate the original report fields).
         assert json.loads(final_state["market_report"])["signal"] == "BUY"
-        assert final_state["sentiment_report"] == _SENTIMENT_PROSE
+        assert final_state["sentiment_report"] == _SENTIMENT_ENVELOPE
 
         # The trader's rendered plan reflects the quant trade_setup's stop-loss
         # (note: `trader_structured_data`/`portfolio_structured_data`, while

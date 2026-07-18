@@ -22,6 +22,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
     "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
     "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
+    "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
+    "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
+    "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
+    "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
 }
 
 
@@ -83,6 +87,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
+    # Research stage mode: "researcher" (default) uses a single Researcher node with optional web search;
+    # "none" bypasses research and sends analyst outputs directly to the trader;
+    # "debate" keeps Bull/Bear/Research Manager debate
+    "research_stage": "researcher",
+    # Research web search settings
+    "research_web_search": True,           # Enable/disable web search for live runs
+    "research_search_queries_max": 4,      # Maximum number of search queries
+    "research_evidence_token_budget": 3000, # Token budget for assembled evidence pack
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -112,6 +124,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+        "web_search": "tavily",              # Options: tavily (needs TAVILY_API_KEY)
     },
     # Perplexity-specific configuration
     "perplexity_model": "sonar-pro",
@@ -146,8 +159,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # MemoryMCPClient configuration (issue #51) — networked client for the
     # memory core's MCP server (mcp_server.py run under start_server.sh).
     # When memory_mcp_url is None, MemoryMCPClient derives a default from
-    # memory_mcp_transport ("http://127.0.0.1:8000/mcp" for streamable-http,
-    # "http://127.0.0.1:8000/sse" for sse) — see tradingagents/memory/mcp_client.py.
+    # memory_mcp_transport ("http://127.0.0.1:8001/mcp" for streamable-http,
+    # "http://127.0.0.1:8001/sse" for sse) — see tradingagents/memory/mcp_client.py.
     "memory_mcp_url": None,
     "memory_mcp_transport": "streamable-http",   # Options: streamable-http, sse
 })

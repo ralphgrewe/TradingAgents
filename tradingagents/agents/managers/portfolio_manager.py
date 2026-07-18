@@ -13,17 +13,18 @@ from __future__ import annotations
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    format_analyst_reports_section,
     get_language_instruction,
+    is_present_text,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-)
+from tradingagents.agents.utils.structured import bind_structured
 
 
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
+        asset_type = state.get("asset_type", "stock")
         instrument_context = build_instrument_context(state["company_of_interest"])
 
         history = state["risk_debate_state"]["history"]
@@ -37,6 +38,26 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+
+        # Format analyst reports section with all four envelopes
+        market_report = state.get("market_report")
+        sentiment_report = state.get("sentiment_report")
+        news_report = state.get("news_report")
+        fundamentals_report = state.get("fundamentals_report")
+        analyst_reports_section = format_analyst_reports_section(
+            market_report, sentiment_report, news_report, fundamentals_report, asset_type=asset_type
+        )
+        reports_line = f"{analyst_reports_section}\n\n" if analyst_reports_section else ""
+
+        # Format research/trader context lines: omit if empty (in "none" research stage mode)
+        context_lines = []
+        if is_present_text(research_plan):
+            context_lines.append(f"- Research Manager's investment plan: **{research_plan}**")
+        if is_present_text(trader_plan):
+            context_lines.append(f"- Trader's transaction proposal: **{trader_plan}**")
+        research_trader_line = "\n".join(context_lines)
+        if research_trader_line:
+            research_trader_line += "\n"
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
@@ -52,9 +73,7 @@ def create_portfolio_manager(llm):
 - **Sell**: Exit position or avoid entry
 
 **Context:**
-- Research Manager's investment plan: **{research_plan}**
-- Trader's transaction proposal: **{trader_plan}**
-{lessons_line}
+{research_trader_line}{lessons_line}{reports_line}
 **Risk Analysts Debate History:**
 {history}
 

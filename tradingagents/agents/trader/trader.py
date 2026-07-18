@@ -11,7 +11,9 @@ from langchain_core.messages import AIMessage
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    format_analyst_reports_section,
     get_language_instruction,
+    is_present_text,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -60,6 +62,21 @@ def create_trader(llm):
                 f"`take_profit`/`risk_reward` to inform entry_price and reasoning): {json.dumps(trade_setup)}"
             )
 
+        # Format analyst reports section with all four envelopes
+        market_report = state.get("market_report")
+        sentiment_report = state.get("sentiment_report")
+        news_report = state.get("news_report")
+        fundamentals_report = state.get("fundamentals_report")
+        analyst_reports_section = format_analyst_reports_section(
+            market_report, sentiment_report, news_report, fundamentals_report, asset_type=asset_type
+        )
+        reports_line = f"\n\n{analyst_reports_section}" if analyst_reports_section else ""
+
+        # Format investment plan section: omit if empty (in "none" research stage mode)
+        plan_line = ""
+        if is_present_text(investment_plan):
+            plan_line = f"\n\nProposed Investment Plan: {investment_plan}"
+
         messages = [
             {
                 "role": "system",
@@ -76,11 +93,11 @@ def create_trader(llm):
                 "role": "user",
                 "content": (
                     f"Based on a comprehensive analysis by a team of analysts, here is an investment "
-                    f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
+                    f"assessment tailored for {company_name}. {instrument_context} This assessment incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "
-                    f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}"
-                    f"{trade_setup_line}\n\n"
+                    f"social media sentiment. Use this as a foundation for evaluating your next "
+                    f"trading decision.{plan_line}"
+                    f"{trade_setup_line}{reports_line}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },

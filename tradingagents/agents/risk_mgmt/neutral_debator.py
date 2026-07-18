@@ -21,10 +21,10 @@ def create_neutral_debator(llm):
 
 {trader_decision}
 
-Your task is to challenge both the Aggressive and Conservative Analysts, pointing out where each perspective may be overly optimistic or overly cautious. Use insights from the following data sources to support a moderate, sustainable strategy to adjust the trader's decision. The market, news, and fundamentals reports are structured JSON envelopes (fields: `signal`, `confidence`, `summary`, `details`) — read the `summary` for the headline takeaway and cite specific `details` fields (technical indicators and `trade_setup`, news ratings and headline counts, fundamentals value/growth sub-signals) as evidence rather than restating the raw JSON. The sentiment report remains free-form prose:
+Your task is to challenge both the Aggressive and Conservative Analysts, pointing out where each perspective may be overly optimistic or overly cautious. Use insights from the following data sources to support a moderate, sustainable strategy to adjust the trader's decision. The market, sentiment, news, and fundamentals reports are structured JSON envelopes (fields: `signal`, `confidence`, `summary`, `details`) — read the `summary` for the headline takeaway and cite specific `details` fields (technical indicators and `trade_setup`, per-source sentiment directions and key items, news ratings and headline counts, fundamentals value/growth sub-signals) as evidence rather than restating the raw JSON:
 
 Market Research Report (JSON envelope): {market_research_report}
-Social Media Sentiment Report (prose): {sentiment_report}
+Social Media Sentiment Report (JSON envelope): {sentiment_report}
 Latest World Affairs Report (JSON envelope): {news_report}
 Company Fundamentals Report (JSON envelope): {fundamentals_report}
 Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the conservative analyst: {current_conservative_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.

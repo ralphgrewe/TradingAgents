@@ -1,4 +1,8 @@
-from tradingagents.agents.utils.agent_utils import get_language_instruction
+from tradingagents.agents.utils.agent_utils import (
+    ANALYST_REPORTS_READING_INSTRUCTIONS,
+    fundamentals_report_label,
+    get_language_instruction,
+)
 
 
 def create_bear_researcher(llm):
@@ -14,11 +18,7 @@ def create_bear_researcher(llm):
         fundamentals_report = state["fundamentals_report"]
         asset_type = state.get("asset_type", "stock")
         target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
-        )
+        fundamentals_label = fundamentals_report_label(asset_type)
 
         prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
@@ -30,18 +30,12 @@ Key points to focus on:
 - Bull Counterpoints: Critically analyze the bull argument with specific data and sound reasoning, exposing weaknesses or over-optimistic assumptions.
 - Engagement: Present your argument in a conversational style, directly engaging with the bull analyst's points and debating effectively rather than simply listing facts.
 
-The market, news, and fundamentals reports below are structured JSON envelopes
-(fields: `signal`, `confidence`, `summary`, `details`), not prose. Read the
-`summary` for the headline takeaway and cite specific `details` fields (e.g.
-technical indicator values and the `trade_setup`, news headline counts and the
-conservative/risky ratings, or the fundamentals value/growth sub-signals) as
-supporting evidence — do not just restate the raw JSON. The social media
-sentiment report remains free-form prose.
+{ANALYST_REPORTS_READING_INSTRUCTIONS}
 
 Resources available:
 
 Market research report (JSON envelope): {market_research_report}
-Social media sentiment report (prose): {sentiment_report}
+Social media sentiment report (JSON envelope): {sentiment_report}
 Latest world affairs news (JSON envelope): {news_report}
 {fundamentals_label} (JSON envelope): {fundamentals_report}
 Conversation history of the debate: {history}
