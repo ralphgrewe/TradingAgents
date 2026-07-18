@@ -85,8 +85,24 @@ def _validate_and_patch_plan(
     2. *Then* check bull/bear balance on the truncated result (not the pre-truncation
        list) — truncation can itself remove the only bull or bear query, so checking
        balance before truncating would miss that. If either is still missing, patch
-       in a template fallback, dropping further tail entries from the truncated
-       result first to keep the final length within ``queries_max``.
+       in a template fallback, making room for the mandatory fallback(s) *without*
+       evicting the originals that already supply the type(s) present.
+
+    Making room (phase 2 detail): the fallbacks cover only the MISSING type(s). The
+    first surviving query of each PRESENT type is load-bearing — it is the reason the
+    guarantee holds for that side — and must never be dropped to fit the cap. Only
+    non-load-bearing filler (neutral queries, or extra bull/bear beyond the first of
+    each present type) may be evicted. This closes issue #85, where a blind prefix
+    cut (``original[:queries_max - len(fallbacks)]``) could discard the lone real
+    bull-or-bear query that had correctly survived phase 1, silently violating the
+    invariant this function exists to guarantee.
+
+    Priority when the cap can't hold everything: when ``queries_max`` is too small to
+    fit both the required fallbacks and the load-bearing originals (e.g.
+    ``queries_max=1`` with one fallback needed, or ``queries_max=1`` with BOTH types
+    missing so two fallbacks are needed), the ≥1-bull AND ≥1-bear guarantee wins over
+    strictly respecting ``queries_max`` — the returned plan may exceed the cap so both
+    types are always represented.
 
     ``queries_max=None`` skips the cap entirely (back-compat for callers that don't
     have a config value handy). Returns (patched_queries, was_patched).
@@ -94,6 +110,7 @@ def _validate_and_patch_plan(
     original = list(plan_queries)
     was_patched = False
 
+    # Phase 1: cap an over-long raw plan by dropping its tail.
     if queries_max is not None and len(original) > queries_max:
         original = original[:queries_max]
         was_patched = True
@@ -107,16 +124,35 @@ def _validate_and_patch_plan(
     if not has_bear:
         fallbacks.append({"query": "risks short thesis downside bearish", "type": "bear"})
 
+    patched = original
     if fallbacks:
         was_patched = True
-        if queries_max is not None:
-            # Reserve room for the mandatory fallbacks; drop the tail of the
-            # (already-truncated) original queries first.
-            keep = max(queries_max - len(fallbacks), 0)
-            if len(original) > keep:
-                original = original[:keep]
+        if queries_max is None:
+            # No cap: just append the mandatory fallbacks.
+            patched = original + fallbacks
+        else:
+            # Phase 2: make room for the fallbacks while preserving the first
+            # query of each already-present type (load-bearing — never evicted).
+            must_keep: set[int] = set()
+            for present_type, present in (("bull", has_bull), ("bear", has_bear)):
+                if present:
+                    for i, q in enumerate(original):
+                        if q.get("type") == present_type:
+                            must_keep.add(i)
+                            break
 
-    patched = original + fallbacks
+            # Budget for surviving originals: leave room for the fallbacks, but
+            # never drop a load-bearing query even if that overruns the cap (the
+            # guarantee takes priority — see the docstring).
+            budget = max(queries_max - len(fallbacks), len(must_keep))
+            keep_indices = set(must_keep)
+            for i in range(len(original)):
+                if len(keep_indices) >= budget:
+                    break
+                keep_indices.add(i)
+
+            kept = [original[i] for i in sorted(keep_indices)]
+            patched = kept + fallbacks
 
     if was_patched:
         logger.warning(

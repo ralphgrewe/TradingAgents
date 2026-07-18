@@ -136,6 +136,31 @@ class TestPlanValidationAndPatching:
         assert any(q.get("type") == "bull" for q in patched)
         assert any(q.get("type") == "bear" for q in patched)
 
+    def test_queries_max_one_single_bear_keeps_bear_and_adds_bull(self):
+        """Issue #85 repro: queries_max=1, plan is a single bear query (no bull).
+
+        Phase 1 leaves the one-element plan untouched (already within the cap), so
+        the bear query correctly survives. A bull fallback is then needed. Making
+        room for it must NOT evict the surviving bear query — the ≥1-bull AND
+        ≥1-bear guarantee wins over the cap here, so BOTH types must be present in
+        the final plan (previously the bear was silently dropped)."""
+        plan = [{"query": "risks and threats", "type": "bear"}]
+        patched, was_patched = _validate_and_patch_plan(plan, queries_max=1)
+        assert was_patched
+        assert any(q.get("type") == "bull" for q in patched)
+        assert any(q.get("type") == "bear" for q in patched)
+
+    def test_queries_max_smaller_than_needed_fallbacks_still_balances(self):
+        """queries_max is smaller than the number of fallbacks needed: queries_max=1
+        but BOTH bull and bear are missing (2 fallbacks needed). The guarantee of
+        ≥1 bull AND ≥1 bear takes priority over the cap, so the result contains both
+        fallbacks even though that exceeds queries_max."""
+        plan = [{"query": "market data", "type": "neutral"}]
+        patched, was_patched = _validate_and_patch_plan(plan, queries_max=1)
+        assert was_patched
+        assert any(q.get("type") == "bull" for q in patched)
+        assert any(q.get("type") == "bear" for q in patched)
+
     def test_queries_max_changes_behavior_when_config_value_changes(self):
         """Different queries_max values produce different plan lengths for the
         same input — proving research_search_queries_max is actually wired in,
