@@ -26,19 +26,20 @@ prints the resulting decision.
 
 ### Research stages
 
-By default, the system uses `research_stage=none`, skipping the research stage entirely and sending
-analyst reports directly to the trader. For richer analysis, two alternative modes are available:
+By default, the system uses `research_stage=researcher`, where a single Researcher node synthesizes
+analyst reports and live web search evidence. Two alternative modes are available:
 
-- **`research_stage=debate`**: Bull and Bear researchers debate with a Research Manager
-  judge. Set via `TRADINGAGENTS_RESEARCH_STAGE=debate`.
-- **`research_stage=researcher`** (recommended): A single Researcher node synthesizes analyst reports
+- **`research_stage=researcher`** (default): A single Researcher node synthesizes analyst reports
   and live web search evidence. When `trade_date == today`, web search runs via the Tavily API
   (requires `TAVILY_API_KEY`); historical dates degrade gracefully (no searches, metadata line
   shows "disabled (historical date)").
   - Config keys: `research_web_search` (enable/disable, default True), `research_search_queries_max`
     (default 4), `research_evidence_token_budget` (default 3000), `data_vendors["web_search"]`
     (default "tavily" — needs `TAVILY_API_KEY`).
-  - Set via `TRADINGAGENTS_RESEARCH_STAGE=researcher`.
+- **`research_stage=debate`**: Bull and Bear researchers debate with a Research Manager
+  judge. Set via `TRADINGAGENTS_RESEARCH_STAGE=debate`.
+- **`research_stage=none`**: Skipping the research stage entirely, sending
+  analyst reports directly to the trader. Set via `TRADINGAGENTS_RESEARCH_STAGE=none`.
 
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:
 

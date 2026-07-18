@@ -87,9 +87,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
-    # Research stage mode: "debate" keeps Bull/Bear/Research Manager debate;
-    # "none" bypasses the debate and sends analyst outputs directly to the trader
-    "research_stage": "none",
+    # Research stage mode: "researcher" (default) uses a single Researcher node with optional web search;
+    # "none" bypasses research and sends analyst outputs directly to the trader;
+    # "debate" keeps Bull/Bear/Research Manager debate
+    "research_stage": "researcher",
     # Research web search settings
     "research_web_search": True,           # Enable/disable web search for live runs
     "research_search_queries_max": 4,      # Maximum number of search queries

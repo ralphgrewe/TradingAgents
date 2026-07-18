@@ -22,10 +22,10 @@ def _reload_with_env(monkeypatch, **overrides):
 class TestResearchStageConfig:
     """Tests for research_stage config key and env override."""
 
-    def test_research_stage_defaults_to_none(self, monkeypatch):
-        """The research_stage config key should default to 'none'."""
+    def test_research_stage_defaults_to_researcher(self, monkeypatch):
+        """The research_stage config key should default to 'researcher'."""
         dc = _reload_with_env(monkeypatch)
-        assert dc.DEFAULT_CONFIG["research_stage"] == "none"
+        assert dc.DEFAULT_CONFIG["research_stage"] == "researcher"
 
     def test_research_stage_env_override(self, monkeypatch):
         """TRADINGAGENTS_RESEARCH_STAGE env var should override the default."""
@@ -35,7 +35,7 @@ class TestResearchStageConfig:
     def test_research_stage_empty_env_passthrough(self, monkeypatch):
         """Empty TRADINGAGENTS_RESEARCH_STAGE should not clobber the default."""
         dc = _reload_with_env(monkeypatch, TRADINGAGENTS_RESEARCH_STAGE="")
-        assert dc.DEFAULT_CONFIG["research_stage"] == "none"
+        assert dc.DEFAULT_CONFIG["research_stage"] == "researcher"
 
     def test_research_stage_accepts_none_string(self, monkeypatch):
         """TRADINGAGENTS_RESEARCH_STAGE='none' should be accepted."""

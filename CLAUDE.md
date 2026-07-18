@@ -66,12 +66,12 @@ Five sequential stages, defined in `tradingagents/graph/setup.py` and gated by
 I.   ANALYST TEAM   → selected analysts run in sequence (default: market → social → news →
                        fundamentals), each loops with its own tools until it writes one report
 II.  RESEARCH STAGE → configured by research_stage:
-     - "none" (default): skip research entirely, send analyst reports directly to trader
-     - "debate": Bull vs Bear debate (alternating, `max_debate_rounds`) → Research Manager
-       writes a structured verdict (`investment_plan`)
-     - "researcher": single Researcher node synthesizes analyst reports + live web search
+     - "researcher" (default): single Researcher node synthesizes analyst reports + live web search
        evidence (when trade_date == today, via Tavily API; historical dates degrade to
        synthesis-only with metadata "disabled (historical date)")
+     - "debate": Bull vs Bear debate (alternating, `max_debate_rounds`) → Research Manager
+       writes a structured verdict (`investment_plan`)
+     - "none": skip research entirely, send analyst reports directly to trader
 III. TRADER         → turns the research plan into a concrete trade proposal
 IV.  RISK TEAM       → Aggressive → Conservative → Neutral debate (`max_risk_discuss_rounds`)
 V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
@@ -79,16 +79,7 @@ V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
 
 ### Research stage modes in detail
 
-**Mode: `"none"` (default)**
-- Analyst reports flow directly to the Trader (no research stage).
-- Fastest path, lowest LLM cost.
-
-**Mode: `"debate"`**
-- Bull and Bear researchers debate the analyst reports, culminating in a Research Manager verdict.
-- Config: `max_debate_rounds` (default 1) controls debate length.
-- Memory stored under agent key `"research_manager"`.
-
-**Mode: `"researcher"` (recommended for analysis depth)**
+**Mode: `"researcher"` (default, recommended for analysis depth)**
 - Single Researcher node plan–execute–synthesize pipeline:
   1. **Plan** (quick-thinking LLM): reads analyst envelopes + instrument context, outputs
      up to `research_search_queries_max` web search queries (≥1 bull-seeking, ≥1 bear-seeking).
@@ -109,6 +100,15 @@ V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
 - Memory stored under agent key `"researcher"`.
 - Output: `investment_plan` (rendered brief with metadata line), `researcher_evidence`
   (JSON dict with query plan, gate outcomes, evidence pack for full-state log).
+
+**Mode: `"debate"`**
+- Bull and Bear researchers debate the analyst reports, culminating in a Research Manager verdict.
+- Config: `max_debate_rounds` (default 1) controls debate length.
+- Memory stored under agent key `"research_manager"`.
+
+**Mode: `"none"`**
+- Analyst reports flow directly to the Trader (no research stage).
+- Fastest path, lowest LLM cost.
 
 Key files:
 - `agent_states.py` — the shared `AgentState` TypedDict every node reads/writes. Analyst reports
@@ -196,10 +196,9 @@ reads from.
 
 ### Research stage configuration
 
-- **`research_stage`** (env: `TRADINGAGENTS_RESEARCH_STAGE`, default `"none"`): which research
-  pipeline to run — `"none"` (analyst → trader), `"debate"` (analyst → bull/bear debate →
-  research manager → trader), or `"researcher"` (analyst → researcher node with optional web
-  search → trader).
+- **`research_stage`** (env: `TRADINGAGENTS_RESEARCH_STAGE`, default `"researcher"`): which research
+  pipeline to run — `"researcher"` (analyst → researcher node with optional web search → trader),
+  `"debate"` (analyst → bull/bear debate → research manager → trader), or `"none"` (analyst → trader).
 - **`research_web_search`** (env: `TRADINGAGENTS_RESEARCH_WEB_SEARCH`, default `True`): enable
   live web search in researcher mode (when `trade_date == today`). Requires `TAVILY_API_KEY`.
 - **`research_search_queries_max`** (env: `TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX`, default

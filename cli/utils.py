@@ -164,8 +164,8 @@ def select_research_depth() -> int:
 
     Sets ``max_debate_rounds``, which only matters when ``research_stage``
     is ``"debate"`` (via ``TRADINGAGENTS_RESEARCH_STAGE``) — under the
-    default ``"none"``, the bull/bear/research-manager debate stage never
-    runs, so this selection has no effect on that run.
+    default ``"researcher"``, the debate stage never runs, so this selection
+    has no effect on that run.
     """
 
     # Define research depth options with their corresponding values
