@@ -1,7 +1,4 @@
-import json
-from typing import Optional
 
-import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
@@ -46,6 +43,7 @@ def create_market_analyst(llm):
                     "indicators": [],
                     "convergence": {"confirms": [], "conflicts": [], "missing": []},
                     "trade_setup": None,
+                    "swing_indicators": None,
                 }
         except Exception as e:
             # Graceful degradation: OHLCV unavailable
@@ -60,6 +58,7 @@ def create_market_analyst(llm):
                     "missing": ["All indicators unavailable"]
                 },
                 "trade_setup": None,
+                "swing_indicators": None,
             }
             summary_from_computation = f"Data fetch failed: {str(e)[:50]}"
 

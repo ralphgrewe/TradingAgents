@@ -88,6 +88,12 @@ def find_swing_high_low(high: pd.Series, low: pd.Series, lookback: int = 2) -> t
     A swing low is a bar whose low is the extreme (lowest) of the lookback bars on each side.
     We use "confirmed" pivots: ones with at least lookback completed bars after them.
 
+    Vectorized via a centered rolling max/min over a window of `2 * lookback + 1`
+    bars: a bar is a pivot iff its own high/low equals the window extreme.
+    Pandas' centered rolling only yields a value once `lookback` bars exist on
+    both sides, which is exactly the "confirmed" boundary condition, so no
+    separate index-bounds bookkeeping is needed.
+
     Args:
         high: Series of high prices
         low: Series of low prices
@@ -96,50 +102,36 @@ def find_swing_high_low(high: pd.Series, low: pd.Series, lookback: int = 2) -> t
     Returns:
         (swing_high_dict, swing_low_dict) where each dict has keys:
         - value: the swing price
-        - bar_index: the index of the swing bar
+        - bar_index: the (positional) index of the swing bar
         - bars_since: how many bars ago the swing was
         Or None if not enough confirmed pivots exist.
     """
-    if len(high) < lookback * 2 + 1:
+    n = len(high)
+    window = lookback * 2 + 1
+    if n < window:
         return None, None
 
-    # Need at least lookback bars after the pivot to confirm it
-    # So we can only look at bars up to len - lookback - 1
-    max_idx = len(high) - lookback - 1
+    high = high.reset_index(drop=True)
+    low = low.reset_index(drop=True)
 
-    if max_idx < lookback:
-        return None, None
+    rolling_max = high.rolling(window=window, center=True).max()
+    rolling_min = low.rolling(window=window, center=True).min()
 
-    # Find swing highs: bars whose high is >= all bars within lookback distance
-    swing_high_idx = None
-    for i in range(lookback, max_idx + 1):
-        is_swing_high = True
-        current_high = high.iloc[i]
-        for j in range(max(0, i - lookback), min(len(high), i + lookback + 1)):
-            if j != i and high.iloc[j] > current_high:
-                is_swing_high = False
-                break
-        if is_swing_high:
-            swing_high_idx = i
+    is_swing_high = high == rolling_max
+    is_swing_low = low == rolling_min
 
-    # Find swing lows: bars whose low is <= all bars within lookback distance
-    swing_low_idx = None
-    for i in range(lookback, max_idx + 1):
-        is_swing_low = True
-        current_low = low.iloc[i]
-        for j in range(max(0, i - lookback), min(len(high), i + lookback + 1)):
-            if j != i and low.iloc[j] < current_low:
-                is_swing_low = False
-                break
-        if is_swing_low:
-            swing_low_idx = i
+    swing_high_positions = is_swing_high[is_swing_high].index
+    swing_low_positions = is_swing_low[is_swing_low].index
+
+    swing_high_idx = int(swing_high_positions[-1]) if len(swing_high_positions) else None
+    swing_low_idx = int(swing_low_positions[-1]) if len(swing_low_positions) else None
 
     swing_high = None
     if swing_high_idx is not None:
         swing_high = {
             "value": v(high.iloc[swing_high_idx]),
             "bar_index": swing_high_idx,
-            "bars_since": len(high) - 1 - swing_high_idx,
+            "bars_since": n - 1 - swing_high_idx,
         }
 
     swing_low = None
@@ -147,7 +139,7 @@ def find_swing_high_low(high: pd.Series, low: pd.Series, lookback: int = 2) -> t
         swing_low = {
             "value": v(low.iloc[swing_low_idx]),
             "bar_index": swing_low_idx,
-            "bars_since": len(high) - 1 - swing_low_idx,
+            "bars_since": n - 1 - swing_low_idx,
         }
 
     return swing_high, swing_low
@@ -181,11 +173,15 @@ def rate_of_change(close: pd.Series, periods: list[int]) -> dict[int, float | No
     return result
 
 
-def distance_from_52week_high(high: pd.Series) -> float | None:
+def distance_from_52week_high(high: pd.Series, close: pd.Series) -> float | None:
     """
     Compute distance from 52-week high as % below the max.
 
-    Distance = ((max_high - current_high) / max_high) * 100
+    Distance = ((max_high - current_close) / max_high) * 100
+
+    "Current price" is the latest bar's close (the module's established
+    convention elsewhere), compared against the max high of the past 252
+    trading days.
 
     Returns None if insufficient history (< 252 bars).
     """
@@ -194,10 +190,10 @@ def distance_from_52week_high(high: pd.Series) -> float | None:
 
     # Look back 252 trading days
     lookback_high = high.iloc[-252:].max()
-    current_high = high.iloc[-1]
+    current_close = close.iloc[-1]
 
     if lookback_high > 0:
-        distance = ((lookback_high - current_high) / lookback_high) * 100
+        distance = ((lookback_high - current_close) / lookback_high) * 100
         return v(distance)
 
     return None
@@ -205,15 +201,18 @@ def distance_from_52week_high(high: pd.Series) -> float | None:
 
 def volume_surge_ratio(volume: pd.Series) -> float | None:
     """
-    Compute volume surge ratio: latest day's volume / 20-day average volume.
+    Compute volume surge ratio: latest day's volume / prior 20-day average volume.
 
-    Returns None if insufficient history (< 20 bars).
+    The baseline average excludes the latest bar itself, so a surge on the
+    latest day is not diluted by its own volume.
+
+    Returns None if insufficient history (< 21 bars: 20 baseline days + latest).
     """
-    if len(volume) < 20:
+    if len(volume) < 21:
         return None
 
     latest_vol = volume.iloc[-1]
-    avg_vol = volume.iloc[-20:].mean()
+    avg_vol = volume.iloc[-21:-1].mean()
 
     if avg_vol > 0:
         ratio = latest_vol / avg_vol
@@ -379,7 +378,7 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
     df["n20_high"], df["n20_low"] = rolling_n_day_high_low(df["High"], df["Low"], n=20)
     swing_high, swing_low = find_swing_high_low(df["High"], df["Low"], lookback=2)
     roc_vals = rate_of_change(df["Close"], [5, 20, 63])
-    distance_52w = distance_from_52week_high(df["High"])
+    distance_52w = distance_from_52week_high(df["High"], df["Close"])
     vol_surge = volume_surge_ratio(df["Volume"])
 
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -501,11 +500,21 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
         swing_indicators["n20_high"] = n20_high_val
         swing_indicators["n20_low"] = n20_low_val
 
-    # Swing high/low
+    # Swing high/low — replace the internal `bar_index` (meaningless once the
+    # envelope is serialized) with the pivot's calendar date, matching the
+    # envelope's other calendar-date fields (details.as_of).
     if swing_high is not None:
-        swing_indicators["swing_high"] = swing_high
+        swing_indicators["swing_high"] = {
+            "value": swing_high["value"],
+            "date": str(df["Date"].iloc[swing_high["bar_index"]].date()),
+            "bars_since": swing_high["bars_since"],
+        }
     if swing_low is not None:
-        swing_indicators["swing_low"] = swing_low
+        swing_indicators["swing_low"] = {
+            "value": swing_low["value"],
+            "date": str(df["Date"].iloc[swing_low["bar_index"]].date()),
+            "bars_since": swing_low["bars_since"],
+        }
 
     # Rate of change
     roc_section = {}

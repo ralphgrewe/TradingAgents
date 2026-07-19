@@ -434,24 +434,19 @@ class TestSwingIndicators:
         import pandas as pd
         # Create 252+ bars with a peak at bar 100
         highs = pd.Series([100 + (i if i < 100 else 100 - (i - 100)) for i in range(260)])
+        closes = highs  # close tracks high in this synthetic fixture
 
-        distance = distance_from_52week_high(highs)
+        distance = distance_from_52week_high(highs, closes)
 
-        # Last bar is at 100 - (260 - 100) = -60, but min is capped at start value
-        # Actually: max is at bar 100 (200), last bar is at value for bar 259
-        # Let me recalculate: i=100 -> 200, i=259 -> 100 - 159 = -59 (but series only starts at 100)
-        # Series: [100, 101, 102, ... 199, 200, 199, 198, ..., 100, 99, 98, ...]
-        # Max in 252-day window = 200 (at bar 100)
-        # Last bar value = negative, but the series needs to stay positive
-        # Let me create a simpler case
         assert distance is not None
 
     def test_distance_from_52week_high_insufficient_history(self):
         """distance_from_52week_high should return None with insufficient history."""
         import pandas as pd
         highs = pd.Series([100 + i * 0.1 for i in range(100)])
+        closes = highs
 
-        distance = distance_from_52week_high(highs)
+        distance = distance_from_52week_high(highs, closes)
 
         assert distance is None
 
@@ -464,23 +459,38 @@ class TestSwingIndicators:
             [base_high + i * 0.39 for i in range(252)]  # reaches ~200
             + [180] * 10  # last 10 bars at 180
         )
+        closes = highs
 
-        distance = distance_from_52week_high(highs)
+        distance = distance_from_52week_high(highs, closes)
 
         assert distance is not None
         # distance should be ~10% (200-180)/200*100
         assert distance > 0 and distance < 20
 
-    def test_volume_surge_ratio_basic(self):
-        """volume_surge_ratio should compute volume ratio."""
+    def test_distance_from_52week_high_uses_close_not_high(self):
+        """current price should be the latest CLOSE, not the latest intraday high."""
         import pandas as pd
-        volume = pd.Series([1000000] * 19 + [2000000])
+        # Flat history at 100 for 251 bars, then a fresh-high bar: high=110, close=105.
+        highs = pd.Series([100.0] * 251 + [110.0])
+        closes = pd.Series([100.0] * 251 + [105.0])
+
+        distance = distance_from_52week_high(highs, closes)
+
+        # max high = 110 (today's own bar); comparing against close (105):
+        # distance = (110 - 105) / 110 * 100 ~= 4.5455%
+        # A high-based implementation would (incorrectly) yield 0%.
+        assert distance is not None
+        assert abs(distance - 4.5455) < 0.01
+
+    def test_volume_surge_ratio_basic(self):
+        """volume_surge_ratio should compute volume ratio against the prior-20-day baseline."""
+        import pandas as pd
+        volume = pd.Series([1000000] * 20 + [2000000])
 
         ratio = volume_surge_ratio(volume)
 
-        # Latest (2M) / 20-day avg (1.05M) ~ 1.9
-        assert ratio is not None
-        assert abs(ratio - 1.9048) < 0.01
+        # Baseline (prior 20 days, excluding today) = 1,000,000; latest = 2,000,000
+        assert ratio == 2.0
 
     def test_volume_surge_ratio_insufficient_history(self):
         """volume_surge_ratio should return None with insufficient history."""
@@ -491,15 +501,36 @@ class TestSwingIndicators:
 
         assert ratio is None
 
-    def test_volume_surge_ratio_zero_average(self):
-        """volume_surge_ratio should handle zero volume gracefully."""
+    def test_volume_surge_ratio_needs_21_bars(self):
+        """20 total bars is one short: the baseline needs 20 PRIOR days plus today."""
         import pandas as pd
-        volume = pd.Series([0] * 19 + [1000000])
+        volume = pd.Series([1000000] * 19 + [2000000])
 
         ratio = volume_surge_ratio(volume)
 
-        # 20-day avg is ~50k, so ratio is ~20
-        assert ratio is None or ratio > 0
+        assert ratio is None
+
+    def test_volume_surge_ratio_excludes_latest_bar_from_baseline(self):
+        """The 20-day baseline must exclude the latest bar itself (no self-dilution)."""
+        import pandas as pd
+        # 20 quiet days then one surge day.
+        volume = pd.Series([1000000] * 20 + [3000000])
+
+        ratio = volume_surge_ratio(volume)
+
+        # A baseline that (incorrectly) includes today would give ~2.74x.
+        # Excluding today: baseline = 1,000,000, ratio = 3.0.
+        assert ratio == 3.0
+
+    def test_volume_surge_ratio_zero_average(self):
+        """volume_surge_ratio should handle zero volume gracefully."""
+        import pandas as pd
+        volume = pd.Series([0] * 20 + [1000000])
+
+        ratio = volume_surge_ratio(volume)
+
+        # Baseline (prior 20 days) is 0, so the ratio is undefined -> None.
+        assert ratio is None
 
 
 class TestComputeIndicatorsWithSwingIndicators:
@@ -564,13 +595,30 @@ class TestComputeIndicatorsWithSwingIndicators:
         swing = result["details"]["swing_indicators"]
 
         if swing:
-            # Should have volume surge ratio (20 bars needed)
+            # Should have volume surge ratio (21 bars needed: 20 baseline + latest)
             assert "volume_surge_ratio" in swing
 
             # Should have rate of change (5 bars minimum needed)
             if "rate_of_change" in swing:
                 roc = swing["rate_of_change"]
                 assert "roc_5d" in roc  # Should have at least 5-day ROC
+
+    def test_compute_indicators_swing_pivots_use_calendar_date_not_bar_index(self, sample_ohlcv_data):
+        """swing_high/swing_low in the envelope should carry a calendar `date`,
+        not the internal DataFrame `bar_index` (issue #89 design review)."""
+        result = compute_indicators(sample_ohlcv_data, "AAPL")
+        swing = result["details"]["swing_indicators"]
+
+        if swing and "swing_high" in swing:
+            assert "date" in swing["swing_high"]
+            assert "bar_index" not in swing["swing_high"]
+            # Should be a parseable calendar-date string, e.g. "2024-01-15"
+            datetime.strptime(swing["swing_high"]["date"], "%Y-%m-%d")
+
+        if swing and "swing_low" in swing:
+            assert "date" in swing["swing_low"]
+            assert "bar_index" not in swing["swing_low"]
+            datetime.strptime(swing["swing_low"]["date"], "%Y-%m-%d")
 
     def test_compute_indicators_deterministic_with_swing(self, sample_ohlcv_data):
         """compute_indicators should be deterministic with swing indicators."""
