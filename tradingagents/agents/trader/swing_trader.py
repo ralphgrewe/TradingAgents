@@ -19,7 +19,7 @@ from tradingagents.agents.utils.structured import (
 )
 from tradingagents.dataflows.config import get_config
 
-from .swing_trader_computation import assemble_swing_precompute
+from .swing_trader_computation import assemble_swing_precompute, resolve_benchmark_ticker
 
 
 def _build_swing_prompt(
@@ -80,27 +80,48 @@ def _build_swing_prompt(
     precompute_lines = ["\n\nPre-computed inputs from technical analysis:"]
     precompute_lines.append(f"- Market Regime: {regime_gate.get('regime', 'unknown')}")
     precompute_lines.append(
-        f"- Regime allows pullback entries: {regime_gate.get('regime_allows_pullback', False)}"
+        f"- Regime gate: pullback LONG allowed={regime_gate.get('allow_pullback_long', False)}, "
+        f"pullback SHORT allowed={regime_gate.get('allow_pullback_short', False)}, "
+        f"catalyst allowed={regime_gate.get('allow_catalyst', False)}"
     )
-    precompute_lines.append(
-        f"- Regime allows catalyst entries: {regime_gate.get('regime_allows_catalyst', False)}"
-    )
+    if regime_gate.get("hold_bias"):
+        precompute_lines.append(
+            "  (Regime argues for a HOLD bias — reduce conviction / stand aside)"
+        )
 
     if trade_setup:
-        precompute_lines.append(f"- Trade Setup (deterministic): {json.dumps(trade_setup)}")
+        precompute_lines.append(f"- Candidate Trade Setup (deterministic): {json.dumps(trade_setup)}")
 
+    roc_20d = relative_strength.get("roc_20d")
+    benchmark_roc = relative_strength.get("benchmark_roc")
     rs = relative_strength.get("relative_strength")
     if rs is not None:
-        precompute_lines.append(f"- 20-day Relative Strength vs Benchmark: {rs:.2f}%")
+        precompute_lines.append(
+            f"- 20-day Relative Strength vs Benchmark: {rs:.2f}% "
+            f"(stock {roc_20d:.2f}% vs benchmark {benchmark_roc:.2f}%)"
+        )
+    elif roc_20d is not None:
+        precompute_lines.append(
+            f"- 20-day Relative Strength vs Benchmark: unavailable (benchmark ROC could not "
+            f"be fetched; stock 20-day ROC is {roc_20d:.2f}%)"
+        )
+    else:
+        precompute_lines.append("- 20-day Relative Strength vs Benchmark: unavailable")
 
-    earnings = earnings_check.get("earnings_date")
-    days_to = earnings_check.get("days_to_earnings")
-    if earnings and days_to is not None:
-        precompute_lines.append(f"- Earnings Date: {earnings} ({days_to} trading days away)")
-        if earnings_check.get("should_avoid_non_catalyst"):
+    if earnings_check.get("status") == "ok":
+        earnings_date = earnings_check.get("earnings_date")
+        if earnings_check.get("has_earnings_in_window"):
             precompute_lines.append(
-                "  (Earnings in window — avoid non-catalyst setups per swing protocol)"
+                f"- Earnings Date: {earnings_date} (falls within the candidate holding window)"
             )
+            if earnings_check.get("should_avoid_non_catalyst"):
+                precompute_lines.append(
+                    "  (Earnings in window — avoid non-catalyst setups per swing protocol)"
+                )
+        else:
+            precompute_lines.append(f"- Earnings Date: {earnings_date} (outside the candidate holding window)")
+    else:
+        precompute_lines.append("- Earnings Date: unknown (calendar unavailable)")
 
     precompute_section = "\n".join(precompute_lines)
 
@@ -166,16 +187,24 @@ def create_swing_trader(llm):
     def swing_trader_node(state, name):
         config = get_config()
 
-        # Run pre-compute step
+        # Run pre-compute step: regime gate, candidate setup, relative
+        # strength (fetches the benchmark ROC live), and the earnings-in-
+        # window flag (fetches the earnings calendar live). Both vendor
+        # calls degrade to None/"unknown" on failure; see
+        # swing_trader_computation.fetch_benchmark_roc / fetch_earnings_calendar.
+        ticker = state["company_of_interest"]
+        trade_date = state.get("trade_date")
         market_report = state.get("market_report")
-        earnings_calendar = state.get("swing_earnings_calendar")  # populated by pre-node step
-        holding_period_days = 5  # default; LLM may override
+        holding_period_days = 5  # candidate window for precompute; LLM declares the final value
+
+        benchmark = resolve_benchmark_ticker(ticker, config)
 
         precompute = assemble_swing_precompute(
             market_report=market_report,
-            earnings_calendar=earnings_calendar,
+            ticker=ticker,
+            trade_date=trade_date,
             holding_period_days=holding_period_days,
-            benchmark_roc=None,  # TODO: compute from get_stock_data for benchmark
+            benchmark=benchmark,
         )
 
         # Build prompt
