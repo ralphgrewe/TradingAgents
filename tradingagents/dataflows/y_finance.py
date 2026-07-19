@@ -468,3 +468,88 @@ def get_insider_transactions(
 
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+
+
+def get_earnings_calendar(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str, "current date in YYYY-MM-DD format"]
+):
+    """Get earnings calendar data from yfinance.
+
+    Returns the next scheduled earnings date on/after curr_date and the number of
+    calendar days until it. Where available, also includes the most recent past
+    earnings date.
+
+    Non-equity symbols (commodities, forex, crypto) return an explicit "no earnings
+    calendar" result. Unknown/unavailable data degrades to an explicit "unknown"
+    result rather than raising an exception.
+    """
+    canonical = normalize_symbol(ticker)
+
+    # Non-equity symbols (futures, forex, crypto) do not have earnings calendars.
+    # These appear with special characters: futures have "=" (e.g., GC=F),
+    # forex has "=X" (e.g., EURUSD=X), and crypto has "-" (e.g., BTC-USD).
+    if any(char in canonical for char in ["=", "-"]):
+        return (
+            f"NO_EARNINGS_CALENDAR_AVAILABLE: {canonical} represents a non-equity "
+            f"instrument (commodity/forex/crypto) and does not have an earnings calendar."
+        )
+
+    try:
+        curr_date_obj = datetime.strptime(curr_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return f"UNKNOWN: Invalid current date format '{curr_date}'; expected YYYY-MM-DD"
+
+    try:
+        ticker_obj = yf.Ticker(canonical)
+        earnings_df = yf_retry(lambda: ticker_obj.get_earnings_dates())
+
+        if earnings_df is None or earnings_df.empty:
+            return (
+                f"UNKNOWN: No earnings calendar data available for '{canonical}'. "
+                f"The company may not have publicly scheduled earnings or the data "
+                f"is not available from this vendor."
+            )
+
+        # Convert index to datetime and extract the date component.
+        # yfinance returns the index as a DatetimeIndex with timezone info.
+        earnings_dates = pd.to_datetime(earnings_df.index).date
+
+        # Separate future and past earnings
+        next_earnings = None
+        next_days_until = None
+        most_recent_past = None
+
+        for earning_date in earnings_dates:
+            if earning_date >= curr_date_obj:
+                if next_earnings is None:
+                    next_earnings = earning_date
+                    next_days_until = (earning_date - curr_date_obj).days
+            elif earning_date < curr_date_obj:
+                if most_recent_past is None:
+                    most_recent_past = earning_date
+
+        # Build response
+        lines = [f"# Earnings Calendar for {canonical}"]
+        lines.append(f"# Current date: {curr_date_obj.strftime('%Y-%m-%d')}")
+        lines.append("")
+
+        if next_earnings is not None:
+            lines.append(f"Next Earnings Date: {next_earnings.strftime('%Y-%m-%d')}")
+            lines.append(f"Days Until Next Earnings: {next_days_until}")
+        else:
+            lines.append("Next Earnings Date: Not scheduled (or no upcoming dates known)")
+            lines.append("Days Until Next Earnings: Unknown")
+
+        if most_recent_past is not None:
+            lines.append(f"Most Recent Past Earnings Date: {most_recent_past.strftime('%Y-%m-%d')}")
+
+        return "\n".join(lines)
+
+    except NoMarketDataError:
+        raise
+    except Exception as e:
+        return (
+            f"UNKNOWN: Error retrieving earnings calendar for '{canonical}': {str(e)}. "
+            f"The data may be temporarily unavailable."
+        )

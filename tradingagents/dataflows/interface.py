@@ -22,6 +22,7 @@ from .polymarket import get_prediction_markets as get_polymarket_prediction_mark
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
+    get_earnings_calendar as get_yfinance_earnings_calendar,
     get_fundamentals as get_yfinance_fundamentals,
     get_income_statement as get_yfinance_income_statement,
     get_insider_transactions as get_yfinance_insider_transactions,
@@ -53,7 +54,8 @@ TOOLS_CATEGORIES = {
             "get_fundamentals",
             "get_balance_sheet",
             "get_cashflow",
-            "get_income_statement"
+            "get_income_statement",
+            "get_earnings_calendar"
         ]
     },
     "news_data": {
@@ -129,6 +131,9 @@ VENDOR_METHODS = {
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
+    },
+    "get_earnings_calendar": {
+        "yfinance": get_yfinance_earnings_calendar,
     },
     # news_data
     "get_news": {
