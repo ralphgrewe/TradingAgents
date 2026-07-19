@@ -136,3 +136,43 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+def is_non_equity_symbol(canonical: str) -> bool:
+    """True when ``canonical`` (a ``normalize_symbol()`` output) names a
+    non-equity instrument: an index, future/commodity, spot forex pair, or
+    crypto pair — none of which have an earnings calendar.
+
+    Classification is structural, based on the same Yahoo conventions
+    ``normalize_symbol`` produces, not a blanket character check: a bare
+    ``"-"`` or ``"="`` in the symbol is not enough, because hyphenated equity
+    share classes (``BRK-B``, ``BF-B``) use ``-`` too. Rules, in order:
+
+      1. ``^``-prefixed  -> index (``^GSPC``, ``^NDX``, ...).
+      2. ``=F`` suffix    -> futures/commodities (``GC=F``, ``CL=F``, ...).
+      3. ``=X`` suffix    -> spot forex (``EURUSD=X``, ...).
+      4. ``<BASE>-USD`` where ``BASE`` is a known crypto base (see
+         ``_CRYPTO_BASES``) -> crypto pair (``BTC-USD``, ...). This is what
+         distinguishes crypto from a hyphenated equity ticker sharing the
+         same ``-`` character.
+
+    Anything else (plain equities/ETFs, including hyphenated share classes)
+    returns False.
+    """
+    if not isinstance(canonical, str) or not canonical.strip():
+        return False
+
+    s = canonical.strip().upper()
+
+    if s.startswith("^"):
+        return True
+
+    if s.endswith("=F") or s.endswith("=X"):
+        return True
+
+    if "-" in s:
+        base, _, quote = s.partition("-")
+        if quote == "USD" and base in _CRYPTO_BASES:
+            return True
+
+    return False

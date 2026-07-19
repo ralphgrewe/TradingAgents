@@ -5,10 +5,11 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 import pandas as pd
-import pytz
 import pytest
+import pytz
 
-from tradingagents.dataflows import y_finance
+from tradingagents.dataflows import interface, y_finance
+from tradingagents.dataflows.symbol_utils import NoMarketDataError
 
 
 @pytest.mark.unit
@@ -55,8 +56,10 @@ class TestGetEarningsCalendarYFinance(unittest.TestCase):
                 self.assertGreaterEqual(days, 1)
                 self.assertLess(days, 20)
 
-    def test_no_earnings_data_available(self):
-        """Test that no earnings data returns an 'UNKNOWN' sentinel."""
+    def test_no_earnings_data_available_raises_no_market_data_error(self):
+        """Vendor-returns-nothing must raise NoMarketDataError (like the sibling
+        fundamental_data functions), not a hand-rolled sentinel string, so
+        route_to_vendor's fallback-chain/NO_DATA_AVAILABLE contract still works."""
         curr_date = "2026-07-19"
 
         with mock.patch.object(y_finance.yf, "Ticker") as mock_ticker_class:
@@ -64,10 +67,25 @@ class TestGetEarningsCalendarYFinance(unittest.TestCase):
             mock_ticker_class.return_value = mock_ticker
             mock_ticker.get_earnings_dates.return_value = pd.DataFrame()
 
-            result = y_finance.get_earnings_calendar("UNKNOWNTICKER", curr_date)
+            with self.assertRaises(NoMarketDataError):
+                y_finance.get_earnings_calendar("UNKNOWNTICKER", curr_date)
 
-        self.assertIn("UNKNOWN", result)
-        self.assertIn("No earnings calendar data available", result)
+    def test_no_earnings_data_surfaces_as_no_data_available_through_router(self):
+        """route_to_vendor must convert the raised NoMarketDataError into the
+        standard NO_DATA_AVAILABLE sentinel, exactly like other fundamental_data
+        tools (get_fundamentals, get_balance_sheet, ...)."""
+        curr_date = "2026-07-19"
+
+        with mock.patch.object(y_finance.yf, "Ticker") as mock_ticker_class:
+            mock_ticker = mock.Mock()
+            mock_ticker_class.return_value = mock_ticker
+            mock_ticker.get_earnings_dates.return_value = pd.DataFrame()
+
+            result = interface.route_to_vendor(
+                "get_earnings_calendar", "UNKNOWNTICKER", curr_date
+            )
+
+        self.assertIn("NO_DATA_AVAILABLE", result)
 
     def test_non_equity_symbol_futures(self):
         """Test that futures symbols return 'NO_EARNINGS_CALENDAR_AVAILABLE'."""
@@ -102,6 +120,29 @@ class TestGetEarningsCalendarYFinance(unittest.TestCase):
         self.assertIn("non-equity", result)
         self.assertIn("crypto", result)
 
+    def test_hyphenated_equity_is_not_non_equity(self):
+        """Hyphenated share classes like BRK-B must NOT be misclassified as
+        non-equity just because they contain '-' — that was the ad-hoc
+        character-check bug flagged in design review. They should proceed to
+        the normal vendor call path."""
+        curr_date = "2026-07-19"
+        future_date = datetime.now(pytz.UTC) + timedelta(days=10)
+        earnings_df = pd.DataFrame(
+            {"EPS Estimate": [1.5], "Reported EPS": [float("nan")], "Surprise(%)": [float("nan")]},
+            index=pd.DatetimeIndex([future_date], tz="UTC"),
+        )
+
+        with mock.patch.object(y_finance.yf, "Ticker") as mock_ticker_class:
+            mock_ticker = mock.Mock()
+            mock_ticker_class.return_value = mock_ticker
+            mock_ticker.get_earnings_dates.return_value = earnings_df
+
+            result = y_finance.get_earnings_calendar("BRK-B", curr_date)
+
+        self.assertNotIn("NO_EARNINGS_CALENDAR_AVAILABLE", result)
+        self.assertIn("# Earnings Calendar for BRK-B", result)
+        self.assertIn("Next Earnings Date:", result)
+
     def test_invalid_date_format(self):
         """Test that an invalid date format returns 'UNKNOWN' sentinel."""
         with mock.patch.object(y_finance.yf, "Ticker"):
@@ -111,7 +152,10 @@ class TestGetEarningsCalendarYFinance(unittest.TestCase):
         self.assertIn("Invalid current date format", result)
 
     def test_vendor_error_graceful_degradation(self):
-        """Test that vendor errors degrade to 'UNKNOWN' sentinel."""
+        """Genuine vendor errors (network/etc.) must degrade to the same
+        'Error retrieving earnings calendar for ...' convention the sibling
+        fundamental_data functions use — not raise, and not share the
+        NO_DATA_AVAILABLE/'no data known' path's messaging."""
         curr_date = "2026-07-19"
 
         with mock.patch.object(y_finance.yf, "Ticker") as mock_ticker_class:
@@ -121,9 +165,27 @@ class TestGetEarningsCalendarYFinance(unittest.TestCase):
 
             result = y_finance.get_earnings_calendar("AAPL", curr_date)
 
-        self.assertIn("UNKNOWN", result)
         self.assertIn("Error retrieving earnings calendar", result)
         self.assertIn("Network error", result)
+        # Distinguishable from the no-data case: no NO_DATA_AVAILABLE-style
+        # sentinel and not raised as NoMarketDataError.
+        self.assertNotIn("NO_DATA_AVAILABLE", result)
+
+    def test_vendor_error_distinguishable_from_no_data_via_router(self):
+        """A genuine vendor error and a clean 'no data' result must remain
+        distinguishable after routing: the error path returns the vendor's
+        error string, the no-data path returns NO_DATA_AVAILABLE."""
+        curr_date = "2026-07-19"
+
+        with mock.patch.object(y_finance.yf, "Ticker") as mock_ticker_class:
+            mock_ticker = mock.Mock()
+            mock_ticker_class.return_value = mock_ticker
+            mock_ticker.get_earnings_dates.side_effect = Exception("Network error")
+
+            result = interface.route_to_vendor("get_earnings_calendar", "AAPL", curr_date)
+
+        self.assertNotIn("NO_DATA_AVAILABLE", result)
+        self.assertIn("Error retrieving earnings calendar", result)
 
     def test_most_recent_past_earnings(self):
         """Test that the most recent past earnings date is included."""

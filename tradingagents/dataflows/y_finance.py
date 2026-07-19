@@ -12,7 +12,7 @@ from .stockstats_utils import (
     load_ohlcv,
     yf_retry,
 )
-from .symbol_utils import NoMarketDataError, normalize_symbol
+from .symbol_utils import NoMarketDataError, is_non_equity_symbol, normalize_symbol
 
 
 def get_YFin_data_online(
@@ -480,19 +480,25 @@ def get_earnings_calendar(
     calendar days until it. Where available, also includes the most recent past
     earnings date.
 
-    Non-equity symbols (commodities, forex, crypto) return an explicit "no earnings
-    calendar" result. Unknown/unavailable data degrades to an explicit "unknown"
-    result rather than raising an exception.
+    Non-equity symbols (indices, commodities, forex, crypto) return an explicit
+    "no earnings calendar" result. When the vendor returns no rows, raises
+    NoMarketDataError like the sibling fundamental_data functions, so
+    route_to_vendor turns it into the standard NO_DATA_AVAILABLE sentinel (and
+    can trigger a multi-vendor fallback chain). A genuine vendor error (e.g.
+    network failure) is caught and returned as an "Error retrieving earnings
+    calendar for ..." string, matching the other yfinance functions in this
+    module — distinct from the no-data case, never raised past this function.
     """
     canonical = normalize_symbol(ticker)
 
-    # Non-equity symbols (futures, forex, crypto) do not have earnings calendars.
-    # These appear with special characters: futures have "=" (e.g., GC=F),
-    # forex has "=X" (e.g., EURUSD=X), and crypto has "-" (e.g., BTC-USD).
-    if any(char in canonical for char in ["=", "-"]):
+    # Non-equity symbols (indices, futures/commodities, forex, crypto) do not
+    # have earnings calendars. Classification is structural (is_non_equity_symbol),
+    # not a bare character check, so hyphenated equity share classes like
+    # BRK-B/BF-B are correctly left as equities.
+    if is_non_equity_symbol(canonical):
         return (
             f"NO_EARNINGS_CALENDAR_AVAILABLE: {canonical} represents a non-equity "
-            f"instrument (commodity/forex/crypto) and does not have an earnings calendar."
+            f"instrument (index/commodity/forex/crypto) and does not have an earnings calendar."
         )
 
     try:
@@ -505,11 +511,12 @@ def get_earnings_calendar(
         earnings_df = yf_retry(lambda: ticker_obj.get_earnings_dates())
 
         if earnings_df is None or earnings_df.empty:
-            return (
-                f"UNKNOWN: No earnings calendar data available for '{canonical}'. "
-                f"The company may not have publicly scheduled earnings or the data "
-                f"is not available from this vendor."
-            )
+            # No usable rows: raise the typed error like the sibling
+            # fundamental_data functions (get_fundamentals, get_balance_sheet, ...)
+            # so route_to_vendor turns this into the standard NO_DATA_AVAILABLE
+            # sentinel and can trigger a multi-vendor fallback chain, instead of
+            # a hand-rolled string that bypasses the router contract.
+            raise NoMarketDataError(ticker, canonical, "no earnings calendar data")
 
         # Convert index to datetime and extract the date component.
         # yfinance returns the index as a DatetimeIndex with timezone info.
@@ -525,9 +532,8 @@ def get_earnings_calendar(
                 if next_earnings is None:
                     next_earnings = earning_date
                     next_days_until = (earning_date - curr_date_obj).days
-            elif earning_date < curr_date_obj:
-                if most_recent_past is None:
-                    most_recent_past = earning_date
+            elif most_recent_past is None:
+                most_recent_past = earning_date
 
         # Build response
         lines = [f"# Earnings Calendar for {canonical}"]
@@ -549,7 +555,8 @@ def get_earnings_calendar(
     except NoMarketDataError:
         raise
     except Exception as e:
-        return (
-            f"UNKNOWN: Error retrieving earnings calendar for '{canonical}': {str(e)}. "
-            f"The data may be temporarily unavailable."
-        )
+        # Genuine vendor error (network/parsing/etc.), distinct from "no data
+        # known" above: mirrors the sibling fundamental_data functions' plain
+        # "Error retrieving <thing> for <ticker>: <detail>" convention rather
+        # than sharing a prefix with the no-data case.
+        return f"Error retrieving earnings calendar for {ticker}: {str(e)}"

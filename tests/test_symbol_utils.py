@@ -11,6 +11,7 @@ import pytest
 
 from tradingagents.dataflows.symbol_utils import (
     NoMarketDataError,
+    is_non_equity_symbol,
     is_yahoo_safe,
     normalize_symbol,
 )
@@ -80,6 +81,49 @@ class TestNoMarketDataError(unittest.TestCase):
     def test_canonical_defaults_to_symbol(self):
         err = NoMarketDataError("FOOBAR")
         self.assertEqual(err.canonical, "FOOBAR")
+
+
+@pytest.mark.unit
+class TestIsNonEquitySymbol(unittest.TestCase):
+    def test_hyphenated_equity_share_classes_are_not_non_equity(self):
+        # Regression for the design-review finding on issue #90: a bare
+        # "-" character check misclassified these as non-equity.
+        for sym in ("BRK-B", "BF-B"):
+            self.assertFalse(is_non_equity_symbol(sym))
+
+    def test_plain_equities_are_not_non_equity(self):
+        for sym in ("AAPL", "MSFT", "TSM", "BRK.B", "0700.HK"):
+            self.assertFalse(is_non_equity_symbol(sym))
+
+    def test_index_symbols_are_non_equity(self):
+        for sym in ("^GSPC", "^NDX", "^DJI", "^GDAXI", "^FTSE"):
+            self.assertTrue(is_non_equity_symbol(sym))
+
+    def test_futures_and_commodities_are_non_equity(self):
+        for sym in ("GC=F", "SI=F", "CL=F", "BZ=F", "NG=F"):
+            self.assertTrue(is_non_equity_symbol(sym))
+
+    def test_forex_pairs_are_non_equity(self):
+        for sym in ("EURUSD=X", "GBPJPY=X"):
+            self.assertTrue(is_non_equity_symbol(sym))
+
+    def test_crypto_pairs_are_non_equity(self):
+        for sym in ("BTC-USD", "ETH-USD"):
+            self.assertTrue(is_non_equity_symbol(sym))
+
+    def test_works_on_normalize_symbol_output(self):
+        # The intended call pattern: classify the canonical symbol produced
+        # by normalize_symbol, e.g. for a broker/forex ticker like XAUUSD.
+        self.assertTrue(is_non_equity_symbol(normalize_symbol("XAUUSD")))
+        self.assertTrue(is_non_equity_symbol(normalize_symbol("EURUSD")))
+        self.assertTrue(is_non_equity_symbol(normalize_symbol("BTCUSD")))
+        self.assertTrue(is_non_equity_symbol(normalize_symbol("SPX500")))
+        self.assertFalse(is_non_equity_symbol(normalize_symbol("AAPL")))
+        self.assertFalse(is_non_equity_symbol(normalize_symbol("BRK-B")))
+
+    def test_empty_and_non_string_inputs(self):
+        self.assertFalse(is_non_equity_symbol(""))
+        self.assertFalse(is_non_equity_symbol(None))
 
 
 @pytest.mark.unit
