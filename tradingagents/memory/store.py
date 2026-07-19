@@ -55,6 +55,14 @@ Design choices (see issue #5 discussion for the full rationale):
   schema's ``signal`` column. ``confidence`` is new and numeric so that
   later aggregate stats (issue #23, hit-rate weighted by confidence) can do
   arithmetic directly instead of parsing a text enum.
+- **horizon_days**: stored as ``INTEGER`` (trading days). Each decision can
+  declare its own intended holding period (e.g., a 3-day swing trade vs. a
+  10-day momentum play). When a decision row is stored, an optional
+  ``horizon_days`` parameter may be passed; if not given, the column is left
+  ``NULL`` and ``resolve_pending`` later fills it in with
+  ``DEFAULT_HORIZON_DAYS``. Per-decision horizons flow through the MCP
+  boundary (``MemoryMCPClient.store_decision``) so that the swing trader's
+  1–15 trading day range is properly tracked (issue #91).
 """
 
 from __future__ import annotations
@@ -131,13 +139,17 @@ def store_decision(
     key_drivers: Sequence[Any] | Mapping[str, Any] | None,
     thesis: str | None,
     db_path: str | Path | None = None,
+    horizon_days: int | None = None,
 ) -> bool:
     """Insert a pending decision row.
 
-    Inserts a new row with all resolution columns (``horizon_days``,
-    ``forward_return``, ``benchmark_return``, ``lesson``, ``resolved_at``)
-    left ``NULL`` — i.e. "pending" (``resolved_at IS NULL``). Resolving
-    those columns later is out of scope here (issue #6).
+    Inserts a new row with all resolution columns (``forward_return``,
+    ``benchmark_return``, ``lesson``, ``resolved_at``) left ``NULL`` —
+    i.e. "pending" (``resolved_at IS NULL``). The ``horizon_days`` column
+    may be set at store time (if the caller has a declared holding period),
+    otherwise it is left ``NULL`` and ``resolve_pending`` fills it in with
+    ``DEFAULT_HORIZON_DAYS`` at resolution time. Resolving the other
+    resolution columns is out of scope here (issue #6).
 
     Idempotency: if a row already exists for the same
     ``(agent, ticker, date)`` key, this call is a **no-op** — the existing
@@ -163,6 +175,10 @@ def store_decision(
             ``None``.
         thesis: Short free-text rationale. May be ``None``.
         db_path: Optional override for the DB path (see ``resolve_db_path``).
+        horizon_days: Optional intended holding period in trading days. If
+            given, stored in the ``horizon_days`` column at insert time; if
+            ``None``, the column is left ``NULL`` and filled in later by
+            ``resolve_pending`` with ``DEFAULT_HORIZON_DAYS``.
 
     Returns:
         ``True`` if a new pending row was inserted, ``False`` if a row for
@@ -177,10 +193,10 @@ def store_decision(
             """
             INSERT OR IGNORE INTO decisions (
                 agent, ticker, decision_date, signal, confidence,
-                key_drivers, thesis, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                key_drivers, thesis, created_at, horizon_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (agent, ticker, date, signal, confidence, key_drivers_json, thesis, created_at),
+            (agent, ticker, date, signal, confidence, key_drivers_json, thesis, created_at, horizon_days),
         )
         conn.commit()
         return cursor.rowcount > 0

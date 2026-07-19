@@ -257,3 +257,92 @@ def test_store_decision_uses_configurable_db_path(tmp_path):
         db_path=db_path,
     )
     assert db_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# horizon_days parameter (issue #91)
+# ---------------------------------------------------------------------------
+
+def test_store_decision_with_horizon_days(tmp_path):
+    """Store a decision with an explicit horizon_days value."""
+    db_path = _db_path(tmp_path)
+    store_decision(
+        agent="swing_trader",
+        ticker="AAPL",
+        date="2026-07-01",
+        signal="Buy",
+        confidence=0.75,
+        key_drivers=["momentum"],
+        thesis="Short-term momentum play.",
+        db_path=db_path,
+        horizon_days=5,  # explicit 5-day horizon for a swing trade
+    )
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute("SELECT * FROM decisions").fetchone()
+    finally:
+        conn.close()
+
+    assert row["horizon_days"] == 5
+    assert row["resolved_at"] is None  # still pending
+
+
+def test_store_decision_without_horizon_days_is_null(tmp_path):
+    """Existing callers (not passing horizon_days) get NULL, not a default."""
+    db_path = _db_path(tmp_path)
+    store_decision(
+        agent="trader",
+        ticker="MSFT",
+        date="2026-07-01",
+        signal="Hold",
+        confidence=0.5,
+        key_drivers=None,
+        thesis=None,
+        db_path=db_path,
+        # horizon_days not given -> should be NULL
+    )
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute("SELECT * FROM decisions").fetchone()
+    finally:
+        conn.close()
+
+    assert row["horizon_days"] is None  # backward compatibility
+
+
+def test_store_decision_mixed_horizons_in_same_batch(tmp_path):
+    """Multiple decisions in one DB, some with explicit horizons and some without."""
+    db_path = _db_path(tmp_path)
+
+    # Decision with explicit short horizon
+    store_decision(
+        agent="swing", ticker="AAPL", date="2026-07-01",
+        signal="Buy", confidence=0.8, key_drivers=None, thesis=None,
+        db_path=db_path, horizon_days=3,
+    )
+
+    # Decision without horizon (backward compat)
+    store_decision(
+        agent="trader", ticker="MSFT", date="2026-07-01",
+        signal="Buy", confidence=0.7, key_drivers=None, thesis=None,
+        db_path=db_path,  # no horizon_days
+    )
+
+    # Decision with longer horizon
+    store_decision(
+        agent="swing", ticker="GOOGL", date="2026-07-01",
+        signal="Sell", confidence=0.6, key_drivers=None, thesis=None,
+        db_path=db_path, horizon_days=15,
+    )
+
+    conn = get_connection(db_path)
+    try:
+        rows = {row["ticker"]: row for row in conn.execute("SELECT * FROM decisions").fetchall()}
+    finally:
+        conn.close()
+
+    assert rows["AAPL"]["horizon_days"] == 3
+    assert rows["MSFT"]["horizon_days"] is None  # still NULL for backward compat
+    assert rows["GOOGL"]["horizon_days"] == 15

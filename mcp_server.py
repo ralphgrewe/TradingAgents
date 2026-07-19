@@ -232,6 +232,7 @@ def memory_store_decision(
     key_drivers: Any = None,
     thesis: str | None = None,
     db_path: str | None = None,
+    horizon_days: int | None = None,
 ) -> bool | str:
     """
     Record a pending trading decision in the shared memory core.
@@ -250,6 +251,9 @@ def memory_store_decision(
         thesis: Optional short free-text rationale.
         db_path: Optional override for the memory DB path (defaults to the
             TRADINGAGENTS_MEMORY_DB_PATH env var, then runs/memory/memory.db).
+        horizon_days: Optional intended holding period in trading days. If
+            given, stored in the row's horizon_days column; if None, the
+            column is left NULL and filled by resolve_pending with the default.
 
     Returns:
         True if a new pending row was inserted, False if a row already
@@ -271,6 +275,7 @@ def memory_store_decision(
                 key_drivers=key_drivers,
                 thesis=thesis,
                 db_path=db_path,
+                horizon_days=horizon_days,
             )
         return result
     except Exception as exc:  # noqa: BLE001
