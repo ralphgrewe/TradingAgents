@@ -70,9 +70,11 @@ from tradingagents.memory.store import get_connection
 
 logger = logging.getLogger(__name__)
 
-# Trading-day horizon used to decide when a pending decision is eligible to
-# be resolved, and the value written to ``decisions.horizon_days`` for every
-# row resolved by this module. Single, module-level knob by design (issue #6).
+# Fallback trading-day horizon used only for rows stored without their own
+# per-decision ``horizon_days`` (``NULL`` at store time, issue #91). Used both
+# to decide eligibility and as the value written to ``decisions.horizon_days``
+# at resolution time for such rows; rows with a non-``NULL`` stored horizon
+# use that value instead (see module docstring).
 DEFAULT_HORIZON_DAYS = 10
 
 
