@@ -26,6 +26,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
+    "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
+    "TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD": "swing_trader_min_risk_reward",
+    "TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS": "swing_trader_max_holding_days",
+    "TRADINGAGENTS_SWING_TRADER_CONVICTION_THRESHOLD": "swing_trader_conviction_threshold",
 }
 
 
@@ -95,6 +99,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "research_web_search": True,           # Enable/disable web search for live runs
     "research_search_queries_max": 4,      # Maximum number of search queries
     "research_evidence_token_budget": 3000, # Token budget for assembled evidence pack
+    # Swing Trader settings
+    "swing_trader_enabled": False,         # Enable/disable the swing trader node
+    "swing_trader_min_risk_reward": 1.5,   # Minimum reward:risk for non-HOLD decisions
+    "swing_trader_max_holding_days": 15,   # Hard cap on holding period (trading days)
+    "swing_trader_conviction_threshold": 0.55, # Minimum conviction to force action
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,

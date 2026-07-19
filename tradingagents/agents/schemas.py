@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Shared rating types
@@ -276,6 +276,146 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Swing Trader
+# ---------------------------------------------------------------------------
+
+
+class SwingAction(str, Enum):
+    """3-tier transaction direction used by the Swing Trader.
+
+    The Swing Trader makes shorter-term decisions (3-15 trading days) than
+    the Portfolio Manager, with regime-gated entry setups and strict
+    R/R requirements.
+    """
+
+    BUY = "Buy"
+    HOLD = "Hold"
+    SELL = "Sell"
+
+
+class SwingDecision(BaseModel):
+    """Structured swing trading decision produced by the Swing Trader node.
+
+    The Swing Trader reads analyst reports and research plan, then produces
+    a short-term trade setup with numeric entry/stop/target levels, conviction,
+    and a declared holding period. Output is structured to enable precise
+    memory scoring and pattern analysis.
+
+    Validators enforce:
+    - entry_price, stop_loss, take_profit are required (non-None) when action != HOLD
+    - holding_period_days is capped at swing_trader_max_holding_days at call site
+    """
+
+    action: SwingAction = Field(
+        description="The swing trade direction. Exactly one of Buy / Hold / Sell.",
+    )
+    conviction: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the decision, 0.0–1.0. Required field.",
+    )
+    holding_period_days: int = Field(
+        ge=1,
+        description="Intended holding period in trading days (1–15, validated at call site).",
+    )
+    entry_price: float | None = Field(
+        default=None,
+        description="Entry price in the instrument's quote currency. Required for Buy/Sell.",
+    )
+    stop_loss: float | None = Field(
+        default=None,
+        description="Stop-loss price in the instrument's quote currency. Required for Buy/Sell.",
+    )
+    take_profit: float | None = Field(
+        default=None,
+        description="Take-profit target price. Required for Buy/Sell.",
+    )
+    exit_conditions: str = Field(
+        description=(
+            "Price-based, time-based, and thesis-invalidation exit rules in one place. "
+            "For HOLD decisions, state which constraint blocked entry (regime gate or R/R)."
+        ),
+    )
+    setup_type: str = Field(
+        description='Playbook branch: "pullback" (trend-following), "catalyst" (news-driven), or "none" (no setup).',
+    )
+    key_drivers: list[str] = Field(
+        description=(
+            "1–5 source-tagged short statements (e.g. ['RSI oversold near 20-day low [market]', "
+            "'Earnings beat expected to drive drift [catalyst]']). Tags: market, sentiment, news, fundamentals, or web:N."
+        ),
+    )
+    thesis: str = Field(
+        description="2–4 sentence narrative covering entry thesis, time horizon, and key risks.",
+    )
+
+    @field_validator("entry_price", "stop_loss", "take_profit", mode="after")
+    @classmethod
+    def validate_prices(cls, v):
+        """Validate that prices are non-negative."""
+        if v is not None and v < 0:
+            raise ValueError("Price fields must be non-negative")
+        return v
+
+    @model_validator(mode="after")
+    def validate_required_fields_for_action(self):
+        """Validator: entry_price, stop_loss, take_profit required when action != HOLD."""
+        if self.action != SwingAction.HOLD:
+            if self.entry_price is None:
+                raise ValueError("entry_price is required for Buy/Sell actions")
+            if self.stop_loss is None:
+                raise ValueError("stop_loss is required for Buy/Sell actions")
+            if self.take_profit is None:
+                raise ValueError("take_profit is required for Buy/Sell actions")
+        return self
+
+
+def render_swing_decision(decision: SwingDecision) -> str:
+    """Render a SwingDecision back to the markdown shape the rest of the system expects.
+
+    Memory log, CLI display, and saved report files all read this markdown,
+    so the rendered output preserves the exact section headers that downstream
+    parsers and the report writers already handle.
+    """
+    parts = [
+        f"**Action**: {decision.action.value}",
+        "",
+        f"**Conviction**: {decision.conviction:.2f}",
+        "",
+        f"**Setup Type**: {decision.setup_type}",
+        "",
+        f"**Holding Period**: {decision.holding_period_days} trading days",
+    ]
+
+    if decision.action != SwingAction.HOLD:
+        parts.extend([
+            "",
+            f"**Entry Price**: {decision.entry_price}",
+            "",
+            f"**Stop Loss**: {decision.stop_loss}",
+            "",
+            f"**Take Profit**: {decision.take_profit}",
+        ])
+
+    parts.extend([
+        "",
+        f"**Exit Conditions**: {decision.exit_conditions}",
+        "",
+        "**Key Drivers**:",
+    ])
+
+    for driver in decision.key_drivers:
+        parts.append(f"- {driver}")
+
+    parts.extend([
+        "",
+        f"**Thesis**: {decision.thesis}",
+    ])
 
     return "\n".join(parts)
 
