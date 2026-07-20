@@ -41,6 +41,27 @@ analyst reports and live web search evidence. Two alternative modes are availabl
 - **`research_stage=none`**: Skipping the research stage entirely, sending
   analyst reports directly to the trader. Set via `TRADINGAGENTS_RESEARCH_STAGE=none`.
 
+### Swing Trader (optional)
+
+The swing trader is an optional stage that makes regime-gated short-term (3–15 trading day) swing
+trade decisions with numeric entry/stop/target levels. It runs after the portfolio manager when enabled:
+
+- **Enable with:** `TRADINGAGENTS_SWING_TRADER_ENABLED=true`
+- **Config keys:**
+  - `swing_trader_min_risk_reward` (default 1.5): minimum reward-to-risk ratio
+  - `swing_trader_max_holding_days` (default 15): hard cap on holding period
+  - `swing_trader_conviction_threshold` (default 0.55): minimum conviction to force action
+
+Example:
+
+```bash
+TRADINGAGENTS_SWING_TRADER_ENABLED=true ./venv/bin/python run_trading_agents.py stocks.json --show-summary
+```
+
+When enabled, the swing trader outputs appear in the CLI report under "Swing Trader Decision" and in
+the full-state JSON log. Decisions are stored in the SQLite memory core under agent key `"swing_trader"`
+for pattern analysis and reflection.
+
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:
 
 ```bash

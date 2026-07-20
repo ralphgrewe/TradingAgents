@@ -21,6 +21,7 @@ class Propagator:
         trade_date: str,
         asset_type: str = "stock",
         past_context: str = "",
+        swing_past_context: str = "",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph."""
         return {
@@ -60,6 +61,9 @@ class Propagator:
             "investment_plan": "",
             "researcher_evidence": "",
             "trader_investment_plan": "",
+            "swing_past_context": swing_past_context,
+            "swing_trade_decision": "",
+            "swing_structured_data": None,
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:

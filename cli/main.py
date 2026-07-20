@@ -85,6 +85,7 @@ class MessageBuffer:
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
+        "swing_trade_decision": (None, "Swing Trader"),
         "final_trade_decision": (None, "Portfolio Manager"),
     }
 
@@ -193,6 +194,7 @@ class MessageBuffer:
                 "fundamentals_report": "Fundamentals Analysis",
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
+                "swing_trade_decision": "Swing Trader Decision",
                 "final_trade_decision": "Portfolio Management Decision",
             }
             self.current_report = (
@@ -235,6 +237,11 @@ class MessageBuffer:
         if self.report_sections.get("trader_investment_plan"):
             report_parts.append("## Trading Team Plan")
             report_parts.append(f"{self.report_sections['trader_investment_plan']}")
+
+        # Swing Trader Decision
+        if self.report_sections.get("swing_trade_decision"):
+            report_parts.append("## Swing Trader Decision")
+            report_parts.append(f"{self.report_sections['swing_trade_decision']}")
 
         # Portfolio Management Decision
         if self.report_sections.get("final_trade_decision"):

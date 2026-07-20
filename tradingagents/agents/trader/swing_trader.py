@@ -221,10 +221,15 @@ def create_swing_trader(llm):
                     structured_result.holding_period_days = max_holding
 
                 swing_decision = render_swing_decision(structured_result)
+                # Extend structured data with precompute regime and gate info (not part of schema)
+                structured_data = structured_result.dict()
+                regime_gate = precompute.get("regime_gate", {})
+                structured_data["regime"] = regime_gate.get("regime", "unknown")
+                structured_data["hold_bias"] = regime_gate.get("hold_bias", False)
                 return {
                     "messages": [AIMessage(content=swing_decision)],
                     "swing_trade_decision": swing_decision,
-                    "swing_structured_data": structured_result.dict(),
+                    "swing_structured_data": structured_data,
                     "sender": name,
                 }
             except Exception:

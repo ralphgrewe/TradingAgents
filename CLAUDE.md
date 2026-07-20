@@ -58,23 +58,26 @@ values for every provider's API-key env var, and `mock_llm_client` patches
 
 ## Architecture: the LangGraph pipeline
 
-Five sequential stages, defined in `tradingagents/graph/setup.py` and gated by
+Six sequential stages (five core + one optional), defined in `tradingagents/graph/setup.py` and gated by
 `tradingagents/graph/conditional_logic.py`. The research stage (II) can be configured via
-`research_stage` config key (env var `TRADINGAGENTS_RESEARCH_STAGE`):
+`research_stage` config key (env var `TRADINGAGENTS_RESEARCH_STAGE`). The swing trader (VI) is
+optional and controlled via `swing_trader_enabled` config key (env var `TRADINGAGENTS_SWING_TRADER_ENABLED`):
 
 ```
-I.   ANALYST TEAM   → selected analysts run in sequence (default: market → social → news →
+I.   ANALYST TEAM    → selected analysts run in sequence (default: market → social → news →
                        fundamentals), each loops with its own tools until it writes one report
-II.  RESEARCH STAGE → configured by research_stage:
+II.  RESEARCH STAGE  → configured by research_stage:
      - "researcher" (default): single Researcher node synthesizes analyst reports + live web search
        evidence (when trade_date == today, via Tavily API; historical dates degrade to
        synthesis-only with metadata "disabled (historical date)")
      - "debate": Bull vs Bear debate (alternating, `max_debate_rounds`) → Research Manager
        writes a structured verdict (`investment_plan`)
      - "none": skip research entirely, send analyst reports directly to trader
-III. TRADER         → turns the research plan into a concrete trade proposal
+III. TRADER          → turns the research plan into a concrete trade proposal
 IV.  RISK TEAM       → Aggressive → Conservative → Neutral debate (`max_risk_discuss_rounds`)
 V.   PORTFOLIO MGR   → writes the final decision (`final_trade_decision`)
+VI.  SWING TRADER    → (optional, when `swing_trader_enabled=True`) makes regime-gated short-term
+                       (3–15 day) swing trade decisions with numeric entry/stop/target levels
 ```
 
 ### Research stage modes in detail
@@ -209,6 +212,23 @@ reads from.
 - **`data_vendors["web_search"]`** (config key, default `"tavily"`): which vendor to use for web
   search. Currently only "tavily" is implemented, and it requires `TAVILY_API_KEY` to be set
   in the environment.
+
+### Swing Trader configuration
+
+- **`swing_trader_enabled`** (env: `TRADINGAGENTS_SWING_TRADER_ENABLED`, default `False`): enable/disable
+  the optional swing trader node (runs after Portfolio Manager if enabled). When enabled, the swing trader
+  makes regime-gated short-term (3–15 trading day) swing trade decisions with numeric entry/stop/target
+  levels and outputs `swing_trade_decision` (rendered markdown) and `swing_structured_data` (parsed
+  `SwingDecision` dict or None on fallback).
+- **`swing_trader_min_risk_reward`** (env: `TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD`, default `1.5`):
+  minimum reward-to-risk ratio required for a non-HOLD swing decision.
+- **`swing_trader_max_holding_days`** (env: `TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS`, default `15`):
+  hard cap on holding period in trading days (validator clamps declared holding_period_days to this max).
+- **`swing_trader_conviction_threshold`** (env: `TRADINGAGENTS_SWING_TRADER_CONVICTION_THRESHOLD`, default
+  `0.55`): minimum conviction score (0.0–1.0) required to force action (BUY/SELL) instead of HOLD.
+- Memory stored under agent key `"swing_trader"` (via the SQLite core + MCP server). Past context is
+  injected at run start when `swing_trader_enabled=True`; decisions are stored with `horizon_days`
+  set to `holding_period_days` for later analysis and reflection.
 
 ### Accessing configuration in code
 
