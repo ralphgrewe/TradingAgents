@@ -20,6 +20,15 @@ produced (hand-written, LLM-drafted, read from disk, ...).
 ``validate_article_file`` is a thin convenience wrapper that does the one bit
 of I/O (reading the file) and delegates everything else to
 ``validate_article``.
+
+``parse_article`` factors out just the frontmatter/body split (no schema
+checks) so other consumers that need the *parsed* frontmatter dict + body
+text -- not just a pass/fail verdict -- can reuse the same frontmatter
+parsing this module already has, instead of re-implementing the ``---``
+fence + ``yaml.safe_load`` dance. The BM25 retrieval dataflow (issue #103,
+``tradingagents/dataflows/wiki_search.py``) is the first such consumer:
+it validates with ``validate_article`` first (to skip malformed articles)
+then calls ``parse_article`` on the same text to get the fields it indexes.
 """
 
 from __future__ import annotations
@@ -77,6 +86,46 @@ class ValidationResult:
         return self.ok
 
 
+def parse_article(text: str) -> tuple[dict, str]:
+    """Split raw article text into its parsed frontmatter dict and body text.
+
+    This is the frontmatter-parsing half of :func:`validate_article`, factored
+    out so callers that need the parsed data (not just a valid/invalid verdict)
+    can reuse it without duplicating the ``---`` fence + ``yaml.safe_load``
+    logic.
+
+    Args:
+        text: the full raw text of an article file.
+
+    Returns:
+        A ``(frontmatter, body)`` tuple: ``frontmatter`` is the parsed YAML
+        mapping (``{}`` if the frontmatter block is empty), ``body`` is
+        everything after the closing ``---`` fence.
+
+    Raises:
+        ValueError: the frontmatter block is missing, is not valid YAML, or
+            does not parse to a mapping. Callers that want a non-raising,
+            accumulated-errors report should use :func:`validate_article`
+            instead.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        raise ValueError("missing YAML frontmatter block (--- ... ---)")
+
+    try:
+        frontmatter = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"frontmatter is not valid YAML: {exc}") from exc
+
+    if frontmatter is None:
+        frontmatter = {}
+    if not isinstance(frontmatter, dict):
+        raise ValueError("frontmatter must be a YAML mapping")
+
+    body = text[match.end() :]
+    return frontmatter, body
+
+
 def validate_article(text: str) -> ValidationResult:
     """Validate one article's raw markdown text against the LLM-wiki schema.
 
@@ -99,19 +148,10 @@ def validate_article(text: str) -> ValidationResult:
     """
     errors: list[str] = []
 
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        return ValidationResult(False, ["missing YAML frontmatter block (--- ... ---)"])
-
     try:
-        frontmatter = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
-        return ValidationResult(False, [f"frontmatter is not valid YAML: {exc}"])
-
-    if frontmatter is None:
-        frontmatter = {}
-    if not isinstance(frontmatter, dict):
-        return ValidationResult(False, ["frontmatter must be a YAML mapping"])
+        frontmatter, body = parse_article(text)
+    except ValueError as exc:
+        return ValidationResult(False, [str(exc)])
 
     for key in REQUIRED_FRONTMATTER_KEYS:
         if key not in frontmatter:
@@ -135,7 +175,6 @@ def validate_article(text: str) -> ValidationResult:
                 if source_key not in source:
                     errors.append(f"missing frontmatter 'source' key: {source_key!r}")
 
-    body = text[match.end() :]
     for section in REQUIRED_SECTIONS:
         if not re.search(rf"^{re.escape(section)}\s*$", body, re.MULTILINE):
             errors.append(f"missing body section: {section!r}")

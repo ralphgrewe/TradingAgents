@@ -20,6 +20,7 @@ from .errors import (
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .tavily_search import get_web_search_results
+from .wiki_search import search_wiki as search_wiki_bm25
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -83,6 +84,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_web_search_results",
         ]
+    },
+    "knowledge_base": {
+        "description": "LLM-wiki strategy knowledge base retrieval (keyword/BM25 search)",
+        "tools": [
+            "search_wiki",
+        ]
     }
 }
 
@@ -92,6 +99,7 @@ VENDOR_LIST = [
     "polymarket",
     "alpha_vantage",
     "tavily",
+    "bm25",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -101,7 +109,9 @@ VENDOR_LIST = [
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
 # web_search is likewise optional: a missing TAVILY_API_KEY or an HTTP failure
 # must degrade to "search unavailable" rather than aborting the run (issue #83).
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "web_search"}
+# knowledge_base (the LLM-wiki BM25 retrieval, issue #103) is read-mostly
+# reference lookup, not core decision data, so it degrades the same way.
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "web_search", "knowledge_base"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -159,6 +169,10 @@ VENDOR_METHODS = {
     # web_search
     "get_web_search_results": {
         "tavily": get_web_search_results,
+    },
+    # knowledge_base
+    "search_wiki": {
+        "bm25": search_wiki_bm25,
     },
 }
 

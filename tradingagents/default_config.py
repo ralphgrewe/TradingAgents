@@ -30,6 +30,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD": "swing_trader_min_risk_reward",
     "TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS": "swing_trader_max_holding_days",
     "TRADINGAGENTS_SWING_TRADER_CONVICTION_THRESHOLD": "swing_trader_conviction_threshold",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED": "knowledge_base_enabled",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_DIR":     "knowledge_base_dir",
+    "TRADINGAGENTS_KNOWLEDGE_INGEST_DIR":   "knowledge_ingest_dir",
 }
 
 
@@ -104,6 +107,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "swing_trader_min_risk_reward": 1.5,   # Minimum reward:risk for non-HOLD decisions
     "swing_trader_max_holding_days": 15,   # Hard cap on holding period (trading days)
     "swing_trader_conviction_threshold": 0.55, # Minimum conviction to force action
+    # LLM-wiki strategy knowledge base (issue #100/#103): BM25 keyword retrieval
+    # over knowledge/wiki/*.md articles, consulted by the portfolio manager and
+    # swing trader via the search_wiki tool.
+    "knowledge_base_enabled": True,       # Enable/disable knowledge-base retrieval
+    "knowledge_base_dir": "knowledge/wiki", # Article directory (relative to cwd)
+    "knowledge_ingest_dir": "paper",      # Default folder the ingestion pipeline scans (#102)
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -134,6 +143,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
         "web_search": "tavily",              # Options: tavily (needs TAVILY_API_KEY)
+        "knowledge_base": "bm25",            # Options: bm25 (keyless, local)
     },
     # Perplexity-specific configuration
     "perplexity_model": "sonar-pro",
