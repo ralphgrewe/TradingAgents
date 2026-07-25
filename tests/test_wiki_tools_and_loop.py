@@ -584,6 +584,86 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         mock_structured_llm.invoke.assert_called_once_with(trace)
         mock_llm.invoke.assert_called_once_with(trace)
 
+    def test_double_failure_propagates_instead_of_silent_double_none(self):
+        """Fix #5: when the structured call fails AND the free-text fallback
+        call also raises (e.g. a provider outage hitting both calls in the same
+        turn), the fallback exception must propagate. Swallowing it would
+        return (None, None, trace) -- no usable output and no way for the
+        caller to tell a dead provider apart from a silent model."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+
+        final_response = AIMessage(content="Final response")
+        final_response.tool_calls = []
+
+        mock_llm_with_tools = MagicMock()
+        mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        # Both the structured call and the plain free-text fallback are down.
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke = MagicMock(side_effect=Exception("provider 503"))
+        outage = RuntimeError("provider 503 on fallback too")
+        mock_llm.invoke = MagicMock(side_effect=outage)
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured",
+            return_value=mock_structured_llm,
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            with (
+                self.assertLogs("tradingagents.agents.utils.structured", level="WARNING"),
+                self.assertRaises(RuntimeError) as caught,
+            ):
+                run_structured_with_tools(
+                    mock_llm,
+                    initial_messages,
+                    [mock_tool],
+                    MockDecision,
+                    max_rounds=2,
+                    agent_name="TestAgent",
+                )
+
+        # The caller sees the real provider exception, not a silent None/None.
+        self.assertIs(caught.exception, outage)
+        # And the fallback was genuinely attempted before giving up.
+        mock_llm.invoke.assert_called_once()
+
+    def test_double_failure_propagates_when_structured_unsupported(self):
+        """Fix #5, other entry path: structured output unsupported (bind returns
+        None) and the free-text fallback raises -- still propagates rather than
+        returning (None, None, trace)."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+
+        final_response = AIMessage(content="Final response")
+        final_response.tool_calls = []
+
+        mock_llm_with_tools = MagicMock()
+        mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        outage = RuntimeError("provider unreachable")
+        mock_llm.invoke = MagicMock(side_effect=outage)
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured", return_value=None
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            with self.assertRaises(RuntimeError) as caught:
+                run_structured_with_tools(
+                    mock_llm,
+                    initial_messages,
+                    [mock_tool],
+                    MockDecision,
+                    max_rounds=2,
+                    agent_name="TestAgent",
+                )
+
+        self.assertIs(caught.exception, outage)
+
     def test_zero_arg_tool_call_invoked_with_empty_dict(self):
         """Fix #4: a real zero-arg tool call has args={}, which is falsy in
         Python but must still be used as-is rather than misrouted to the

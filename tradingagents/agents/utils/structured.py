@@ -100,8 +100,19 @@ def run_structured_with_tools(
     Preserves the same structured-then-fallback contract as
     ``invoke_structured_or_freetext``: the final step is *always* attempted
     (structured output if supported, otherwise/on-failure a plain free-text
-    ``llm.invoke``), so the caller is guaranteed usable output rather than
-    having to reimplement the free-text fallback itself.
+    ``llm.invoke``), so the caller does not have to reimplement the free-text
+    fallback itself.
+
+    Contract, stated precisely: **if this function returns, exactly one of
+    ``structured_result`` / ``fallback_text`` is non-``None``.** There is no
+    return path that yields both as ``None``, so callers may branch on
+    ``structured_result is None`` and use ``fallback_text`` unconditionally.
+    The price of that guarantee is that a true double failure — the structured
+    call fails (or is unsupported) *and* the free-text fallback call also
+    raises, e.g. a provider outage hitting both calls — propagates the
+    fallback's exception uncaught, exactly as ``invoke_structured_or_freetext``
+    does. A hard provider failure is surfaced as a real exception rather than
+    being swallowed into a silent, signal-free "no output" return.
 
     Args:
         llm: The LLM instance (will be wrapped with tools and structured output).
@@ -117,11 +128,22 @@ def run_structured_with_tools(
         - structured_result: Parsed Pydantic instance, or None if structured output
                             failed or is unsupported.
         - fallback_text: Free-text content from a plain ``llm.invoke`` on the final
-                        message trace, populated only when ``structured_result`` is
-                        None (mirrors ``invoke_structured_or_freetext``'s fallback).
+                        message trace, always populated (never None) when
+                        ``structured_result`` is None (mirrors
+                        ``invoke_structured_or_freetext``'s fallback).
                         None when the structured call succeeded.
         - message_trace: The full message history including tool calls and results,
                         useful for prompt logging (e.g., via record_agent_prompt).
+
+    Raises:
+        Exception: Whatever the free-text fallback ``llm.invoke`` raises, when the
+            structured path already failed or was unsupported. This is the single
+            documented failure mode, and it replaces what would otherwise be a
+            silent ``(None, None, trace)`` return carrying no usable output and no
+            signal that the provider actually failed. Failures *inside* the tool
+            loop (a tool-call round raising, or an individual tool raising) are
+            still caught and logged, because the final call can — and does — still
+            recover from them.
 
     Example:
         >>> result, fallback_text, trace = run_structured_with_tools(
@@ -251,13 +273,17 @@ def run_structured_with_tools(
         # (never a stale mid-loop trace) so it reflects everything the tool
         # loop learned, including a trailing ToolMessage if max_rounds was
         # exhausted while tools were still being requested.
-        try:
-            fallback_response = llm.invoke(message_trace)
-            fallback_text = fallback_response.content
-        except Exception as exc:
-            logger.warning(
-                "%s: free-text fallback invocation failed after tool loop (%s)",
-                agent_name, exc,
-            )
+        #
+        # Deliberately NOT wrapped in try/except. If this call also raises, the
+        # structured path *and* the fallback path have both failed -- there is no
+        # usable output left to return, and swallowing the exception here would
+        # hand the caller a silent (None, None, trace) that is indistinguishable
+        # from "the provider was fine, it just said nothing". Letting it
+        # propagate matches invoke_structured_or_freetext, matches how the
+        # graph nodes treat a dead provider elsewhere (abort, don't guess), and
+        # keeps the documented invariant that exactly one of structured_result /
+        # fallback_text is non-None on every return.
+        fallback_response = llm.invoke(message_trace)
+        fallback_text = fallback_response.content
 
     return structured_result, fallback_text, message_trace
