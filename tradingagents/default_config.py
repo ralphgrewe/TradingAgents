@@ -34,6 +34,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_KNOWLEDGE_BASE_DIR":     "knowledge_base_dir",
     "TRADINGAGENTS_KNOWLEDGE_INGEST_DIR":   "knowledge_ingest_dir",
     "TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS": "knowledge_base_tool_max_rounds",
+    "TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE": "data_vendors.knowledge_base",
 }
 
 
@@ -51,13 +52,45 @@ def _coerce(value: str, reference):
     return value
 
 
+def _get_nested(d, keys):
+    """Get a nested value from a dict using a list of keys (separated by dot in key_path)."""
+    current = d
+    for k in keys:
+        if isinstance(current, dict):
+            current = current.get(k)
+        else:
+            return None
+    return current
+
+
+def _set_nested(d, keys, value):
+    """Set a nested value in a dict using a list of keys, creating intermediate dicts as needed."""
+    current = d
+    for k in keys[:-1]:
+        if k not in current:
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
+
+
 def _apply_env_overrides(config: dict) -> dict:
-    """Apply TRADINGAGENTS_* env vars to the config dict in-place."""
-    for env_var, key in _ENV_OVERRIDES.items():
+    """Apply TRADINGAGENTS_* env vars to the config dict in-place.
+
+    Supports both top-level keys and nested keys using dot notation (e.g., "data_vendors.knowledge_base").
+    """
+    for env_var, key_path in _ENV_OVERRIDES.items():
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
             continue
-        config[key] = _coerce(raw, config.get(key))
+
+        # Handle nested keys using dot notation (e.g., "data_vendors.knowledge_base")
+        if "." in key_path:
+            keys = key_path.split(".")
+            reference = _get_nested(config, keys)
+            _set_nested(config, keys, _coerce(raw, reference))
+        else:
+            # Top-level key
+            config[key_path] = _coerce(raw, config.get(key_path))
     return config
 
 

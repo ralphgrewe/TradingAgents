@@ -167,6 +167,25 @@ change to `dataflows/wiki_search.py`, the article schema, or the vendor seam.
 Analyst nodes already run tool loops, so wiring the wiki tool into an analyst is
 even simpler than the PM/swing conversion this design requires.
 
+### Wiring the wiki tool into other agents
+
+For **single-shot structured-output nodes** (e.g., Trader, Researchers):
+1. Import `run_structured_with_tools` from `tradingagents/agents/utils/structured.py`
+2. Import `search_strategy_wiki` from `tradingagents/agents/utils/wiki_tools.py`
+3. Gate tool availability on `knowledge_base_enabled` config key (read via `get_config()`)
+4. Replace direct `structured_llm.invoke(prompt)` calls with `run_structured_with_tools(llm, messages, [search_strategy_wiki], StructuredOutputClass, max_rounds=config["knowledge_base_tool_max_rounds"])`
+5. The helper returns `(structured_result, fallback_text, message_trace)` — exactly one of the first two is non-None; if both are None, a double failure (structured call failed AND free-text fallback also raised) propagates uncaught, matching the codebase's "abort, don't guess" convention (see issue #53 for the memory MCP hard-dependency precedent)
+
+For **analyst-style tool-loop nodes** (already loop-native):
+1. Add `search_strategy_wiki` to the tools list (gate on `knowledge_base_enabled`)
+2. No loop helper needed; the existing analyst tool-loop pattern in `tradingagents/agents/analysts/news_analyst.py` already handles it
+
+### Skills and future integrations
+
+The `skills/` standalone agent reimplementation (see CLAUDE.md "What this is") will consume the same wiki retrieval tools via MCP tool registration to Claude Desktop/Code once that work resumes. Wiki searches will route through the same `tradingagents/dataflows/interface.py` vendor seam, keeping a vector backend a pure config/vendor swap (no caller changes).
+
+The `record_agent_prompt`-based prompt logging of wiki tool interactions (e.g., in issue #105/#106 branch work) is not yet part of the `main` branch — that integration point exists as a known follow-up once the `feat/pdf-report-95` branch merges.
+
 ## Configuration
 
 Following the existing `default_config.py` / `data_vendors` / `tool_vendors`

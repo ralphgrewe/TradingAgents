@@ -230,6 +230,33 @@ reads from.
   injected at run start when `swing_trader_enabled=True`; decisions are stored with `horizon_days`
   set to `holding_period_days` for later analysis and reflection.
 
+### LLM-wiki knowledge base configuration
+
+- **`knowledge_base_enabled`** (env: `TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED`, default `True`):
+  enable/disable the strategy knowledge base. When enabled, the portfolio manager and swing trader
+  can consult the wiki via the `search_strategy_wiki` tool to ground decisions in established
+  trading principles and regime-specific approaches.
+- **`knowledge_base_dir`** (env: `TRADINGAGENTS_KNOWLEDGE_BASE_DIR`, default `"knowledge/wiki"`):
+  directory where the strategy knowledge base articles live (relative to cwd). Each article is a
+  markdown file with YAML frontmatter (keys: `id`, `title`, `tags`, `signals`, `asset_classes`,
+  `horizon`, `source`) and six required body sections (Summary, Signal definition, Computation,
+  Empirical evidence, When to apply/regime, Caveats).
+- **`knowledge_ingest_dir`** (env: `TRADINGAGENTS_KNOWLEDGE_INGEST_DIR`, default `"paper"`):
+  default folder the ingestion pipeline scans for new source documents (PDFs) to convert into
+  wiki articles. Set via `scripts/ingest_wiki.py --ingest-dir <path>`.
+- **`data_vendors["knowledge_base"]`** (env: `TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE`, default
+  `"bm25"`): which vendor implements keyword/BM25 retrieval over the wiki. Currently only "bm25"
+  is implemented (deterministic, offline, no API keys required); the vendor seam is reserved for
+  future vector-embedding backends.
+- **`knowledge_base_tool_max_rounds`** (env: `TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS`,
+  default `2`): maximum number of tool-calling loop rounds for the wiki search tool (gating PM
+  and swing trader tool calls to keep runs deterministic and cost-bounded).
+
+The corpus and retrieval are designed to support **on-demand, query-scoped wiki lookups** rather
+than automatic prompt injection. See `docs/design/llm-wiki.md` for the design rationale, article
+schema, ingestion pipeline, and extensibility guidance for wiring the wiki into other agents
+(trader, researchers, risk team).
+
 ### Accessing configuration in code
 
 Inside agents and tools, call `get_config()` from `tradingagents.dataflows.config` to read the
