@@ -1003,3 +1003,243 @@ class TestSwingTraderNode:
 
         user_content = captured["prompt"][1]["content"]
         assert "avoid non-catalyst setups" in user_content
+
+
+# ── Knowledge base (wiki tools) integration tests ───────────────────────────
+
+
+class TestSwingTraderWithWikiTools:
+    """Tests for knowledge_base_enabled gating and run_structured_with_tools integration."""
+
+    def test_knowledge_base_enabled_invokes_run_structured_with_tools(self):
+        """When knowledge_base_enabled=True, the swing trader uses run_structured_with_tools
+        with [search_strategy_wiki] and max_rounds from config."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.BUY,
+            conviction=0.75,
+            holding_period_days=5,
+            entry_price=150.0,
+            stop_loss=145.0,
+            take_profit=165.0,
+            exit_conditions="Time stop after 5 days",
+            setup_type="pullback",
+            key_drivers=["RSI oversold [market]"],
+            thesis="Pullback entry in uptrend.",
+        )
+
+        # Mock run_structured_with_tools to capture its invocation
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (proposal, None, [])
+
+            set_config({"knowledge_base_enabled": True, "knowledge_base_tool_max_rounds": 3})
+
+            llm = MagicMock()
+            llm.with_structured_output.return_value = MagicMock()
+            node = create_swing_trader(llm)
+            result = node(_make_swing_state())
+
+        # Assert run_structured_with_tools was called with correct parameters
+        mock_run_tools.assert_called_once()
+        call_args = mock_run_tools.call_args
+        assert call_args[0][0] is llm  # llm passed
+        assert call_args[0][2][0].name == "search_strategy_wiki"  # tools list
+        assert call_args[0][3] is SwingDecision  # response_model
+        assert call_args[1]["max_rounds"] == 3  # max_rounds from config
+        assert call_args[1]["agent_name"] == "Swing Trader"
+
+        # Assert the result has structured data and correct rendering
+        assert result["swing_structured_data"]["holding_period_days"] == 5
+        assert "**Action**: Buy" in result["swing_trade_decision"]
+
+    def test_knowledge_base_disabled_uses_direct_structured_call(self):
+        """When knowledge_base_enabled=False, the swing trader calls structured_llm.invoke
+        directly, same as the pre-#106 behavior."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.BUY,
+            conviction=0.75,
+            holding_period_days=5,
+            entry_price=150.0,
+            stop_loss=145.0,
+            take_profit=165.0,
+            exit_conditions="Time stop after 5 days",
+            setup_type="pullback",
+            key_drivers=["RSI oversold [market]"],
+            thesis="Pullback entry in uptrend.",
+        )
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            set_config({"knowledge_base_enabled": False})
+
+            structured = MagicMock()
+            structured.invoke.return_value = proposal
+            llm = MagicMock()
+            llm.with_structured_output.return_value = structured
+
+            node = create_swing_trader(llm)
+            result = node(_make_swing_state())
+
+        # run_structured_with_tools should not be called at all
+        mock_run_tools.assert_not_called()
+
+        # Direct structured call should have happened instead
+        structured.invoke.assert_called_once()
+
+        # Result should still have structured data and correct rendering
+        assert result["swing_structured_data"]["holding_period_days"] == 5
+        assert "**Action**: Buy" in result["swing_trade_decision"]
+
+    def test_knowledge_base_enabled_with_tool_call_then_structured_result(self):
+        """When knowledge base is enabled and run_structured_with_tools executes a tool
+        call and then returns a structured decision, the swing trader renders the decision
+        correctly with all expected fields."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.SELL,
+            conviction=0.65,
+            holding_period_days=4,
+            entry_price=150.0,
+            stop_loss=155.0,
+            take_profit=138.0,
+            exit_conditions="Time stop",
+            setup_type="catalyst",
+            key_drivers=["Earnings miss expected [news]"],
+            thesis="Short the drift.",
+        )
+
+        # Simulate a message trace that run_structured_with_tools would return
+        # (we don't need to construct actual tool_call messages; we just verify
+        # the swing trader handles the returned proposal correctly)
+        mock_trace = []
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (proposal, None, mock_trace)
+
+            set_config({"knowledge_base_enabled": True})
+
+            llm = MagicMock()
+            llm.with_structured_output.return_value = MagicMock()
+            node = create_swing_trader(llm)
+            result = node(_make_swing_state())
+
+        # Verify result structure
+        assert "swing_structured_data" in result
+        assert result["swing_structured_data"]["setup_type"] == "catalyst"
+        assert "**Action**: Sell" in result["swing_trade_decision"]
+        assert result["sender"] == "Swing Trader"
+        # Verify that rendering worked correctly
+        assert "**Conviction**: 0.65" in result["swing_trade_decision"]
+        assert "**Holding Period**: 4 trading days" in result["swing_trade_decision"]
+
+    def test_knowledge_base_enabled_with_fallback_text(self):
+        """When run_structured_with_tools returns fallback_text (structured path failed),
+        the swing trader uses the fallback and does not include swing_structured_data."""
+        from tradingagents.dataflows.config import set_config
+
+        fallback_decision = "**Action**: Hold\n\nNo qualifying setup today."
+        mock_trace = [{"role": "system"}, {"role": "user"}]
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (None, fallback_decision, mock_trace)
+
+            set_config({"knowledge_base_enabled": True})
+
+            llm = MagicMock()
+            llm.with_structured_output.return_value = MagicMock()
+            node = create_swing_trader(llm)
+            result = node(_make_swing_state())
+
+        # Fallback path should be used
+        assert result["swing_trade_decision"] == fallback_decision
+        assert "swing_structured_data" not in result
+        assert result["sender"] == "Swing Trader"
+
+    def test_holding_period_clamped_with_knowledge_base_enabled(self):
+        """Even when knowledge base is enabled and run_structured_with_tools is used,
+        holding_period_days must still be clamped at the call site."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.BUY,
+            conviction=0.8,
+            holding_period_days=30,  # exceeds default max of 15
+            entry_price=150.0,
+            stop_loss=145.0,
+            take_profit=165.0,
+            exit_conditions="Time stop",
+            setup_type="pullback",
+            key_drivers=["RSI oversold [market]"],
+            thesis="Pullback in uptrend.",
+        )
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (proposal, None, [])
+
+            set_config({"knowledge_base_enabled": True, "swing_trader_max_holding_days": 15})
+
+            llm = MagicMock()
+            llm.with_structured_output.return_value = MagicMock()
+            node = create_swing_trader(llm)
+            result = node(_make_swing_state())
+
+        # Verify clamping occurred
+        assert result["swing_structured_data"]["holding_period_days"] == 15
+        assert "**Holding Period**: 15 trading days" in result["swing_trade_decision"]
+
+    def test_regime_and_hold_bias_injected_with_knowledge_base(self):
+        """When run_structured_with_tools returns a structured result, the regime
+        and hold_bias from precompute are still injected into swing_structured_data."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.HOLD,
+            conviction=0.50,
+            holding_period_days=1,
+            exit_conditions="Regime blocks entry",
+            setup_type="none",
+            key_drivers=["Volatile regime [market]"],
+            thesis="No setup today.",
+        )
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (proposal, None, [])
+
+            with patch(
+                "tradingagents.agents.trader.swing_trader.assemble_swing_precompute",
+                return_value={
+                    **_mock_precompute(),
+                    "regime_gate": {
+                        "regime": "volatile",
+                        "hold_bias": True,
+                        "allow_pullback_long": False,
+                        "allow_pullback_short": False,
+                        "allow_catalyst": False,
+                    },
+                },
+            ):
+                set_config({"knowledge_base_enabled": True})
+
+                llm = MagicMock()
+                llm.with_structured_output.return_value = MagicMock()
+                node = create_swing_trader(llm)
+                result = node(_make_swing_state())
+
+        # Verify regime and hold_bias were injected
+        assert result["swing_structured_data"]["regime"] == "volatile"
+        assert result["swing_structured_data"]["hold_bias"] is True

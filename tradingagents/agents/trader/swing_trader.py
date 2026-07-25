@@ -16,7 +16,9 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
+    run_structured_with_tools,
 )
+from tradingagents.agents.utils.wiki_tools import search_strategy_wiki
 from tradingagents.dataflows.config import get_config
 
 from .swing_trader_computation import assemble_swing_precompute, resolve_benchmark_ticker
@@ -210,37 +212,58 @@ def create_swing_trader(llm):
         # Build prompt
         messages = _build_swing_prompt(state, precompute, config)
 
-        # Try structured output first
-        if structured_llm is not None:
-            try:
-                structured_result = structured_llm.invoke(messages)
+        # Determine whether to use knowledge base tools
+        knowledge_base_enabled = config.get("knowledge_base_enabled", True)
+        max_holding = config.get("swing_trader_max_holding_days", 15)
 
-                # Validate holding_period_days against config
-                max_holding = config.get("swing_trader_max_holding_days", 15)
-                if structured_result.holding_period_days > max_holding:
-                    structured_result.holding_period_days = max_holding
+        # Try structured output with or without knowledge base tools
+        if knowledge_base_enabled:
+            max_rounds = config.get("knowledge_base_tool_max_rounds", 2)
+            structured_result, fallback_text, message_trace = run_structured_with_tools(
+                llm, messages, [search_strategy_wiki], SwingDecision,
+                max_rounds=max_rounds,
+                agent_name="Swing Trader",
+            )
+        else:
+            # When knowledge base is disabled, use the original single-shot structured path
+            structured_result = None
+            fallback_text = None
+            message_trace = list(messages)
 
-                swing_decision = render_swing_decision(structured_result)
-                # Extend structured data with precompute regime and gate info (not part of schema)
-                structured_data = structured_result.dict()
-                regime_gate = precompute.get("regime_gate", {})
-                structured_data["regime"] = regime_gate.get("regime", "unknown")
-                structured_data["hold_bias"] = regime_gate.get("hold_bias", False)
-                return {
-                    "messages": [AIMessage(content=swing_decision)],
-                    "swing_trade_decision": swing_decision,
-                    "swing_structured_data": structured_data,
-                    "sender": name,
-                }
-            except Exception:
-                # Fall back to free-text generation
-                pass
+            if structured_llm is not None:
+                try:
+                    structured_result = structured_llm.invoke(messages)
+                    message_trace.append(structured_result)
+                except Exception:
+                    # Fall back to free-text generation
+                    pass
 
-        # Free-text fallback
-        swing_decision = llm.invoke(messages).content
+        # Process the structured result if available
+        if structured_result is not None:
+            # Validate holding_period_days against config
+            if structured_result.holding_period_days > max_holding:
+                structured_result.holding_period_days = max_holding
+
+            swing_decision = render_swing_decision(structured_result)
+            # Extend structured data with precompute regime and gate info (not part of schema)
+            structured_data = structured_result.dict()
+            regime_gate = precompute.get("regime_gate", {})
+            structured_data["regime"] = regime_gate.get("regime", "unknown")
+            structured_data["hold_bias"] = regime_gate.get("hold_bias", False)
+            return {
+                "messages": [AIMessage(content=swing_decision)],
+                "swing_trade_decision": swing_decision,
+                "swing_structured_data": structured_data,
+                "sender": name,
+            }
+
+        # Fallback path: use free-text generation (from run_structured_with_tools or direct fallback)
+        if fallback_text is None:
+            fallback_text = llm.invoke(message_trace).content
+
         return {
-            "messages": [AIMessage(content=swing_decision)],
-            "swing_trade_decision": swing_decision,
+            "messages": [AIMessage(content=fallback_text)],
+            "swing_trade_decision": fallback_text,
             "sender": name,
         }
 
