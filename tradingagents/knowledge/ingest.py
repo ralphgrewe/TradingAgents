@@ -12,7 +12,11 @@ Pipeline, per PDF:
 
 1. Skip if an existing article's ``source.file`` frontmatter already points
    at this PDF (idempotent, human-in-the-loop review — see module docstring
-   note below), unless ``force=True``.
+   note below), unless ``force=True``. The comparison is made on *normalized*
+   paths (:func:`normalize_source_path`) so a hand-edited article whose
+   ``source.file`` differs only cosmetically (``./paper/X.pdf``, a trailing
+   slash, a different case, an absolute path inside the repo) still counts
+   as covering the same source instead of silently spawning a duplicate.
 2. Extract text via ``pypdf`` (:func:`extract_pdf_text`).
 3. Ask the quick-thinking LLM to draft a full article matching the schema
    (:func:`draft_article`), reproducing the required section headings
@@ -21,9 +25,22 @@ Pipeline, per PDF:
 4. Force-correct the frontmatter ``id`` (kebab-case slug) and ``source.file``
    (always the real, repo-relative path to the PDF actually being read —
    never trust the LLM's own guess here, per the #101 design review note
-   that ``source.file`` is not path-checked by the validator).
+   that ``source.file`` is not path-checked by the validator). The
+   repo-relative path is derived by :func:`compute_source_relpath` from the
+   PDF's own location, so it stays correct for an ingest directory at any
+   depth (``paper/``, ``data/papers/``, ...).
 5. Validate the result with ``wiki_schema.validate_article`` before writing
    anything to disk.
+
+Every step above runs inside :func:`ingest_pdf`, which never raises: a
+corrupt PDF, a failed LLM call or a malformed drafted frontmatter is
+reported as an ``"error"`` :class:`IngestOutcome` for that one file, so a
+batch run keeps the outcomes it already collected and moves on to the next
+PDF instead of aborting.
+
+Frontmatter parsing is *not* re-implemented here: ``wiki_schema.parse_article``
+(extracted in #103 for exactly this purpose) is the single place that knows
+how an article's ``---`` fence + YAML block is split.
 
 Human-in-the-loop: this module never overwrites an existing article unless
 the caller explicitly passes ``force=True`` — generated articles are meant
@@ -33,16 +50,23 @@ silent re-run must not clobber that review work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import posixpath
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
 from tradingagents.dataflows.config import get_config
-from tradingagents.knowledge.wiki_schema import REQUIRED_SECTIONS, validate_article
+from tradingagents.knowledge.wiki_schema import (
+    REQUIRED_SECTIONS,
+    parse_article,
+    validate_article,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +83,33 @@ _NON_ARTICLE_FILENAMES = {"_TEMPLATE.md", "README.md"}
 # commit, not auto-trusted.
 _MAX_SOURCE_CHARS = 100_000
 
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _FENCE_RE = re.compile(r"\A```(?:markdown|md|yaml)?\s*\n(.*?)\n```\s*\Z", re.DOTALL)
 _SLUG_INVALID_RE = re.compile(r"[^a-z0-9]+")
+
+# Repo root, used to turn a PDF's location into the repo-relative path written
+# to ``source.file`` (and to normalize absolute paths found in existing
+# articles back to that same frame of reference). Derived from this file's
+# location -- ``tradingagents/knowledge/ingest.py`` -- rather than from the
+# working directory, so it is correct however the CLI is invoked.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
 class IngestOutcome:
-    """Result of attempting to ingest one source PDF."""
+    """Result of attempting to ingest one source PDF.
+
+    ``status`` is one of:
+
+    - ``"created"``  -- an article was drafted, validated and written.
+    - ``"skipped"``  -- nothing to do (already covered, id collision, no text).
+    - ``"invalid"``  -- a draft was produced but failed schema validation.
+    - ``"error"``    -- processing this PDF raised (corrupt PDF, LLM failure,
+      malformed drafted frontmatter). The message is in both ``reason`` and
+      ``errors`` so it shows up in the CLI's per-file report.
+    """
 
     pdf_path: Path
-    status: str  # "created" | "skipped" | "invalid"
+    status: str  # "created" | "skipped" | "invalid" | "error"
     article_path: Path | None = None
     article_id: str | None = None
     reason: str | None = None
@@ -215,20 +255,6 @@ def _strip_code_fence(text: str) -> str:
     return match.group(1).strip() if match else text
 
 
-def _split_frontmatter(text: str) -> tuple[dict, str]:
-    """Split ``text`` into (frontmatter dict, body). Reparses independently via
-    ``yaml.safe_load`` rather than reusing any part of ``wiki_schema``'s
-    internals, which are intentionally private (see #102 caveats)."""
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        raise ValueError("drafted article text has no YAML frontmatter block (--- ... ---)")
-    frontmatter = yaml.safe_load(match.group(1))
-    if not isinstance(frontmatter, dict):
-        frontmatter = {}
-    body = text[match.end():]
-    return frontmatter, body
-
-
 def _render_article(frontmatter: dict, body: str) -> str:
     fm_yaml = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{fm_yaml}\n---\n{body.strip(chr(10))}\n"
@@ -251,7 +277,7 @@ def postprocess_draft(
       LLM's output, since a drafted value here isn't otherwise checked against
       a real path (see #102 caveats).
     """
-    frontmatter, body = _split_frontmatter(raw_text)
+    frontmatter, body = parse_article(raw_text)
 
     if forced_id:
         article_id = slugify(forced_id)
@@ -288,8 +314,91 @@ def draft_article(
 
     fallback_id = slugify(Path(pdf_filename).stem)
     article_text = postprocess_draft(raw, source_relpath, fallback_id, forced_id=forced_id)
-    frontmatter, _ = _split_frontmatter(article_text)
+    frontmatter, _ = parse_article(article_text)
     return frontmatter["id"], article_text
+
+
+# ---------------------------------------------------------------------------
+# Source-path resolution / normalization
+# ---------------------------------------------------------------------------
+
+
+def compute_source_relpath(
+    pdf_path: Path | str,
+    ingest_dir: Path | str,
+    repo_root: Path | str | None = None,
+) -> str:
+    """Return the path written to an article's ``source.file`` for ``pdf_path``.
+
+    The contract (documented in ``knowledge/wiki/README.md`` and #101's design
+    review) is a repo-root-relative POSIX path, e.g. ``paper/Foo.pdf``. It is
+    derived from the PDF's *own* location rather than from the ingest
+    directory's basename, so an ingest directory of any depth works:
+    ``--ingest-dir data/papers`` yields ``data/papers/Foo.pdf``, not the
+    ``papers/Foo.pdf`` a basename-only join would produce.
+
+    Fallbacks, in order, for PDFs that are not under the repo root at all
+    (an out-of-tree ``--ingest-dir``, or a test's ``tmp_path``):
+
+    1. If the ingest directory was given as a *relative* path, reuse it as
+       given (it is by construction relative to the caller's working
+       directory) joined with the PDF's filename.
+    2. Otherwise fall back to the PDF's absolute path -- unambiguous, and
+       still matched by :func:`normalize_source_path` on a later run.
+    """
+    pdf_path = Path(pdf_path)
+    ingest_dir = Path(ingest_dir)
+    root = Path(repo_root).resolve() if repo_root is not None else _REPO_ROOT
+
+    # ``resolve()`` (not ``abspath``) on both sides: ``_REPO_ROOT`` is itself
+    # resolved, so a symlinked checkout or temp dir must be resolved too for
+    # ``relative_to`` to see the two as related.
+    absolute = pdf_path.resolve()
+    try:
+        return absolute.relative_to(root).as_posix()
+    except ValueError:
+        pass
+
+    if not ingest_dir.is_absolute():
+        joined = os.path.normpath(str(ingest_dir / pdf_path.name)).replace(os.sep, "/")
+        return PurePosixPath(joined).as_posix()
+    return absolute.as_posix()
+
+
+def normalize_source_path(value: Any, repo_root: Path | str | None = None) -> str:
+    """Normalize a ``source.file`` value for equality comparison.
+
+    Two ``source.file`` strings denote the same source PDF if they normalize
+    to the same string here. Normalization collapses the differences that a
+    hand-edit or a differently-configured run can introduce without changing
+    which file is meant: backslash separators, ``./`` prefixes and ``..``
+    segments, duplicate/trailing slashes, an absolute path inside the repo
+    (rewritten to its repo-relative form), and letter case.
+
+    Case folding is deliberate leniency: the two failure modes are not
+    symmetric. A false *match* only means an existing article is left alone
+    for a human to look at, whereas a false *miss* silently writes a second
+    article covering a PDF the wiki already documents -- the exact
+    duplicate-article failure the idempotency check exists to prevent.
+
+    Returns ``""`` for anything that isn't a usable path (``None``, a
+    non-string, an empty string); callers must treat ``""`` as "no match".
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().replace("\\", "/")
+    if not text:
+        return ""
+
+    normalized = posixpath.normpath(text)
+    if normalized.startswith("/"):
+        root = Path(repo_root).resolve() if repo_root is not None else _REPO_ROOT
+        # Out-of-repo absolute paths stay absolute; there is no repo-relative
+        # form for them, and the absolute form still compares consistently.
+        with contextlib.suppress(ValueError):
+            normalized = PurePosixPath(normalized).relative_to(root.as_posix()).as_posix()
+    normalized = normalized.rstrip("/")
+    return normalized.casefold()
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +406,11 @@ def draft_article(
 # ---------------------------------------------------------------------------
 
 
-def find_existing_article_for_source(wiki_dir: Path, source_relpath: str) -> Path | None:
+def find_existing_article_for_source(
+    wiki_dir: Path,
+    source_relpath: str,
+    repo_root: Path | str | None = None,
+) -> Path | None:
     """Return the path of the existing article (if any) whose ``source.file``
     frontmatter already points at ``source_relpath``.
 
@@ -307,18 +420,28 @@ def find_existing_article_for_source(wiki_dir: Path, source_relpath: str) -> Pat
     gave that article. This is what lets a hand-written article like
     ``knowledge/wiki/piotroski-f-score.md`` (whose id has nothing to do with
     its source filename) correctly suppress re-drafting the same PDF.
+
+    Both sides of the comparison go through :func:`normalize_source_path`, so
+    a cosmetically different but equivalent path (``./paper/X.pdf``, an
+    in-repo absolute path, different case) still matches instead of producing
+    a duplicate article. Frontmatter is parsed with
+    ``wiki_schema.parse_article``; articles that fail to parse are skipped,
+    not raised on -- a malformed neighbour must not block ingestion.
     """
-    if not wiki_dir.exists():
+    target = normalize_source_path(source_relpath, repo_root)
+    if not target or not wiki_dir.exists():
         return None
     for md_path in sorted(wiki_dir.glob("*.md")):
         if md_path.name in _NON_ARTICLE_FILENAMES:
             continue
         try:
-            frontmatter, _ = _split_frontmatter(md_path.read_text(encoding="utf-8"))
-        except (ValueError, yaml.YAMLError):
+            frontmatter, _ = parse_article(md_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, yaml.YAMLError):
             continue
         source = frontmatter.get("source")
-        if isinstance(source, dict) and source.get("file") == source_relpath:
+        if not isinstance(source, dict):
+            continue
+        if normalize_source_path(source.get("file"), repo_root) == target:
             return md_path
     return None
 
@@ -327,13 +450,38 @@ def ingest_pdf(
     pdf_path: Path,
     llm: Any,
     wiki_dir: Path,
-    ingest_dir_name: str,
+    ingest_dir: Path | str,
     force: bool = False,
+    repo_root: Path | str | None = None,
 ) -> IngestOutcome:
     """Ingest one PDF: skip/draft/validate/write. See module docstring for the
-    full pipeline description."""
-    source_relpath = f"{ingest_dir_name.rstrip('/')}/{pdf_path.name}"
-    existing = find_existing_article_for_source(wiki_dir, source_relpath)
+    full pipeline description.
+
+    Never raises. Any failure while processing this one PDF -- an unreadable
+    file, a failed LLM call, malformed drafted YAML -- is caught and returned
+    as an ``"error"`` :class:`IngestOutcome`, so a batch caller keeps the
+    outcomes it has already collected and can continue with the next file.
+    """
+    try:
+        return _ingest_pdf_unguarded(pdf_path, llm, wiki_dir, ingest_dir, force, repo_root)
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        logger.error("Failed to ingest %s: %s", pdf_path.name, message, exc_info=True)
+        return IngestOutcome(pdf_path, "error", reason=message, errors=[message])
+
+
+def _ingest_pdf_unguarded(
+    pdf_path: Path,
+    llm: Any,
+    wiki_dir: Path,
+    ingest_dir: Path | str,
+    force: bool = False,
+    repo_root: Path | str | None = None,
+) -> IngestOutcome:
+    """The actual per-PDF pipeline. May raise; :func:`ingest_pdf` is the
+    exception-isolating public entry point."""
+    source_relpath = compute_source_relpath(pdf_path, ingest_dir, repo_root)
+    existing = find_existing_article_for_source(wiki_dir, source_relpath, repo_root)
 
     if existing is not None and not force:
         logger.info("Skipping %s: already covered by %s", pdf_path.name, existing.name)
@@ -384,12 +532,19 @@ def ingest_directory(
     wiki_dir: Path,
     llm: Any,
     force: bool = False,
+    repo_root: Path | str | None = None,
 ) -> list[IngestOutcome]:
-    """Ingest every ``*.pdf`` directly under ``ingest_dir``, in sorted order."""
-    ingest_dir_name = ingest_dir.name
+    """Ingest every ``*.pdf`` directly under ``ingest_dir``, in sorted order.
+
+    One failing PDF does not abort the batch: :func:`ingest_pdf` converts any
+    exception into an ``"error"`` outcome for that file, and the loop carries
+    on -- outcomes collected for earlier files are never discarded.
+    """
     outcomes = []
     for pdf_path in sorted(ingest_dir.glob("*.pdf")):
-        outcomes.append(ingest_pdf(pdf_path, llm, wiki_dir, ingest_dir_name, force=force))
+        outcomes.append(
+            ingest_pdf(pdf_path, llm, wiki_dir, ingest_dir, force=force, repo_root=repo_root),
+        )
     return outcomes
 
 

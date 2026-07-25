@@ -11,6 +11,8 @@ unit test.
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +21,7 @@ from tradingagents.knowledge import ingest
 from tradingagents.knowledge.wiki_schema import (
     REQUIRED_FRONTMATTER_KEYS,
     REQUIRED_SECTIONS,
+    parse_article,
     validate_article,
     validate_article_file,
 )
@@ -125,14 +128,14 @@ class TestDraftArticle:
         """The model drafted 'paper/WRONG_PATH.pdf'; the real source path must win."""
         llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
         _, text = ingest.draft_article(llm, "source text", "Example.pdf", "paper/Example.pdf")
-        frontmatter, _ = ingest._split_frontmatter(text)
+        frontmatter, _ = parse_article(text)
         assert frontmatter["source"]["file"] == "paper/Example.pdf"
 
     def test_slugifies_non_kebab_case_id_from_llm(self):
         llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
         article_id, text = ingest.draft_article(llm, "source text", "Example.pdf", "paper/Example.pdf")
         assert article_id == "example-signal"
-        frontmatter, _ = ingest._split_frontmatter(text)
+        frontmatter, _ = parse_article(text)
         assert frontmatter["id"] == "example-signal"
 
     def test_forced_id_overrides_llm_proposed_id(self):
@@ -141,7 +144,7 @@ class TestDraftArticle:
             llm, "source text", "Example.pdf", "paper/Example.pdf", forced_id="totally-different-id",
         )
         assert article_id == "totally-different-id"
-        frontmatter, _ = ingest._split_frontmatter(text)
+        frontmatter, _ = parse_article(text)
         assert frontmatter["id"] == "totally-different-id"
 
     def test_strips_wrapping_code_fence(self):
@@ -171,6 +174,93 @@ class TestDraftArticle:
         result = validate_article(text)
         assert not result.ok
         assert any("Caveats" in err for err in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# compute_source_relpath (repo-relative source.file for any ingest-dir depth)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestComputeSourceRelpath:
+    def test_single_segment_ingest_dir(self, tmp_path):
+        pdf = tmp_path / "paper" / "Foo.pdf"
+        assert ingest.compute_source_relpath(pdf, tmp_path / "paper", repo_root=tmp_path) == "paper/Foo.pdf"
+
+    def test_multi_segment_ingest_dir_keeps_every_segment(self, tmp_path):
+        """A basename-only join would produce 'papers/Foo.pdf' -- the whole
+        repo-relative path must survive (#102 design review finding 3)."""
+        pdf = tmp_path / "data" / "papers" / "Foo.pdf"
+        relpath = ingest.compute_source_relpath(pdf, tmp_path / "data" / "papers", repo_root=tmp_path)
+        assert relpath == "data/papers/Foo.pdf"
+
+    def test_deeply_nested_ingest_dir(self, tmp_path):
+        pdf = tmp_path / "a" / "b" / "c" / "Foo.pdf"
+        relpath = ingest.compute_source_relpath(pdf, tmp_path / "a" / "b" / "c", repo_root=tmp_path)
+        assert relpath == "a/b/c/Foo.pdf"
+
+    def test_real_repo_default_paper_dir_is_unchanged(self):
+        """Regression guard for the already-committed articles: the default
+        ``paper/`` ingest dir must still yield exactly ``paper/<name>.pdf``."""
+        pdf = ingest._REPO_ROOT / "paper" / "Example.pdf"
+        assert ingest.compute_source_relpath(pdf, "paper") == "paper/Example.pdf"
+        assert ingest.compute_source_relpath(pdf, ingest._REPO_ROOT / "paper") == "paper/Example.pdf"
+
+    def test_relative_out_of_repo_ingest_dir_falls_back_to_given_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        relpath = ingest.compute_source_relpath(
+            Path("data/papers/Foo.pdf"), Path("./data/papers"), repo_root=tmp_path / "elsewhere",
+        )
+        assert relpath == "data/papers/Foo.pdf"
+
+    def test_absolute_out_of_repo_ingest_dir_falls_back_to_absolute_path(self, tmp_path):
+        pdf = tmp_path / "outside" / "Foo.pdf"
+        relpath = ingest.compute_source_relpath(pdf, tmp_path / "outside", repo_root=tmp_path / "repo")
+        assert relpath == pdf.resolve().as_posix()
+
+
+# ---------------------------------------------------------------------------
+# normalize_source_path (idempotency comparison key)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNormalizeSourcePath:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "paper/Foo.pdf",
+            "./paper/Foo.pdf",
+            "paper//Foo.pdf",
+            "  paper/Foo.pdf  ",
+            "paper\\Foo.pdf",
+            "PAPER/FOO.PDF",
+            "knowledge/../paper/Foo.pdf",
+        ],
+    )
+    def test_equivalent_spellings_normalize_alike(self, value):
+        assert ingest.normalize_source_path(value) == ingest.normalize_source_path("paper/Foo.pdf")
+
+    def test_trailing_slash_is_ignored(self):
+        assert ingest.normalize_source_path("paper/Foo.pdf/") == ingest.normalize_source_path("paper/Foo.pdf")
+
+    def test_in_repo_absolute_path_matches_relative_path(self, tmp_path):
+        absolute = str(tmp_path / "paper" / "Foo.pdf")
+        assert ingest.normalize_source_path(absolute, repo_root=tmp_path) == ingest.normalize_source_path(
+            "paper/Foo.pdf", repo_root=tmp_path,
+        )
+
+    def test_out_of_repo_absolute_path_is_kept_absolute(self, tmp_path):
+        absolute = str(tmp_path / "elsewhere" / "Foo.pdf")
+        assert ingest.normalize_source_path(absolute, repo_root=tmp_path / "repo") == absolute.casefold()
+
+    def test_different_files_do_not_collide(self):
+        assert ingest.normalize_source_path("paper/Foo.pdf") != ingest.normalize_source_path("paper/Bar.pdf")
+        assert ingest.normalize_source_path("paper/Foo.pdf") != ingest.normalize_source_path("other/Foo.pdf")
+
+    @pytest.mark.parametrize("value", [None, "", "   ", 42, ["paper/Foo.pdf"]])
+    def test_unusable_values_normalize_to_empty(self, value):
+        assert ingest.normalize_source_path(value) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +303,51 @@ class TestFindExistingArticleForSource:
         (wiki_dir / "broken.md").write_text("no frontmatter fence at all", encoding="utf-8")
 
         assert ingest.find_existing_article_for_source(wiki_dir, "paper/X.pdf") is None
+
+    @pytest.mark.parametrize(
+        "hand_edited",
+        ["./paper/Real.pdf", "paper//Real.pdf", "PAPER/Real.PDF", "paper/Real.pdf ", "paper\\Real.pdf"],
+    )
+    def test_matches_cosmetically_different_hand_edited_path(self, tmp_path, hand_edited):
+        """A differently-formatted but equivalent ``source.file`` must still
+        count as covering the same PDF, not produce a duplicate article
+        (#102 design review finding 2)."""
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        # Single-quoted YAML: no backslash-escape processing, trailing spaces kept.
+        article_text = _DRAFTED_ARTICLE.replace("file: paper/WRONG_PATH.pdf", f"file: '{hand_edited}'")
+        (wiki_dir / "example-signal.md").write_text(article_text, encoding="utf-8")
+
+        found = ingest.find_existing_article_for_source(wiki_dir, "paper/Real.pdf")
+        assert found == wiki_dir / "example-signal.md"
+
+    def test_matches_in_repo_absolute_path(self, tmp_path):
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        absolute = (tmp_path / "paper" / "Real.pdf").as_posix()
+        article_text = _DRAFTED_ARTICLE.replace("file: paper/WRONG_PATH.pdf", f'file: "{absolute}"')
+        (wiki_dir / "example-signal.md").write_text(article_text, encoding="utf-8")
+
+        found = ingest.find_existing_article_for_source(wiki_dir, "paper/Real.pdf", repo_root=tmp_path)
+        assert found == wiki_dir / "example-signal.md"
+
+    def test_still_distinguishes_genuinely_different_sources(self, tmp_path):
+        """Normalization must not over-match: a different filename in the same
+        folder is still a different source."""
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        article_text = _DRAFTED_ARTICLE.replace("file: paper/WRONG_PATH.pdf", "file: ./paper/Real.pdf")
+        (wiki_dir / "example-signal.md").write_text(article_text, encoding="utf-8")
+
+        assert ingest.find_existing_article_for_source(wiki_dir, "paper/Other.pdf") is None
+
+    def test_blank_source_relpath_never_matches(self, tmp_path):
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        article_text = _DRAFTED_ARTICLE.replace("file: paper/WRONG_PATH.pdf", 'file: ""')
+        (wiki_dir / "example-signal.md").write_text(article_text, encoding="utf-8")
+
+        assert ingest.find_existing_article_for_source(wiki_dir, "") is None
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +468,93 @@ class TestIngestPdf:
         assert outcome.status == "skipped"
         assert outcome.reason == "no extractable text"
 
+    def test_source_file_uses_full_multi_segment_ingest_dir(self, tmp_path, monkeypatch):
+        """With a nested ingest dir the written ``source.file`` must be the
+        full repo-relative path, not just the dir's basename."""
+        monkeypatch.setattr(ingest, "extract_pdf_text", lambda pdf_path, **kw: "extracted source text")
+        ingest_dir = tmp_path / "data" / "papers"
+        pdf_path = ingest_dir / "Example.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"%PDF-fake")
+        wiki_dir = tmp_path / "wiki"
+
+        llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
+        outcome = ingest.ingest_pdf(pdf_path, llm, wiki_dir, ingest_dir, repo_root=tmp_path)
+
+        assert outcome.status == "created"
+        frontmatter, _ = parse_article(outcome.article_path.read_text(encoding="utf-8"))
+        assert frontmatter["source"]["file"] == "data/papers/Example.pdf"
+
+    def test_skips_when_existing_article_path_differs_only_cosmetically(self, tmp_path, monkeypatch):
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        pdf_path = tmp_path / "paper" / "Example.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"%PDF-fake")
+
+        existing_text = _DRAFTED_ARTICLE.replace("file: paper/WRONG_PATH.pdf", "file: ./paper/Example.pdf")
+        (wiki_dir / "already-covered.md").write_text(existing_text, encoding="utf-8")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("extract_pdf_text must not be called when skipping")
+
+        monkeypatch.setattr(ingest, "extract_pdf_text", _boom)
+        llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
+        outcome = ingest.ingest_pdf(pdf_path, llm, wiki_dir, tmp_path / "paper", repo_root=tmp_path)
+
+        assert outcome.status == "skipped"
+        assert outcome.article_path == wiki_dir / "already-covered.md"
+        assert len(list(wiki_dir.glob("*.md"))) == 1  # no duplicate article written
+
+    def test_extraction_failure_returns_error_outcome_instead_of_raising(self, tmp_path, monkeypatch):
+        def _corrupt(pdf_path, **kw):
+            raise ValueError("EOF marker not found")
+
+        monkeypatch.setattr(ingest, "extract_pdf_text", _corrupt)
+        wiki_dir = tmp_path / "wiki"
+        pdf_path = tmp_path / "paper" / "Corrupt.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"not really a pdf")
+
+        llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
+        outcome = ingest.ingest_pdf(pdf_path, llm, wiki_dir, "paper")
+
+        assert outcome.status == "error"
+        assert "EOF marker not found" in outcome.reason
+        assert any("EOF marker not found" in err for err in outcome.errors)
+        assert not wiki_dir.exists() or not any(wiki_dir.glob("*.md"))
+
+    def test_malformed_drafted_frontmatter_returns_error_outcome(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ingest, "extract_pdf_text", lambda pdf_path, **kw: "extracted source text")
+        wiki_dir = tmp_path / "wiki"
+        pdf_path = tmp_path / "paper" / "Example.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"%PDF-fake")
+
+        # Frontmatter fence present but the YAML inside it is malformed.
+        broken = _DRAFTED_ARTICLE.replace("id: Example Signal!!", "id: [unclosed")
+        llm = SimpleNamespace(invoke=lambda prompt: _fake_response(broken))
+        outcome = ingest.ingest_pdf(pdf_path, llm, wiki_dir, "paper")
+
+        assert outcome.status == "error"
+        assert outcome.errors
+        assert not wiki_dir.exists() or not any(wiki_dir.glob("*.md"))
+
+    def test_llm_failure_returns_error_outcome(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ingest, "extract_pdf_text", lambda pdf_path, **kw: "extracted source text")
+        wiki_dir = tmp_path / "wiki"
+        pdf_path = tmp_path / "paper" / "Example.pdf"
+        pdf_path.parent.mkdir(parents=True)
+        pdf_path.write_bytes(b"%PDF-fake")
+
+        def _llm_boom(prompt):
+            raise RuntimeError("provider returned 503")
+
+        outcome = ingest.ingest_pdf(pdf_path, SimpleNamespace(invoke=_llm_boom), wiki_dir, "paper")
+
+        assert outcome.status == "error"
+        assert "provider returned 503" in outcome.reason
+
 
 # ---------------------------------------------------------------------------
 # ingest_directory / run_ingest
@@ -384,6 +606,73 @@ class TestIngestDirectoryAndRunIngest:
         assert outcomes[0].status == "created"
         assert outcomes[0].article_path.parent == wiki_dir
 
+    def test_one_failing_pdf_does_not_abort_the_batch(self, tmp_path, monkeypatch):
+        """A corrupt PDF in the middle of a batch must be recorded as its own
+        'error' outcome; earlier outcomes must survive and later PDFs must
+        still be processed (#102 design review finding 4)."""
+        ingest_dir = tmp_path / "paper"
+        ingest_dir.mkdir()
+        for name in ("a.pdf", "b.pdf", "c.pdf"):
+            (ingest_dir / name).write_bytes(b"%PDF-fake")
+        wiki_dir = tmp_path / "wiki"
+
+        def _extract(pdf_path, **kw):
+            if pdf_path.name == "b.pdf":
+                raise RuntimeError("pypdf: stream has ended unexpectedly")
+            return f"extracted text for {pdf_path.name}"
+
+        monkeypatch.setattr(ingest, "extract_pdf_text", _extract)
+
+        calls = {"n": 0}
+
+        def _invoke(prompt):
+            calls["n"] += 1
+            return _fake_response(
+                _DRAFTED_ARTICLE.replace("id: Example Signal!!", f"id: Example Signal {calls['n']}")
+            )
+
+        outcomes = ingest.ingest_directory(ingest_dir, wiki_dir, SimpleNamespace(invoke=_invoke))
+
+        assert [o.pdf_path.name for o in outcomes] == ["a.pdf", "b.pdf", "c.pdf"]
+        assert [o.status for o in outcomes] == ["created", "error", "created"]
+        assert "stream has ended unexpectedly" in outcomes[1].reason
+        assert len(list(wiki_dir.glob("*.md"))) == 2
+
+    def test_malformed_draft_for_one_pdf_does_not_abort_the_batch(self, tmp_path, monkeypatch):
+        ingest_dir = tmp_path / "paper"
+        ingest_dir.mkdir()
+        for name in ("a.pdf", "b.pdf"):
+            (ingest_dir / name).write_bytes(b"%PDF-fake")
+        wiki_dir = tmp_path / "wiki"
+        monkeypatch.setattr(ingest, "extract_pdf_text", lambda pdf_path, **kw: "extracted source text")
+
+        calls = {"n": 0}
+
+        def _invoke(prompt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response("## Summary\nThe model forgot the frontmatter entirely.\n")
+            return _fake_response(_DRAFTED_ARTICLE)
+
+        outcomes = ingest.ingest_directory(ingest_dir, wiki_dir, SimpleNamespace(invoke=_invoke))
+
+        assert [o.status for o in outcomes] == ["error", "created"]
+        assert "frontmatter" in outcomes[0].reason
+
+    def test_ingest_directory_writes_full_multi_segment_source_file(self, tmp_path, monkeypatch):
+        ingest_dir = tmp_path / "data" / "papers"
+        ingest_dir.mkdir(parents=True)
+        (ingest_dir / "Only.pdf").write_bytes(b"%PDF-fake")
+        wiki_dir = tmp_path / "wiki"
+        monkeypatch.setattr(ingest, "extract_pdf_text", lambda pdf_path, **kw: "extracted source text")
+
+        llm = SimpleNamespace(invoke=lambda prompt: _fake_response(_DRAFTED_ARTICLE))
+        outcomes = ingest.ingest_directory(ingest_dir, wiki_dir, llm, repo_root=tmp_path)
+
+        assert outcomes[0].status == "created"
+        frontmatter, _ = parse_article(outcomes[0].article_path.read_text(encoding="utf-8"))
+        assert frontmatter["source"]["file"] == "data/papers/Only.pdf"
+
     def test_run_ingest_missing_ingest_dir_returns_empty(self, tmp_path):
         config = {
             "knowledge_ingest_dir": str(tmp_path / "does-not-exist"),
@@ -414,12 +703,60 @@ class TestBuildQuickThinkLlm:
 
 
 # ---------------------------------------------------------------------------
+# scripts/ingest_wiki.py CLI reporting (per-file failures must be visible)
+# ---------------------------------------------------------------------------
+
+
+def _load_cli_module():
+    """Import scripts/ingest_wiki.py by path (scripts/ is not a package)."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "ingest_wiki.py"
+    spec = importlib.util.spec_from_file_location("ingest_wiki_cli", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.unit
+class TestIngestWikiCli:
+    def test_error_outcomes_are_reported_and_exit_nonzero(self, tmp_path, monkeypatch, capsys):
+        cli = _load_cli_module()
+        outcomes = [
+            ingest.IngestOutcome(tmp_path / "ok.pdf", "created", article_path=tmp_path / "ok.md"),
+            ingest.IngestOutcome(tmp_path / "dup.pdf", "skipped", reason="already covered by ok.md"),
+            ingest.IngestOutcome(tmp_path / "bad.pdf", "invalid", errors=["missing body section"]),
+            ingest.IngestOutcome(
+                tmp_path / "corrupt.pdf", "error",
+                reason="RuntimeError: pypdf blew up", errors=["RuntimeError: pypdf blew up"],
+            ),
+        ]
+        monkeypatch.setattr(cli, "build_quick_think_llm", lambda config: SimpleNamespace())
+        monkeypatch.setattr(cli, "run_ingest", lambda *a, **kw: outcomes)
+
+        exit_code = cli.main([])
+
+        out = capsys.readouterr().out
+        assert exit_code == 1
+        assert "1 created, 1 skipped, 1 invalid, 1 error (of 4 PDFs)" in out
+        assert "corrupt.pdf" in out
+        assert "pypdf blew up" in out
+
+    def test_clean_run_exits_zero(self, tmp_path, monkeypatch, capsys):
+        cli = _load_cli_module()
+        outcomes = [ingest.IngestOutcome(tmp_path / "ok.pdf", "created", article_path=tmp_path / "ok.md")]
+        monkeypatch.setattr(cli, "build_quick_think_llm", lambda config: SimpleNamespace())
+        monkeypatch.setattr(cli, "run_ingest", lambda *a, **kw: outcomes)
+
+        assert cli.main([]) == 0
+        assert "1 created, 0 skipped, 0 invalid, 0 error" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # Sanity: required frontmatter keys are all present in the fixture draft
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_fixture_drafted_article_has_all_required_frontmatter_keys():
-    frontmatter, _ = ingest._split_frontmatter(_DRAFTED_ARTICLE)
+    frontmatter, _ = parse_article(_DRAFTED_ARTICLE)
     for key in REQUIRED_FRONTMATTER_KEYS:
         assert key in frontmatter

@@ -7,9 +7,15 @@ drafts a schema-conformant article per PDF via the quick-thinking LLM
 ``knowledge_base_dir`` (config key, default ``knowledge/wiki/``).
 
 Idempotent / human-in-the-loop: an existing article whose ``source.file``
-frontmatter already points at a given PDF is left untouched (skipped) unless
-``--force``/``--overwrite`` is passed. Generated articles are meant to be
-reviewed (and edited if needed) before being committed.
+frontmatter already points at a given PDF (compared on normalized paths) is
+left untouched (skipped) unless ``--force``/``--overwrite`` is passed.
+Generated articles are meant to be reviewed (and edited if needed) before
+being committed.
+
+Batch-resilient: a PDF that fails to process (corrupt file, LLM/parse
+failure) is reported as an ``error`` in the final tally and the run
+continues with the remaining PDFs; the exit status is non-zero if any file
+came back ``invalid`` or ``error``.
 
 Usage:
     ./venv/bin/python scripts/ingest_wiki.py
@@ -73,16 +79,22 @@ def main(argv: list[str] | None = None) -> int:
     created = [o for o in outcomes if o.status == "created"]
     skipped = [o for o in outcomes if o.status == "skipped"]
     invalid = [o for o in outcomes if o.status == "invalid"]
+    errored = [o for o in outcomes if o.status == "error"]
 
-    print(f"\n{len(created)} created, {len(skipped)} skipped, {len(invalid)} invalid (of {len(outcomes)} PDFs)")
+    print(
+        f"\n{len(created)} created, {len(skipped)} skipped, {len(invalid)} invalid, "
+        f"{len(errored)} error (of {len(outcomes)} PDFs)"
+    )
     for outcome in created:
         print(f"  created  {outcome.pdf_path.name} -> {outcome.article_path}")
     for outcome in skipped:
         print(f"  skipped  {outcome.pdf_path.name} ({outcome.reason})")
     for outcome in invalid:
         print(f"  invalid  {outcome.pdf_path.name}: {'; '.join(outcome.errors)}")
+    for outcome in errored:
+        print(f"  error    {outcome.pdf_path.name}: {outcome.reason}")
 
-    return 1 if invalid else 0
+    return 1 if (invalid or errored) else 0
 
 
 if __name__ == "__main__":
