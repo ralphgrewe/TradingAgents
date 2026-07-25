@@ -14,6 +14,11 @@ canonical pattern:
 
 Centralising the pattern here keeps the agent factories small and ensures
 all three agents log the same warnings when fallback fires.
+
+Part of issue #104: the ``run_structured_with_tools`` helper provides the
+shared machinery for running a bounded tool-loop that terminates with
+structured output, so consumers (portfolio manager, swing trader) don't
+each reinvent and diverge on that logic.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -72,3 +78,161 @@ def invoke_structured_or_freetext(
 
     response = plain_llm.invoke(prompt)
     return response.content
+
+
+def run_structured_with_tools(
+    llm: Any,
+    messages: list[BaseMessage],
+    tools: list[Any],
+    response_model: type[T],
+    *,
+    max_rounds: int = 2,
+    agent_name: str = "Agent",
+) -> tuple[T | None, list[BaseMessage]]:
+    """Run a bounded tool-calling loop that terminates with structured output.
+
+    Single-shot structured-output nodes (Portfolio Manager, Swing Trader) can
+    consult tools during execution and then emit their final decision. This helper
+    provides the shared machinery: bind tools, run a bounded loop where the LLM
+    can invoke tools and receive results, then attempt structured output on the
+    final response.
+
+    Preserves the existing free-text fallback contract: if structured output is
+    not supported or fails, the node may degrade gracefully (e.g., parse a
+    free-text decision from the final LLM response). Callers can check whether
+    the returned structured result is None to detect fallback.
+
+    Args:
+        llm: The LLM instance (will be wrapped with tools and structured output).
+        messages: Initial message history (list of BaseMessage objects).
+        tools: List of LangChain tool objects to bind to the LLM.
+        response_model: Pydantic model for structured output.
+        max_rounds: Maximum tool-calling loop iterations (default 2, typically
+                   set via config["knowledge_base_tool_max_rounds"]).
+        agent_name: Name for logging purposes (e.g., "PortfolioManager", "SwingTrader").
+
+    Returns:
+        Tuple of (structured_result, message_trace):
+        - structured_result: Parsed Pydantic instance, or None if structured output failed
+                            or is unsupported.
+        - message_trace: The full message history including tool calls and results,
+                        useful for prompt logging (e.g., via record_agent_prompt).
+
+    Example:
+        >>> result, trace = run_structured_with_tools(
+        ...     llm, messages, [search_wiki, get_market_data],
+        ...     PortfolioDecision, max_rounds=2, agent_name="PM"
+        ... )
+        >>> if result:
+        ...     decision = result.decision  # access structured fields
+        >>> # trace can be logged for debugging/analysis
+    """
+    # Bind tools to the LLM
+    llm_with_tools = llm.bind_tools(tools)
+
+    # Try to bind structured output; graceful None if unsupported
+    structured_llm = bind_structured(llm, response_model, agent_name)
+
+    # Tool-calling loop
+    message_trace = list(messages)
+    round_count = 0
+
+    while round_count < max_rounds:
+        round_count += 1
+
+        # Invoke LLM with current message history
+        try:
+            response = llm_with_tools.invoke(message_trace)
+        except Exception as exc:
+            logger.warning(
+                "%s: LLM invocation failed in tool loop round %d (%s)",
+                agent_name, round_count, exc,
+            )
+            break
+
+        # Append LLM response to trace
+        message_trace.append(response)
+
+        # Check if LLM requested tool calls
+        tool_calls = getattr(response, "tool_calls", [])
+        if not tool_calls:
+            # No tool calls: LLM is done with the loop
+            logger.debug(
+                "%s: LLM returned no tool calls in round %d; ending loop",
+                agent_name, round_count,
+            )
+            break
+
+        # Execute requested tools and append results
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name") or tool_call.get("type")
+            tool_input = tool_call.get("args") or tool_call.get("input")
+            tool_id = tool_call.get("id") or tool_call.get("tool_call_id")
+
+            # Find the tool by name
+            tool_impl = None
+            for t in tools:
+                if hasattr(t, "name") and t.name == tool_name:
+                    tool_impl = t
+                    break
+
+            if tool_impl is None:
+                logger.warning(
+                    "%s: tool '%s' not found in tool list (round %d); skipping",
+                    agent_name, tool_name, round_count,
+                )
+                result_text = f"Tool '{tool_name}' not found"
+            else:
+                try:
+                    # Invoke the tool with its input
+                    if isinstance(tool_input, dict):
+                        result = tool_impl.invoke(tool_input)
+                    else:
+                        result = tool_impl.invoke({"input": tool_input})
+                    result_text = str(result)
+                except Exception as exc:
+                    logger.warning(
+                        "%s: tool '%s' invocation failed (round %d): %s",
+                        agent_name, tool_name, round_count, exc,
+                    )
+                    result_text = f"Tool execution failed: {exc}"
+
+            # Append tool result to message trace
+            tool_message = ToolMessage(content=result_text, tool_call_id=tool_id)
+            message_trace.append(tool_message)
+
+        logger.debug(
+            "%s: completed round %d of %d; executed %d tool calls",
+            agent_name, round_count, max_rounds, len(tool_calls),
+        )
+
+    # Tool loop is done; attempt structured output from the final response
+    structured_result: T | None = None
+    if structured_llm is not None:
+        try:
+            # Extract the final LLM response (the last AIMessage in trace)
+            final_response = None
+            for msg in reversed(message_trace):
+                if isinstance(msg, AIMessage):
+                    final_response = msg
+                    break
+
+            if final_response is not None:
+                structured_result = structured_llm.invoke(message_trace)
+                logger.debug(
+                    "%s: structured output succeeded after %d loop rounds",
+                    agent_name, round_count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "%s: structured output failed after tool loop (%s); "
+                "caller may fall back to free-text parsing",
+                agent_name, exc,
+            )
+    else:
+        logger.debug(
+            "%s: structured output not supported by LLM; caller must handle free-text fallback",
+            agent_name,
+        )
+
+    return structured_result, message_trace

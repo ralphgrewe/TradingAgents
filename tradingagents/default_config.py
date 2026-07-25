@@ -33,6 +33,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED": "knowledge_base_enabled",
     "TRADINGAGENTS_KNOWLEDGE_BASE_DIR":     "knowledge_base_dir",
     "TRADINGAGENTS_KNOWLEDGE_INGEST_DIR":   "knowledge_ingest_dir",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS": "knowledge_base_tool_max_rounds",
 }
 
 
@@ -113,6 +114,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "knowledge_base_enabled": True,       # Enable/disable knowledge-base retrieval
     "knowledge_base_dir": "knowledge/wiki", # Article directory (relative to cwd)
     "knowledge_ingest_dir": "paper",      # Default folder the ingestion pipeline scans (#102)
+    "knowledge_base_tool_max_rounds": 2,  # Max tool-calling loop rounds for wiki search (issue #104)
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
