@@ -27,7 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def run_structured_with_tools(
     *,
     max_rounds: int = 2,
     agent_name: str = "Agent",
-) -> tuple[T | None, list[BaseMessage]]:
+) -> tuple[T | None, str | None, list[BaseMessage]]:
     """Run a bounded tool-calling loop that terminates with structured output.
 
     Single-shot structured-output nodes (Portfolio Manager, Swing Trader) can
@@ -97,10 +97,11 @@ def run_structured_with_tools(
     can invoke tools and receive results, then attempt structured output on the
     final response.
 
-    Preserves the existing free-text fallback contract: if structured output is
-    not supported or fails, the node may degrade gracefully (e.g., parse a
-    free-text decision from the final LLM response). Callers can check whether
-    the returned structured result is None to detect fallback.
+    Preserves the same structured-then-fallback contract as
+    ``invoke_structured_or_freetext``: the final step is *always* attempted
+    (structured output if supported, otherwise/on-failure a plain free-text
+    ``llm.invoke``), so the caller is guaranteed usable output rather than
+    having to reimplement the free-text fallback itself.
 
     Args:
         llm: The LLM instance (will be wrapped with tools and structured output).
@@ -112,19 +113,25 @@ def run_structured_with_tools(
         agent_name: Name for logging purposes (e.g., "PortfolioManager", "SwingTrader").
 
     Returns:
-        Tuple of (structured_result, message_trace):
-        - structured_result: Parsed Pydantic instance, or None if structured output failed
-                            or is unsupported.
+        Tuple of (structured_result, fallback_text, message_trace):
+        - structured_result: Parsed Pydantic instance, or None if structured output
+                            failed or is unsupported.
+        - fallback_text: Free-text content from a plain ``llm.invoke`` on the final
+                        message trace, populated only when ``structured_result`` is
+                        None (mirrors ``invoke_structured_or_freetext``'s fallback).
+                        None when the structured call succeeded.
         - message_trace: The full message history including tool calls and results,
                         useful for prompt logging (e.g., via record_agent_prompt).
 
     Example:
-        >>> result, trace = run_structured_with_tools(
+        >>> result, fallback_text, trace = run_structured_with_tools(
         ...     llm, messages, [search_wiki, get_market_data],
         ...     PortfolioDecision, max_rounds=2, agent_name="PM"
         ... )
         >>> if result:
         ...     decision = result.decision  # access structured fields
+        >>> else:
+        ...     decision_text = fallback_text  # guaranteed usable free text
         >>> # trace can be logged for debugging/analysis
     """
     # Bind tools to the LLM
@@ -166,7 +173,12 @@ def run_structured_with_tools(
         # Execute requested tools and append results
         for tool_call in tool_calls:
             tool_name = tool_call.get("name") or tool_call.get("type")
-            tool_input = tool_call.get("args") or tool_call.get("input")
+            # "args" may legitimately be {} for a zero-arg tool call, which is
+            # falsy in Python -- use explicit key presence, not truthiness, to
+            # decide whether to fall back to the "input" key.
+            tool_input = (
+                tool_call["args"] if "args" in tool_call else tool_call.get("input", {})
+            )
             tool_id = tool_call.get("id") or tool_call.get("tool_call_id")
 
             # Find the tool by name
@@ -206,33 +218,46 @@ def run_structured_with_tools(
             agent_name, round_count, max_rounds, len(tool_calls),
         )
 
-    # Tool loop is done; attempt structured output from the final response
+    # Tool loop is done (whether it ended because the LLM stopped requesting
+    # tools, the round budget was exhausted, or an invocation raised). Always
+    # attempt the final structured call on this synthesized trace -- no gate
+    # on what's already in the trace, so max_rounds=0 or a first-round
+    # failure still gets a real attempt instead of a silent None.
     structured_result: T | None = None
+    fallback_text: str | None = None
+
     if structured_llm is not None:
         try:
-            # Extract the final LLM response (the last AIMessage in trace)
-            final_response = None
-            for msg in reversed(message_trace):
-                if isinstance(msg, AIMessage):
-                    final_response = msg
-                    break
-
-            if final_response is not None:
-                structured_result = structured_llm.invoke(message_trace)
-                logger.debug(
-                    "%s: structured output succeeded after %d loop rounds",
-                    agent_name, round_count,
-                )
+            structured_result = structured_llm.invoke(message_trace)
+            logger.debug(
+                "%s: structured output succeeded after %d loop rounds",
+                agent_name, round_count,
+            )
         except Exception as exc:
             logger.warning(
                 "%s: structured output failed after tool loop (%s); "
-                "caller may fall back to free-text parsing",
+                "falling back to free text on the final trace",
                 agent_name, exc,
             )
     else:
         logger.debug(
-            "%s: structured output not supported by LLM; caller must handle free-text fallback",
+            "%s: structured output not supported by LLM; falling back to free text",
             agent_name,
         )
 
-    return structured_result, message_trace
+    if structured_result is None:
+        # Guarantee usable output: same free-text fallback the nodes get from
+        # invoke_structured_or_freetext, run on the same final message_trace
+        # (never a stale mid-loop trace) so it reflects everything the tool
+        # loop learned, including a trailing ToolMessage if max_rounds was
+        # exhausted while tools were still being requested.
+        try:
+            fallback_response = llm.invoke(message_trace)
+            fallback_text = fallback_response.content
+        except Exception as exc:
+            logger.warning(
+                "%s: free-text fallback invocation failed after tool loop (%s)",
+                agent_name, exc,
+            )
+
+    return structured_result, fallback_text, message_trace

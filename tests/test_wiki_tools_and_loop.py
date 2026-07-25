@@ -185,7 +185,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
             return_value=mock_structured_llm,
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
-            result, trace = run_structured_with_tools(
+            result, fallback_text, trace = run_structured_with_tools(
                 mock_llm,
                 initial_messages,
                 [mock_tool],
@@ -238,7 +238,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
             return_value=mock_structured_llm,
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
-            result, trace = run_structured_with_tools(
+            result, fallback_text, trace = run_structured_with_tools(
                 mock_llm,
                 initial_messages,
                 [mock_tool],
@@ -277,7 +277,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
             return_value=mock_structured_llm,
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
-            result, trace = run_structured_with_tools(
+            result, fallback_text, trace = run_structured_with_tools(
                 mock_llm,
                 initial_messages,
                 [mock_tool],
@@ -291,7 +291,9 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         self.assertEqual(result.action, "SELL")
 
     def test_tool_loop_structured_output_fallback_on_failure(self):
-        """When structured output fails, returns None and logs warning."""
+        """Fix #1: when structured output fails, falls back to usable free text
+        instead of returning None with nothing else -- caller gets a guaranteed
+        string, not just a None it has to handle itself."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
@@ -305,6 +307,10 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
 
+        # Plain (untooled) fallback call on the raw llm -- this is what
+        # invoke_structured_or_freetext's fallback path also calls.
+        mock_llm.invoke = MagicMock(return_value=AIMessage(content="Free-text fallback answer"))
+
         # Structured LLM fails
         mock_structured_llm = MagicMock()
         mock_structured_llm.invoke = MagicMock(side_effect=Exception("JSON parsing failed"))
@@ -315,7 +321,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
             with self.assertLogs("tradingagents.agents.utils.structured", level="WARNING"):
-                result, trace = run_structured_with_tools(
+                result, fallback_text, trace = run_structured_with_tools(
                     mock_llm,
                     initial_messages,
                     [mock_tool],
@@ -324,13 +330,19 @@ class RunStructuredWithToolsTests(unittest.TestCase):
                     agent_name="TestAgent",
                 )
 
-        # Structured output should be None due to failure
+        # Structured output should be None due to failure...
         self.assertIsNone(result)
+        # ...but the caller gets guaranteed usable free text instead of None.
+        self.assertEqual(fallback_text, "Free-text fallback answer")
+        # The fallback call ran on the final trace (post tool-loop), not some
+        # separately-constructed prompt.
+        mock_llm.invoke.assert_called_once_with(trace)
         # Trace should still contain the messages
         self.assertGreater(len(trace), 0)
 
     def test_tool_loop_with_structured_output_unsupported(self):
-        """When structured output is unsupported (None), returns None gracefully."""
+        """Fix #1: when structured output is unsupported (None), still falls back
+        to usable free text rather than returning None with no other output."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
@@ -341,13 +353,14 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         mock_llm_with_tools = MagicMock()
         mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+        mock_llm.invoke = MagicMock(return_value=AIMessage(content="Unsupported-path fallback"))
 
         # Simulate unsupported structured output
         with patch(
             "tradingagents.agents.utils.structured.bind_structured", return_value=None
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
-            result, trace = run_structured_with_tools(
+            result, fallback_text, trace = run_structured_with_tools(
                 mock_llm,
                 initial_messages,
                 [mock_tool],
@@ -358,6 +371,8 @@ class RunStructuredWithToolsTests(unittest.TestCase):
 
         # Structured output should be None
         self.assertIsNone(result)
+        # But a usable free-text fallback should be returned instead.
+        self.assertEqual(fallback_text, "Unsupported-path fallback")
         # But trace should still be returned
         self.assertGreater(len(trace), 0)
 
@@ -392,7 +407,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
             return_value=mock_structured_llm,
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
-            result, trace = run_structured_with_tools(
+            result, fallback_text, trace = run_structured_with_tools(
                 mock_llm,
                 initial_messages,
                 [mock_tool],
@@ -434,7 +449,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         ):
             initial_messages = [HumanMessage(content="Make a decision")]
             with self.assertLogs("tradingagents.agents.utils.structured", level="WARNING"):
-                result, trace = run_structured_with_tools(
+                result, fallback_text, trace = run_structured_with_tools(
                     mock_llm,
                     initial_messages,
                     [mock_tool],
@@ -446,6 +461,172 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         # Loop should continue and produce structured output despite tool failure
         self.assertIsNotNone(result)
         self.assertEqual(result.action, "HOLD")
+
+    def test_max_rounds_zero_still_attempts_structured_call(self):
+        """Fix #2: max_rounds=0 must not silently skip the final call. The old
+        gate ("is there a prior AIMessage in the trace?") meant max_rounds=0
+        returned (None, trace) with no attempt at all."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+
+        mock_llm_with_tools = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        mock_structured_llm = MagicMock()
+        mock_decision = MockDecision(action="HOLD", confidence=0.4, rationale="No rounds")
+        mock_structured_llm.invoke = MagicMock(return_value=mock_decision)
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured",
+            return_value=mock_structured_llm,
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                initial_messages,
+                [mock_tool],
+                MockDecision,
+                max_rounds=0,
+                agent_name="TestAgent",
+            )
+
+        # The tool loop never ran (max_rounds=0)...
+        mock_llm_with_tools.invoke.assert_not_called()
+        # ...but the structured call was still attempted directly on the trace.
+        mock_structured_llm.invoke.assert_called_once_with(initial_messages)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "HOLD")
+        self.assertIsNone(fallback_text)
+
+    def test_first_round_llm_failure_still_attempts_final_call(self):
+        """Fix #2: an exception on the very first LLM call, before any
+        AIMessage is ever appended to the trace, must not silently
+        short-circuit to (None, None, trace)."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+
+        mock_llm_with_tools = MagicMock()
+        mock_llm_with_tools.invoke = MagicMock(side_effect=Exception("network blip"))
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        mock_structured_llm = MagicMock()
+        mock_decision = MockDecision(action="BUY", confidence=0.6, rationale="Recovered")
+        mock_structured_llm.invoke = MagicMock(return_value=mock_decision)
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured",
+            return_value=mock_structured_llm,
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            with self.assertLogs("tradingagents.agents.utils.structured", level="WARNING"):
+                result, fallback_text, trace = run_structured_with_tools(
+                    mock_llm,
+                    initial_messages,
+                    [mock_tool],
+                    MockDecision,
+                    max_rounds=2,
+                    agent_name="TestAgent",
+                )
+
+        # Structured call still attempted against the untouched initial trace,
+        # not silently skipped just because no AIMessage made it into the trace.
+        mock_structured_llm.invoke.assert_called_once_with(initial_messages)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "BUY")
+
+    def test_max_rounds_exhausted_falls_back_to_coherent_free_text(self):
+        """Fix #3: when max_rounds is exhausted while the LLM is still
+        requesting tools AND the forced structured call then fails, the
+        free-text fallback must run on the final synthesized trace (ending in
+        the last ToolMessage) -- not a stale mid-loop trace."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+        mock_tool.invoke = MagicMock(return_value="tool result")
+
+        tool_call_response = AIMessage(
+            content="Still need a tool",
+            tool_calls=[{"name": "test_tool", "args": {"input": "test"}, "id": "call_1"}],
+        )
+        mock_llm_with_tools = MagicMock()
+        mock_llm_with_tools.invoke = MagicMock(return_value=tool_call_response)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke = MagicMock(side_effect=Exception("still couldn't parse"))
+        mock_llm.invoke = MagicMock(
+            return_value=AIMessage(content="Best-effort HOLD, low confidence")
+        )
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured",
+            return_value=mock_structured_llm,
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            with self.assertLogs("tradingagents.agents.utils.structured", level="WARNING"):
+                result, fallback_text, trace = run_structured_with_tools(
+                    mock_llm,
+                    initial_messages,
+                    [mock_tool],
+                    MockDecision,
+                    max_rounds=1,
+                    agent_name="TestAgent",
+                )
+
+        self.assertIsNone(result)
+        self.assertEqual(fallback_text, "Best-effort HOLD, low confidence")
+        # Trace tail is a bare ToolMessage (loop exhausted mid tool-call) -- the
+        # fallback call must have been made against this exact final trace, not
+        # some earlier point.
+        self.assertIsInstance(trace[-1], ToolMessage)
+        mock_structured_llm.invoke.assert_called_once_with(trace)
+        mock_llm.invoke.assert_called_once_with(trace)
+
+    def test_zero_arg_tool_call_invoked_with_empty_dict(self):
+        """Fix #4: a real zero-arg tool call has args={}, which is falsy in
+        Python but must still be used as-is rather than misrouted to the
+        (usually absent) "input" key via a truthiness check."""
+        mock_llm = MagicMock()
+        mock_tool = MagicMock()
+        mock_tool.name = "zero_arg_tool"
+        mock_tool.invoke = MagicMock(return_value="ok")
+
+        tool_call_response = AIMessage(
+            content="Calling zero-arg tool",
+            tool_calls=[{"name": "zero_arg_tool", "args": {}, "id": "call_1"}],
+        )
+        final_response = AIMessage(content="Done")
+        final_response.tool_calls = []
+
+        mock_llm_with_tools = MagicMock()
+        mock_llm_with_tools.invoke = MagicMock(
+            side_effect=[tool_call_response, final_response]
+        )
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke = MagicMock(
+            return_value=MockDecision(action="HOLD", confidence=0.5, rationale="Test")
+        )
+
+        with patch(
+            "tradingagents.agents.utils.structured.bind_structured",
+            return_value=mock_structured_llm,
+        ):
+            initial_messages = [HumanMessage(content="Make a decision")]
+            run_structured_with_tools(
+                mock_llm,
+                initial_messages,
+                [mock_tool],
+                MockDecision,
+                max_rounds=2,
+                agent_name="TestAgent",
+            )
+
+        # Must be invoked with the empty dict as-is, not {"input": None}.
+        mock_tool.invoke.assert_called_once_with({})
 
 
 if __name__ == "__main__":
