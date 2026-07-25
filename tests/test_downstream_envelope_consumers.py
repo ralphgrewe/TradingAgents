@@ -458,3 +458,214 @@ class TestFullDownstreamPipelineWithEnvelopeReports:
         # pre-existing gap unrelated to the envelope migration, out of scope
         # here; asserting on the rendered markdown instead).
         assert "95.0" in final_state["trader_investment_plan"]
+
+
+# ---------------------------------------------------------------------------
+# Portfolio Manager wiki-tool integration tests (issue #105)
+# ---------------------------------------------------------------------------
+
+
+class TestPortfolioManagerWikiToolIntegration:
+    """Tests for the Portfolio Manager's wiki tool-loop behavior (issue #105)."""
+
+    def test_pm_uses_wiki_tool_when_enabled(self):
+        """When knowledge_base_enabled=True and LLM is callable, PM uses run_structured_with_tools."""
+        from tradingagents.dataflows.config import set_config
+
+        llm = MagicMock()
+
+        # Track whether run_structured_with_tools was called
+        called_with_tools = {"yes": False}
+
+        def mock_with_structured_output(schema):
+            if schema is PortfolioDecision:
+                structured = MagicMock()
+                structured.invoke.return_value = PortfolioDecision(
+                    rating=PortfolioRating.BUY,
+                    executive_summary="Bullish setup with wiki confirmation.",
+                    investment_thesis="Analysis supports entry at current levels.",
+                    price_target=120.0,
+                )
+                return structured
+            return None
+
+        llm.with_structured_output.side_effect = mock_with_structured_output
+        llm.bind_tools = lambda tools: llm  # Mock bind_tools to return self
+
+        # Make invoke return a response with no tool_calls to end the loop
+        response_msg = MagicMock()
+        response_msg.tool_calls = []
+        response_msg.content = "Buy based on wiki confirmation"
+
+        def mock_invoke(messages):
+            called_with_tools["yes"] = True
+            return response_msg
+
+        llm.invoke.side_effect = mock_invoke
+
+        # Enable knowledge base
+        set_config({"knowledge_base_enabled": True})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Buy\n\n**Rationale**: Strong bull case."
+        state["trader_investment_plan"] = "**Action**: Buy"
+        state["risk_debate_state"] = {
+            "history": "Debate concluded with bullish lean.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        result = pm(state)
+
+        # Verify the decision was made
+        assert result["final_trade_decision"]
+        assert "Buy" in result["final_trade_decision"]
+        assert result["risk_debate_state"]["judge_decision"]
+
+    def test_pm_skips_wiki_tool_when_disabled(self):
+        """When knowledge_base_enabled=False, PM behaves as before (no tool binding)."""
+        from tradingagents.dataflows.config import set_config
+
+        llm = MagicMock()
+
+        def mock_with_structured_output(schema):
+            if schema is PortfolioDecision:
+                structured = MagicMock()
+                structured.invoke.return_value = PortfolioDecision(
+                    rating=PortfolioRating.HOLD,
+                    executive_summary="No clear signal.",
+                    investment_thesis="Mixed evidence.",
+                )
+                return structured
+            return None
+
+        llm.with_structured_output.side_effect = mock_with_structured_output
+        # Should NOT be called when knowledge_base_enabled=False
+        llm.bind_tools = MagicMock(side_effect=AssertionError("bind_tools should not be called"))
+
+        set_config({"knowledge_base_enabled": False})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Hold\n\n**Rationale**: Mixed signals."
+        state["trader_investment_plan"] = "**Action**: Hold"
+        state["risk_debate_state"] = {
+            "history": "Mixed debate.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        result = pm(state)
+
+        # Verify the decision was made without bind_tools being called
+        assert result["final_trade_decision"]
+        assert "Hold" in result["final_trade_decision"]
+
+    def test_pm_fallback_when_structured_output_unsupported(self):
+        """PM falls back to free text when structured output is not supported."""
+        from tradingagents.dataflows.config import set_config
+
+        llm = MagicMock()
+        # with_structured_output raises NotImplementedError (unsupported)
+        llm.with_structured_output.side_effect = NotImplementedError("No struct support")
+        # Fallback to free-text invoke
+        llm.invoke.return_value = MagicMock(
+            content="**Rating**: Sell\n\n**Executive Summary**: Risk/reward unfavorable.\n\n**Investment Thesis**: Too much downside risk."
+        )
+
+        set_config({"knowledge_base_enabled": False})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Sell\n\n**Rationale**: Bearish outlook."
+        state["trader_investment_plan"] = "**Action**: Sell"
+        state["risk_debate_state"] = {
+            "history": "Bearish consensus.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        result = pm(state)
+
+        # Verify fallback was used
+        assert result["final_trade_decision"]
+        assert "Sell" in result["final_trade_decision"]
+        # No structured data when using fallback
+        assert "portfolio_structured_data" not in result or result["portfolio_structured_data"] is None
+
+    def test_pm_preserves_risk_debate_state(self):
+        """Portfolio Manager preserves all risk_debate_state fields correctly."""
+        from tradingagents.dataflows.config import set_config
+
+        llm = MagicMock()
+
+        def mock_with_structured_output(schema):
+            if schema is PortfolioDecision:
+                structured = MagicMock()
+                structured.invoke.return_value = PortfolioDecision(
+                    rating=PortfolioRating.OVERWEIGHT,
+                    executive_summary="Gradual accumulation.",
+                    investment_thesis="Upside bias confirmed.",
+                )
+                return structured
+            return None
+
+        llm.with_structured_output.side_effect = mock_with_structured_output
+
+        set_config({"knowledge_base_enabled": False})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Overweight\n\n**Rationale**: Upside bias."
+        state["trader_investment_plan"] = "**Action**: Buy"
+        original_risk_state = {
+            "history": "Full debate history",
+            "aggressive_history": "Agg perspective",
+            "conservative_history": "Cons perspective",
+            "neutral_history": "Neut perspective",
+            "latest_speaker": "Conservative",
+            "current_aggressive_response": "Agg response",
+            "current_conservative_response": "Cons response",
+            "current_neutral_response": "Neut response",
+            "judge_decision": "",
+            "count": 3,
+        }
+        state["risk_debate_state"] = original_risk_state
+
+        result = pm(state)
+
+        # Verify all fields preserved
+        new_state = result["risk_debate_state"]
+        assert new_state["history"] == original_risk_state["history"]
+        assert new_state["aggressive_history"] == original_risk_state["aggressive_history"]
+        assert new_state["conservative_history"] == original_risk_state["conservative_history"]
+        assert new_state["neutral_history"] == original_risk_state["neutral_history"]
+        assert new_state["current_aggressive_response"] == original_risk_state["current_aggressive_response"]
+        assert new_state["current_conservative_response"] == original_risk_state["current_conservative_response"]
+        assert new_state["current_neutral_response"] == original_risk_state["current_neutral_response"]
+        assert new_state["count"] == original_risk_state["count"]
+        # Judge decision should be updated
+        assert new_state["judge_decision"]
+        assert new_state["latest_speaker"] == "Judge"

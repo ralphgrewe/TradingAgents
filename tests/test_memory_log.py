@@ -699,6 +699,8 @@ class TestPortfolioManagerInjection:
     # PM prompt
 
     def test_pm_prompt_includes_past_context(self):
+        from tradingagents.dataflows.config import set_config
+        set_config({"knowledge_base_enabled": False})  # Disable wiki tool for this test
         captured = {}
         llm = _structured_pm_llm(captured)
         pm_node = create_portfolio_manager(llm)
@@ -709,6 +711,8 @@ class TestPortfolioManagerInjection:
 
     def test_pm_no_past_context_no_section(self):
         """PM prompt omits the lessons section entirely when past_context is empty."""
+        from tradingagents.dataflows.config import set_config
+        set_config({"knowledge_base_enabled": False})  # Disable wiki tool for this test
         captured = {}
         llm = _structured_pm_llm(captured)
         pm_node = create_portfolio_manager(llm)
@@ -720,6 +724,8 @@ class TestPortfolioManagerInjection:
         """The structured PortfolioDecision is rendered to markdown that
         downstream consumers (memory log, signal processor, CLI display)
         can parse without any extra LLM call."""
+        from tradingagents.dataflows.config import set_config
+        set_config({"knowledge_base_enabled": False})  # Disable wiki tool for this test
         captured = {}
         decision = PortfolioDecision(
             rating=PortfolioRating.OVERWEIGHT,
