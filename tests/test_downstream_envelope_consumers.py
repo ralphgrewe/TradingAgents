@@ -22,7 +22,7 @@ markdown. This module covers:
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langgraph.graph import END, START, StateGraph
@@ -469,13 +469,20 @@ class TestPortfolioManagerWikiToolIntegration:
     """Tests for the Portfolio Manager's wiki tool-loop behavior (issue #105)."""
 
     def test_pm_uses_wiki_tool_when_enabled(self):
-        """When knowledge_base_enabled=True and LLM is callable, PM uses run_structured_with_tools."""
+        """When knowledge_base_enabled=True, PM actually invokes search_strategy_wiki
+        as a tool call in round 1, then returns a structured decision in round 2.
+
+        This exercises the real tool-loop path end-to-end: a mocked LLM response
+        carrying a `search_strategy_wiki` tool_call, the (mocked) tool executing and
+        producing a ToolMessage, a second LLM response with no further tool calls to
+        end the loop, and finally a structured PortfolioDecision. Regression test for
+        issue #105 finding 2: the previous version of this test mocked `tool_calls =
+        []` on the very first response, so the tool loop exited immediately and
+        `search_strategy_wiki` was never actually invoked anywhere in the test suite.
+        """
         from tradingagents.dataflows.config import set_config
 
         llm = MagicMock()
-
-        # Track whether run_structured_with_tools was called
-        called_with_tools = {"yes": False}
 
         def mock_with_structured_output(schema):
             if schema is PortfolioDecision:
@@ -490,45 +497,91 @@ class TestPortfolioManagerWikiToolIntegration:
             return None
 
         llm.with_structured_output.side_effect = mock_with_structured_output
-        llm.bind_tools = lambda tools: llm  # Mock bind_tools to return self
 
-        # Make invoke return a response with no tool_calls to end the loop
-        response_msg = MagicMock()
-        response_msg.tool_calls = []
-        response_msg.content = "Buy based on wiki confirmation"
+        bind_tools_calls = []
 
-        def mock_invoke(messages):
-            called_with_tools["yes"] = True
-            return response_msg
+        def fake_bind_tools(tools):
+            bind_tools_calls.append(tools)
+            return llm  # bound LLM is the same mock, tracked via llm.invoke
 
-        llm.invoke.side_effect = mock_invoke
+        llm.bind_tools = fake_bind_tools
+
+        # Round 1: LLM requests a search_strategy_wiki call.
+        tool_call_response = MagicMock()
+        tool_call_response.tool_calls = [
+            {
+                "name": "search_strategy_wiki",
+                "args": {"query": "momentum strategy NVDA regime", "k": 3},
+                "id": "call_1",
+            }
+        ]
+        tool_call_response.content = ""
+
+        # Round 2: LLM is done consulting tools.
+        final_round_response = MagicMock()
+        final_round_response.tool_calls = []
+        final_round_response.content = "Buy based on wiki confirmation"
+
+        llm.invoke.side_effect = [tool_call_response, final_round_response]
+
+        # Mock the wiki tool itself so no real knowledge-base lookup happens.
+        canned_wiki_result = (
+            "**Strategy Knowledge Base Results:**\n\n"
+            "[wiki-1] Momentum continuation after breakout\n"
+            "Tags: momentum, breakout\n"
+            "Score: 0.912\n"
+        )
+        mock_wiki_tool = MagicMock()
+        mock_wiki_tool.name = "search_strategy_wiki"
+        mock_wiki_tool.invoke.return_value = canned_wiki_result
 
         # Enable knowledge base
         set_config({"knowledge_base_enabled": True})
 
-        pm = create_portfolio_manager(llm)
-        state = _envelope_state()
-        state["investment_plan"] = "**Recommendation**: Buy\n\n**Rationale**: Strong bull case."
-        state["trader_investment_plan"] = "**Action**: Buy"
-        state["risk_debate_state"] = {
-            "history": "Debate concluded with bullish lean.",
-            "aggressive_history": "",
-            "conservative_history": "",
-            "neutral_history": "",
-            "latest_speaker": "",
-            "current_aggressive_response": "",
-            "current_conservative_response": "",
-            "current_neutral_response": "",
-            "judge_decision": "",
-            "count": 0,
-        }
+        with patch(
+            "tradingagents.agents.managers.portfolio_manager.search_strategy_wiki",
+            mock_wiki_tool,
+        ):
+            pm = create_portfolio_manager(llm)
+            state = _envelope_state()
+            state["investment_plan"] = "**Recommendation**: Buy\n\n**Rationale**: Strong bull case."
+            state["trader_investment_plan"] = "**Action**: Buy"
+            state["risk_debate_state"] = {
+                "history": "Debate concluded with bullish lean.",
+                "aggressive_history": "",
+                "conservative_history": "",
+                "neutral_history": "",
+                "latest_speaker": "",
+                "current_aggressive_response": "",
+                "current_conservative_response": "",
+                "current_neutral_response": "",
+                "judge_decision": "",
+                "count": 0,
+            }
 
-        result = pm(state)
+            result = pm(state)
 
-        # Verify the decision was made
+        # The wiki tool was actually invoked, with the query the mocked LLM requested.
+        mock_wiki_tool.invoke.assert_called_once_with(
+            {"query": "momentum strategy NVDA regime", "k": 3}
+        )
+        # Tools (including search_strategy_wiki) were bound before the loop ran.
+        assert bind_tools_calls
+        assert mock_wiki_tool in bind_tools_calls[0]
+        # Both loop rounds ran (tool call round, then no-tool-call round).
+        assert llm.invoke.call_count == 2
+
+        # Verify the decision was made and structured data populated.
         assert result["final_trade_decision"]
         assert "Buy" in result["final_trade_decision"]
         assert result["risk_debate_state"]["judge_decision"]
+        assert result["portfolio_structured_data"] is not None
+        assert result["portfolio_structured_data"]["rating"] == PortfolioRating.BUY.value
+        assert (
+            result["portfolio_structured_data"]["executive_summary"]
+            == "Bullish setup with wiki confirmation."
+        )
+        assert result["portfolio_structured_data"]["price_target"] == 120.0
 
     def test_pm_skips_wiki_tool_when_disabled(self):
         """When knowledge_base_enabled=False, PM behaves as before (no tool binding)."""
@@ -576,13 +629,27 @@ class TestPortfolioManagerWikiToolIntegration:
         assert result["final_trade_decision"]
         assert "Hold" in result["final_trade_decision"]
 
-    def test_pm_fallback_when_structured_output_unsupported(self):
-        """PM falls back to free text when structured output is not supported."""
+    def test_pm_fallback_when_structured_output_unsupported_and_kb_disabled(self):
+        """PM falls back to free text via the old direct path when structured output
+        is unsupported AND knowledge_base_enabled=False.
+
+        This exercises the pre-existing (pre-#105) direct `llm.invoke(prompt).content`
+        fallback -- the `else` branch of the knowledge_base_enabled gate. It does NOT
+        exercise the gate-bug fix from #105 finding 1 (structured output unsupported
+        but knowledge_base_enabled=True); see
+        `test_pm_uses_tool_loop_when_structured_output_unsupported_but_kb_enabled`
+        below for that scenario. Renamed from
+        `test_pm_fallback_when_structured_output_unsupported`, which implied it
+        covered the unsupported+kb-enabled combination but never actually set
+        knowledge_base_enabled=True.
+        """
         from tradingagents.dataflows.config import set_config
 
         llm = MagicMock()
         # with_structured_output raises NotImplementedError (unsupported)
         llm.with_structured_output.side_effect = NotImplementedError("No struct support")
+        # bind_tools must never be reached on this path.
+        llm.bind_tools = MagicMock(side_effect=AssertionError("bind_tools should not be called"))
         # Fallback to free-text invoke
         llm.invoke.return_value = MagicMock(
             content="**Rating**: Sell\n\n**Executive Summary**: Risk/reward unfavorable.\n\n**Investment Thesis**: Too much downside risk."
@@ -613,6 +680,84 @@ class TestPortfolioManagerWikiToolIntegration:
         assert result["final_trade_decision"]
         assert "Sell" in result["final_trade_decision"]
         # No structured data when using fallback
+        assert "portfolio_structured_data" not in result or result["portfolio_structured_data"] is None
+
+    def test_pm_uses_tool_loop_when_structured_output_unsupported_but_kb_enabled(self):
+        """Regression test for issue #105 finding 1 (the gate bug).
+
+        Previously PM gated entry into the wiki tool-loop path on
+        `knowledge_base_enabled and structured_llm is not None`, so when a provider
+        didn't support structured output (structured_llm is None) but
+        knowledge_base_enabled=True, PM silently fell back to the old direct path and
+        never bound `search_strategy_wiki` at all -- even though the prompt's
+        wiki_availability_note told the LLM it had wiki access. This test pins the
+        fixed behavior: knowledge_base_enabled=True alone must route through
+        run_structured_with_tools (tools bound via llm.bind_tools), which internally
+        discovers structured output isn't supported and falls back to free text on
+        its own -- rather than skipping tool binding entirely.
+        """
+        from tradingagents.dataflows.config import set_config
+
+        llm = MagicMock()
+        # with_structured_output is unsupported for *both* the outer bind_structured
+        # call (at node-creation time) and the inner one run_structured_with_tools
+        # performs on every invocation.
+        llm.with_structured_output.side_effect = NotImplementedError("No struct support")
+
+        bind_tools_calls = []
+
+        def fake_bind_tools(tools):
+            bind_tools_calls.append(tools)
+            return llm
+
+        llm.bind_tools = fake_bind_tools
+
+        # Round 1: no tool calls requested this time -- loop ends immediately, but
+        # bind_tools must still have been called to prove the gate opened.
+        no_tool_call_response = MagicMock()
+        no_tool_call_response.tool_calls = []
+        no_tool_call_response.content = ""
+
+        # Final free-text fallback call (structured output unsupported).
+        fallback_response = MagicMock()
+        fallback_response.content = (
+            "**Rating**: Sell\n\n**Executive Summary**: Risk/reward unfavorable.\n\n"
+            "**Investment Thesis**: Too much downside risk."
+        )
+
+        llm.invoke.side_effect = [no_tool_call_response, fallback_response]
+
+        set_config({"knowledge_base_enabled": True})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Sell\n\n**Rationale**: Bearish outlook."
+        state["trader_investment_plan"] = "**Action**: Sell"
+        state["risk_debate_state"] = {
+            "history": "Bearish consensus.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        result = pm(state)
+
+        # The gate-bug fix: bind_tools was actually called, meaning PM took the
+        # tool-loop path despite structured output being unsupported.
+        assert bind_tools_calls
+        assert any(
+            getattr(t, "name", None) == "search_strategy_wiki" for t in bind_tools_calls[0]
+        )
+
+        # Falls back to free text (structured output unsupported end-to-end).
+        assert result["final_trade_decision"]
+        assert "Sell" in result["final_trade_decision"]
         assert "portfolio_structured_data" not in result or result["portfolio_structured_data"] is None
 
     def test_pm_preserves_risk_debate_state(self):

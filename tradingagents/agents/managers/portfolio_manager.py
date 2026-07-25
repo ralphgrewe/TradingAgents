@@ -103,8 +103,14 @@ regime-specific approaches (e.g., "Should I use mean reversion in this regime?" 
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{wiki_availability_note}{get_language_instruction()}"""
 
-        # Determine which path to take: with tools or without
-        if knowledge_base_enabled and structured_llm is not None:
+        # Determine which path to take: with tools or without.
+        # Gate solely on knowledge_base_enabled -- run_structured_with_tools binds
+        # tools via llm.bind_tools(tools) independently of structured-output support,
+        # and handles structured_llm being unusable/None internally by falling back
+        # to free text on the final call. Gating on `structured_llm is not None` here
+        # too would silently skip tool binding (and the wiki_availability_note becomes
+        # a lie to the LLM) whenever the provider doesn't support structured output.
+        if knowledge_base_enabled:
             # Use the wiki-aware tool-loop path
             messages = [HumanMessage(content=prompt)]
             tools = [search_strategy_wiki]
@@ -126,7 +132,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
                 final_trade_decision = fallback_text
                 portfolio_structured_data = None
         else:
-            # Original direct path (no tools)
+            # Original direct path (no tools): only reached when knowledge_base_enabled
+            # is explicitly False.
             if structured_llm is not None:
                 try:
                     structured_result = structured_llm.invoke(prompt)
