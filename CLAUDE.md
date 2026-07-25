@@ -197,6 +197,14 @@ override by adding one row there, not by touching CLI/entry-point code. `set_con
 in `tradingagents/dataflows/config.py` hold the live, process-global copy that agent tool code
 reads from.
 
+A row's value is normally a flat top-level key (e.g. `"temperature"`). For a config key that
+lives inside a nested dict (e.g. `data_vendors`), use dot notation instead (e.g.
+`"data_vendors.knowledge_base"` for `TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE`) —
+`_apply_env_overrides` detects the `.` and routes through `_get_nested`/`_set_nested` to read/write
+the nested value in place, coercing against the existing nested default's type just like the flat
+case. Only add a nested row when the target key is genuinely nested; flat keys should keep using
+the plain top-level form.
+
 ### Research stage configuration
 
 - **`research_stage`** (env: `TRADINGAGENTS_RESEARCH_STAGE`, default `"researcher"`): which research
