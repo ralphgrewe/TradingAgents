@@ -26,6 +26,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
 }
 
 
@@ -81,6 +82,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # variation on models that honor it; reasoning models largely ignore it
     # and no setting makes LLM output bit-identical across runs.
     "temperature": None,
+    # Network timeout (seconds) for LLM API calls, forwarded as ``timeout`` to
+    # the underlying chat client (ChatOpenAI/ChatAnthropic/...). Without an
+    # explicit timeout, langchain-openai passes ``timeout=None`` straight
+    # through to httpx, which disables timeouts entirely rather than falling
+    # back to the openai SDK's own 600s default — so a wedged local provider
+    # (e.g. an ollama daemon that's up but never responds: mid model-pull, or
+    # stuck loading) hangs the run forever with no CPU/GPU activity and no
+    # error (#108). 120s is generous enough for a slow CPU-bound local model
+    # to finish a normal turn while still failing fast on a truly wedged
+    # endpoint; override via TRADINGAGENTS_LLM_TIMEOUT for slower hardware.
+    "llm_timeout": 120,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,

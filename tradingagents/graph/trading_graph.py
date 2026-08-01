@@ -164,6 +164,17 @@ class TradingAgentsGraph:
         if temperature is not None:
             kwargs["temperature"] = float(temperature)
 
+        # Bound every provider's network calls so a wedged endpoint (most
+        # notably a local ollama daemon that accepts the connection but never
+        # responds) fails fast with a clear timeout error instead of hanging
+        # the run indefinitely with no CPU/GPU activity (#108). Each client's
+        # own passthrough kwargs list decides whether it forwards "timeout"
+        # to its underlying SDK; clients that don't support it simply ignore
+        # the extra kwarg.
+        llm_timeout = self.config.get("llm_timeout")
+        if llm_timeout is not None:
+            kwargs["timeout"] = llm_timeout
+
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:

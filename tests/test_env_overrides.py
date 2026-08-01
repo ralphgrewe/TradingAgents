@@ -29,6 +29,7 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
     assert dc.DEFAULT_CONFIG["temperature"] is None
+    assert dc.DEFAULT_CONFIG["llm_timeout"] == 120
 
 
 def test_string_overrides(monkeypatch):
@@ -97,6 +98,13 @@ def test_temperature_override_passthrough(monkeypatch):
 def test_temperature_empty_env_is_passthrough(monkeypatch):
     dc = _reload_with_env(monkeypatch, TRADINGAGENTS_TEMPERATURE="")
     assert dc.DEFAULT_CONFIG["temperature"] is None
+
+
+def test_llm_timeout_override(monkeypatch):
+    """TRADINGAGENTS_LLM_TIMEOUT overrides the 120s default (#108)."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_LLM_TIMEOUT="45")
+    assert dc.DEFAULT_CONFIG["llm_timeout"] == 45
+    assert isinstance(dc.DEFAULT_CONFIG["llm_timeout"], int)
 
 
 def test_invalid_int_raises(monkeypatch):
