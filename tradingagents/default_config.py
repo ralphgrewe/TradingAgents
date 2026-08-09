@@ -22,6 +22,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SIMULATION_SERVER_ARGS": "simulation_server_args",
     "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
     "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
+    "TRADINGAGENTS_MEMORY_MCP_TIMEOUT":   "memory_mcp_timeout",
     "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
     "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
@@ -175,4 +176,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # "http://127.0.0.1:8001/sse" for sse) — see tradingagents/memory/mcp_client.py.
     "memory_mcp_url": None,
     "memory_mcp_transport": "streamable-http",   # Options: streamable-http, sse
+    # Wall-clock bound (seconds) on every memory MCP interaction: establishing
+    # the session in connect() and each individual tool call. Without it, a
+    # server (or an HTTP proxy standing in front of it) that answers a request
+    # with an error the MCP client never routes back to the waiting caller
+    # hangs the whole run indefinitely — issue #108.
+    "memory_mcp_timeout": 30.0,
 })

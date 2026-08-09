@@ -30,6 +30,7 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
     assert dc.DEFAULT_CONFIG["temperature"] is None
     assert dc.DEFAULT_CONFIG["llm_timeout"] == 120
+    assert dc.DEFAULT_CONFIG["memory_mcp_timeout"] == 30.0
 
 
 def test_string_overrides(monkeypatch):
@@ -105,6 +106,13 @@ def test_llm_timeout_override(monkeypatch):
     dc = _reload_with_env(monkeypatch, TRADINGAGENTS_LLM_TIMEOUT="45")
     assert dc.DEFAULT_CONFIG["llm_timeout"] == 45
     assert isinstance(dc.DEFAULT_CONFIG["llm_timeout"], int)
+
+
+def test_memory_mcp_timeout_override(monkeypatch):
+    """TRADINGAGENTS_MEMORY_MCP_TIMEOUT overrides the 30s default (#108)."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MEMORY_MCP_TIMEOUT="5")
+    assert dc.DEFAULT_CONFIG["memory_mcp_timeout"] == 5.0
+    assert isinstance(dc.DEFAULT_CONFIG["memory_mcp_timeout"], float)
 
 
 def test_invalid_int_raises(monkeypatch):

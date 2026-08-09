@@ -76,6 +76,27 @@ was hardened against):
   ``SimulationClient.close()``, see commit c42d73c) — any error unwinding the
   exit stack or closing the loop is logged as a warning rather than
   propagated, and internal state is always cleared.
+- **Loopback never goes through an HTTP proxy** (issue #108): the default
+  server URL is on ``127.0.0.1``, and httpx (which the MCP transports use)
+  reads ``http_proxy``/``https_proxy`` from the environment. Its ``no_proxy``
+  handling only understands literal hostnames and IPs — a CIDR entry like
+  ``no_proxy=127.0.0.0/8`` becomes the mount pattern ``all://127.0.0.0/8``,
+  which never matches host ``127.0.0.1`` — so on an otherwise correctly
+  configured machine the client's requests to its own loopback server were
+  being sent to the corporate proxy, which answered ``503``. Requests to a
+  loopback host are therefore issued from an httpx client built with
+  ``trust_env=False``, bypassing environment proxies entirely; non-loopback
+  URLs keep the default environment-aware behavior.
+- **Every interaction is time-bounded** (issue #108): ``connect()`` and each
+  tool call are wrapped in ``asyncio.wait_for`` (``memory_mcp_timeout``
+  config key / ``TRADINGAGENTS_MEMORY_MCP_TIMEOUT`` env var, default 30s).
+  Neither is bounded by the MCP SDK itself: ``streamable_http_client``
+  raises transport-level failures (e.g. an HTTP error status from a proxy)
+  inside its internal anyio task group, where they are only surfaced when
+  that task group exits — the coroutine awaiting the JSON-RPC response is
+  never woken, so ``session.initialize()``/``session.call_tool()`` block
+  forever. The timeout converts that silent hang into a
+  ``MemoryMCPConnectionError``/``MemoryMCPToolError``.
 - **Error handling**: ``MemoryMCPConnectionError`` for "can't reach / can't
   initialize a session with the server" (mirrors
   ``SimulationConnectionError``); ``MemoryMCPToolError`` for "the tool call
@@ -93,15 +114,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp.client.session import ClientSession
 
 logger = logging.getLogger(__name__)
 
 _VALID_TRANSPORTS = ("streamable-http", "sse")
+
+# Fallback bound (seconds) on connect()/tool calls when config carries no
+# ``memory_mcp_timeout`` (e.g. a caller that replaced the global config dict).
+_DEFAULT_TIMEOUT = 30.0
+
+# Grace period (seconds) for the lifecycle Task to unwind after a connect
+# timeout. Bounded too, so a wedged transport can't turn cleanup into a
+# second hang.
+_UNWIND_TIMEOUT = 5.0
 
 # Default host/port a locally-run ``mcp_server.py`` binds to under a
 # networked transport (see ``start_server.sh``). The client connects to it
@@ -168,6 +200,40 @@ def _resolve_connection(url: str | None, transport: str | None) -> tuple[str, st
     return resolved_url, resolved_transport
 
 
+def _resolve_timeout(timeout: float | None) -> float:
+    """Resolve the per-interaction timeout in seconds.
+
+    Precedence: explicit constructor argument > ``memory_mcp_timeout`` config
+    key (fed by ``TRADINGAGENTS_MEMORY_MCP_TIMEOUT``) > ``_DEFAULT_TIMEOUT``.
+    """
+    if timeout is not None:
+        return float(timeout)
+
+    from tradingagents.dataflows.config import get_config
+
+    configured = get_config().get("memory_mcp_timeout")
+    return float(configured) if configured else _DEFAULT_TIMEOUT
+
+
+def _is_loopback_url(url: str) -> bool:
+    """Whether ``url``'s host is loopback (``localhost``/``127.0.0.0/8``/``::1``).
+
+    Used to decide whether to bypass environment HTTP proxies — see the
+    module docstring's "Loopback never goes through an HTTP proxy" (#108).
+    """
+    if not url:
+        return False
+    host = urlparse(url).hostname
+    if host is None:
+        return False
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class MemoryMCPClient:
     """Synchronous client for the memory MCP server's ``memory_*`` tools.
 
@@ -181,7 +247,12 @@ class MemoryMCPClient:
             stats = client.get_statistics(agent="trader")
     """
 
-    def __init__(self, url: str | None = None, transport: str | None = None):
+    def __init__(
+        self,
+        url: str | None = None,
+        transport: str | None = None,
+        timeout: float | None = None,
+    ):
         """Initialize the client.
 
         Args:
@@ -190,9 +261,14 @@ class MemoryMCPClient:
                 resolved transport's default path on ``127.0.0.1:8001``.
             transport: ``"streamable-http"`` or ``"sse"``. Defaults to
                 config/env value, then ``"streamable-http"``.
+            timeout: Seconds to allow for establishing the session and for
+                each individual tool call. Defaults to the
+                ``memory_mcp_timeout`` config key
+                (``TRADINGAGENTS_MEMORY_MCP_TIMEOUT``), then 30s.
         """
         self.url = url
         self.transport = transport
+        self.timeout = timeout
         self._session: ClientSession | None = None
         # See module docstring "Event-loop lifecycle" — one loop plus one
         # persistent lifecycle Task (which owns the AsyncExitStack
@@ -223,9 +299,15 @@ class MemoryMCPClient:
         entered and exited by the same ``asyncio.Task`` throughout
         (issue #58).
 
+        Establishing the session is bounded by ``self.timeout`` (issue #108):
+        a transport-level failure the MCP SDK swallows into its internal
+        task group would otherwise leave ``session.initialize()`` waiting on
+        a response that never arrives, hanging the caller forever.
+
         Raises:
             MemoryMCPConnectionError: If unable to reach the server or
-                initialize a session (including an invalid transport).
+                initialize a session (including an invalid transport), or if
+                doing so takes longer than the resolved timeout.
         """
         if self._session is not None:
             return  # Already connected
@@ -237,6 +319,8 @@ class MemoryMCPClient:
                 f"Invalid memory MCP transport {self.transport!r}; "
                 f"must be one of {_VALID_TRANSPORTS}"
             )
+
+        self.timeout = _resolve_timeout(self.timeout)
 
         try:
             # A dedicated event loop is kept alive for the lifetime of the
@@ -273,7 +357,22 @@ class MemoryMCPClient:
 
             task = loop.create_task(_lifecycle())
             try:
-                loop.run_until_complete(ready_event.wait())
+                loop.run_until_complete(
+                    asyncio.wait_for(ready_event.wait(), self.timeout)
+                )
+            except asyncio.TimeoutError:
+                # The session never came up and never failed — the SDK is
+                # still waiting on a JSON-RPC response that will not arrive
+                # (see module docstring, #108). Unwind and report instead of
+                # blocking the run forever.
+                self._abandon_lifecycle(loop, task)
+                raise MemoryMCPConnectionError(
+                    f"Timed out after {self.timeout}s establishing a session with the "
+                    f"memory MCP server at {self.url!r} via {self.transport!r} transport. "
+                    f"The server accepted the connection but never answered; check that "
+                    f"mcp_server.py is running there and that no HTTP proxy "
+                    f"(http_proxy/https_proxy) is intercepting the request."
+                ) from None
             except Exception:
                 loop.close()
                 raise
@@ -282,10 +381,8 @@ class MemoryMCPClient:
                 # Drive the lifecycle task to completion (it still needs to
                 # unwind whatever it already entered) before surfacing the
                 # failure, so connect() never leaks a half-open connection.
-                try:
+                with contextlib.suppress(Exception):
                     loop.run_until_complete(task)
-                except Exception:
-                    pass
                 loop.close()
                 raise state["error"]
 
@@ -294,11 +391,72 @@ class MemoryMCPClient:
             self._lifecycle_task = task
             self._shutdown_event = shutdown_event
 
+        except MemoryMCPConnectionError:
+            # Already carries the url/transport context (e.g. the timeout
+            # above) — re-wrapping would only nest the same message twice.
+            raise
         except Exception as exc:
             raise MemoryMCPConnectionError(
                 f"Failed to connect to memory MCP server at {self.url!r} "
                 f"via {self.transport!r} transport: {exc}"
             ) from exc
+
+    @staticmethod
+    def _abandon_lifecycle(loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> None:
+        """Cancel a lifecycle Task that never became ready and close its loop.
+
+        Cleanup is itself bounded (``_UNWIND_TIMEOUT``): unwinding a wedged
+        transport can block just as the connect did, and a hang in the error
+        path would defeat the point of timing out at all. Errors are
+        swallowed — the connection is being torn down either way, and the
+        caller is about to see the connect failure.
+        """
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            loop.run_until_complete(
+                asyncio.wait_for(
+                    asyncio.gather(task, return_exceptions=True), _UNWIND_TIMEOUT
+                )
+            )
+        with contextlib.suppress(Exception):
+            loop.close()
+
+    def _http_client_factory(self):
+        """Build the ``McpHttpClientFactory`` the transports create their
+        ``httpx.AsyncClient`` from.
+
+        For a loopback ``self.url`` the client is built with
+        ``trust_env=False`` so environment proxies are bypassed — see the
+        module docstring's "Loopback never goes through an HTTP proxy"
+        (#108). Everything else mirrors ``mcp.shared._httpx_utils
+        .create_mcp_http_client``'s defaults, which non-loopback URLs keep
+        using unchanged.
+        """
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        if not _is_loopback_url(self.url):
+            return create_mcp_http_client
+
+        def _factory(headers=None, timeout=None, auth=None):
+            import httpx
+            from mcp.shared._httpx_utils import (
+                MCP_DEFAULT_SSE_READ_TIMEOUT,
+                MCP_DEFAULT_TIMEOUT,
+            )
+
+            kwargs: dict[str, Any] = {
+                "follow_redirects": True,
+                "timeout": timeout
+                or httpx.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
+                "trust_env": False,
+            }
+            if headers is not None:
+                kwargs["headers"] = headers
+            if auth is not None:
+                kwargs["auth"] = auth
+            return httpx.AsyncClient(**kwargs)
+
+        return _factory
 
     async def _enter_session(self, exit_stack: contextlib.AsyncExitStack) -> ClientSession:
         """Enter the transport and ``ClientSession`` into ``exit_stack`` and
@@ -316,13 +474,19 @@ class MemoryMCPClient:
             from mcp.client.sse import sse_client
 
             read_stream, write_stream = await exit_stack.enter_async_context(
-                sse_client(self.url)
+                sse_client(self.url, httpx_client_factory=self._http_client_factory())
             )
         else:  # "streamable-http"
             from mcp.client.streamable_http import streamable_http_client
 
+            # streamable_http_client only manages the lifecycle of a client
+            # it created itself, so ours is entered into the same exit stack
+            # (owned by the lifecycle Task) alongside the transport.
+            http_client = await exit_stack.enter_async_context(
+                self._http_client_factory()()
+            )
             read_stream, write_stream, _get_session_id = await exit_stack.enter_async_context(
-                streamable_http_client(self.url)
+                streamable_http_client(self.url, http_client=http_client)
             )
 
         session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
@@ -411,8 +575,14 @@ class MemoryMCPClient:
             # Reuse the event loop the session was created on (see
             # connect()) — the session's streams are bound to it and cannot
             # be driven from a different loop.
+            # Bounded for the same reason connect() is (issue #108): a
+            # transport-level failure never routed back to the caller would
+            # otherwise leave this waiting on a response forever.
             result = self._loop.run_until_complete(
-                self._session.call_tool(tool_name, arguments or {})
+                asyncio.wait_for(
+                    self._session.call_tool(tool_name, arguments or {}),
+                    self.timeout or _DEFAULT_TIMEOUT,
+                )
             )
 
             if result.isError:
@@ -447,6 +617,14 @@ class MemoryMCPClient:
 
         except MemoryMCPToolError:
             raise
+        except asyncio.TimeoutError as exc:
+            # TimeoutError stringifies to "", so spell the failure out here
+            # rather than letting the generic handler below render it.
+            raise MemoryMCPToolError(
+                f"Tool call '{tool_name}' timed out after "
+                f"{self.timeout or _DEFAULT_TIMEOUT}s against the memory MCP server "
+                f"at {self.url!r}"
+            ) from exc
         except Exception as exc:
             raise MemoryMCPToolError(f"Tool call '{tool_name}' failed: {exc}") from exc
 

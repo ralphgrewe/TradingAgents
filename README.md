@@ -180,6 +180,14 @@ that environment.
 - `FASTMCP_PORT`: Port to bind to for networked transports (`"8001"` default).
 - `TRADINGAGENTS_MEMORY_MCP_URL`: Full server URL for `trading_graph.py` / `MemoryMCPClient` (e.g. `"http://127.0.0.1:8001/mcp"`). If unset, the client derives a default from the *resolved* transport's FastMCP mount path (`/mcp` or `/sse`) on `127.0.0.1:8001` — a hardcoded client-side default, independent of the server's `FASTMCP_HOST`/`FASTMCP_PORT` bind settings (only relevant if server and client happen to both run locally with defaults).
 - `TRADINGAGENTS_MEMORY_MCP_TRANSPORT`: Transport type for the memory client (`"streamable-http"` default, or `"sse"`) — selects which client implementation connects (`streamable_http_client` vs `sse_client`). Resolved **independently** of `TRADINGAGENTS_MEMORY_MCP_URL`: each of URL and transport follows its own precedence (explicit `MemoryMCPClient(...)` argument > this env var > built-in default — see `_resolve_connection` in `tradingagents/memory/mcp_client.py`), so setting a URL does not disable transport resolution — you must set both together when they need to match (as in the SSE example above).
+- `TRADINGAGENTS_MEMORY_MCP_TIMEOUT`: Seconds allowed for establishing the memory MCP session and for each individual tool call (`30` default). A server that accepts the connection but never answers — or an HTTP proxy answering in its place — now fails the run with a `MemoryMCPConnectionError`/`MemoryMCPToolError` after this long instead of hanging indefinitely.
+
+> **Behind an HTTP proxy:** the client talks to `127.0.0.1` by default, and httpx's `no_proxy`
+> handling only matches literal hosts, so a CIDR entry such as `no_proxy=127.0.0.0/8` does *not*
+> exempt `127.0.0.1` and the request gets handed to `http_proxy` (which typically answers `503`).
+> Requests to a loopback memory server therefore bypass environment proxies entirely; a remote
+> `TRADINGAGENTS_MEMORY_MCP_URL` still honors them, so list that host in `no_proxy` by name if it
+> should be reached directly.
 
 ## More detail
 

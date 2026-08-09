@@ -7,6 +7,9 @@ real LLM calls (issue #51).
 import asyncio
 import contextlib
 import json
+import socket
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +19,7 @@ from tradingagents.memory.mcp_client import (
     MemoryMCPConnectionError,
     MemoryMCPToolError,
     _default_url,
+    _is_loopback_url,
     _resolve_connection,
 )
 
@@ -118,7 +122,7 @@ class TestMemoryMCPClientConnection:
         read_stream, write_stream = object(), object()
 
         @contextlib.asynccontextmanager
-        async def fake_streamable_http_client(url):
+        async def fake_streamable_http_client(url, **kwargs):
             yield (read_stream, write_stream, lambda: "session-id")
 
         fake_session = AsyncMock()
@@ -149,7 +153,7 @@ class TestMemoryMCPClientConnection:
         read_stream, write_stream = object(), object()
 
         @contextlib.asynccontextmanager
-        async def fake_sse_client(url):
+        async def fake_sse_client(url, **kwargs):
             yield (read_stream, write_stream)
 
         fake_session = AsyncMock()
@@ -180,7 +184,7 @@ class TestMemoryMCPClientConnection:
         exited = []
 
         @contextlib.asynccontextmanager
-        async def fake_streamable_http_client(url):
+        async def fake_streamable_http_client(url, **kwargs):
             try:
                 yield (object(), object(), lambda: None)
             finally:
@@ -210,7 +214,7 @@ class TestMemoryMCPClientConnection:
         exited = []
 
         @contextlib.asynccontextmanager
-        async def fake_streamable_http_client(url):
+        async def fake_streamable_http_client(url, **kwargs):
             try:
                 yield (object(), object(), lambda: None)
             finally:
@@ -252,7 +256,7 @@ class TestMemoryMCPClientConnection:
         exited = []
 
         @contextlib.asynccontextmanager
-        async def fake_streamable_http_client(url):
+        async def fake_streamable_http_client(url, **kwargs):
             try:
                 yield (object(), object(), lambda: None)
             finally:
@@ -295,7 +299,7 @@ class TestMemoryMCPClientConnection:
         closed."""
 
         @contextlib.asynccontextmanager
-        async def fake_streamable_http_client(url):
+        async def fake_streamable_http_client(url, **kwargs):
             yield (object(), object(), lambda: None)
 
         fake_session = AsyncMock()
@@ -331,7 +335,7 @@ class TestMemoryMCPClientConnection:
         as MemoryMCPConnectionError, distinct from a tool-call error."""
 
         @contextlib.asynccontextmanager
-        async def failing_streamable_http_client(url):
+        async def failing_streamable_http_client(url, **kwargs):
             raise ConnectionRefusedError("server unreachable")
             yield  # pragma: no cover - never reached
 
@@ -358,6 +362,209 @@ class TestMemoryMCPClientConnection:
         client = MemoryMCPClient()
         client.close()  # Should not raise
         assert client._session is None
+
+
+class TestConnectTimeout:
+    """Regression tests for issue #108 — connect() must never hang forever.
+
+    The MCP SDK raises transport-level failures (e.g. an HTTP error status
+    returned by a proxy sitting in front of the server) inside
+    ``streamable_http_client``'s internal anyio task group, where they only
+    surface when that task group exits. The coroutine awaiting the JSON-RPC
+    response is never woken, so ``session.initialize()`` blocks forever —
+    the reported symptom was ``run_trading_agents.py`` sitting at
+    "Processing AAPL..." indefinitely with no CPU load.
+    """
+
+    def test_connect_times_out_when_initialize_never_returns(self):
+        """A session that never initializes fails fast instead of hanging."""
+
+        @contextlib.asynccontextmanager
+        async def fake_streamable_http_client(url, **kwargs):
+            yield (object(), object(), lambda: None)
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+
+        async def never_returns():
+            await asyncio.sleep(3600)
+
+        fake_session.initialize.side_effect = never_returns
+
+        with patch(
+            "mcp.client.streamable_http.streamable_http_client",
+            side_effect=fake_streamable_http_client,
+        ), patch("tradingagents.memory.mcp_client.ClientSession", return_value=fake_session):
+            client = MemoryMCPClient(
+                url="http://127.0.0.1:8001/mcp", transport="streamable-http", timeout=0.5
+            )
+            started = time.monotonic()
+            with pytest.raises(MemoryMCPConnectionError) as exc_info:
+                client.connect()
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 10, "connect() hung well past its configured timeout"
+        assert "Timed out" in str(exc_info.value)
+        # The message must be actionable — it names the endpoint and points at
+        # the two things that actually cause this.
+        assert "http://127.0.0.1:8001/mcp" in str(exc_info.value)
+        assert "proxy" in str(exc_info.value)
+        # And the client is left cleanly disconnected, not half-open.
+        assert client._session is None
+        assert client._loop is None
+        assert client._lifecycle_task is None
+
+    def test_connect_timeout_is_not_double_wrapped(self):
+        """The timeout error is raised as-is, not re-wrapped in a second
+        'Failed to connect...' MemoryMCPConnectionError."""
+
+        @contextlib.asynccontextmanager
+        async def fake_streamable_http_client(url, **kwargs):
+            yield (object(), object(), lambda: None)
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+
+        async def never_returns():
+            await asyncio.sleep(3600)
+
+        fake_session.initialize.side_effect = never_returns
+
+        with patch(
+            "mcp.client.streamable_http.streamable_http_client",
+            side_effect=fake_streamable_http_client,
+        ), patch("tradingagents.memory.mcp_client.ClientSession", return_value=fake_session):
+            client = MemoryMCPClient(
+                url="http://127.0.0.1:8001/mcp", transport="streamable-http", timeout=0.5
+            )
+            with pytest.raises(MemoryMCPConnectionError) as exc_info:
+                client.connect()
+
+        assert "Failed to connect" not in str(exc_info.value)
+
+    def test_timeout_defaults_to_config(self):
+        """With no explicit timeout, connect() resolves memory_mcp_timeout."""
+        from tradingagents.dataflows.config import set_config
+
+        set_config({"memory_mcp_timeout": 0.25})
+
+        @contextlib.asynccontextmanager
+        async def fake_streamable_http_client(url, **kwargs):
+            yield (object(), object(), lambda: None)
+
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.__aexit__.return_value = None
+
+        async def never_returns():
+            await asyncio.sleep(3600)
+
+        fake_session.initialize.side_effect = never_returns
+
+        with patch(
+            "mcp.client.streamable_http.streamable_http_client",
+            side_effect=fake_streamable_http_client,
+        ), patch("tradingagents.memory.mcp_client.ClientSession", return_value=fake_session):
+            client = MemoryMCPClient(url="http://127.0.0.1:8001/mcp")
+            with pytest.raises(MemoryMCPConnectionError):
+                client.connect()
+            assert client.timeout == 0.25
+
+    def test_unresponsive_server_fails_fast(self):
+        """End-to-end shape of the reported hang: a real TCP listener that
+        accepts the connection and then never answers (standing in for the
+        proxy that swallowed the request) must surface as a connection error
+        in about the configured timeout, not block forever."""
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(5)
+        port = listener.getsockname()[1]
+        accepted = []
+
+        def accept_and_stall():
+            while True:
+                try:
+                    accepted.append(listener.accept()[0])
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=accept_and_stall, daemon=True)
+        thread.start()
+        try:
+            client = MemoryMCPClient(url=f"http://127.0.0.1:{port}/mcp", timeout=2)
+            started = time.monotonic()
+            with pytest.raises(MemoryMCPConnectionError):
+                client.connect()
+            elapsed = time.monotonic() - started
+        finally:
+            listener.close()
+            for conn in accepted:
+                conn.close()
+
+        assert elapsed < 15, f"connect() took {elapsed:.1f}s against a stalled server"
+        assert client._session is None
+
+
+class TestProxyBypassForLoopback:
+    """Regression tests for the root cause of issue #108.
+
+    httpx reads ``http_proxy``/``https_proxy`` from the environment, and its
+    ``no_proxy`` support only matches literal hosts — the common
+    ``no_proxy=127.0.0.0/8`` CIDR entry becomes the mount pattern
+    ``all://127.0.0.0/8``, which never matches ``127.0.0.1``. So requests to
+    the loopback memory server were being handed to the corporate proxy,
+    which answered ``503`` and wedged the client.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:8001/mcp",
+            "http://127.0.0.5:8001/mcp",
+            "http://localhost:8001/mcp",
+            "http://LocalHost:8001/sse",
+            "http://[::1]:8001/mcp",
+        ],
+    )
+    def test_loopback_urls_detected(self, url):
+        assert _is_loopback_url(url) is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://memory.internal:9000/mcp",
+            "http://192.168.1.20:8001/mcp",
+            "https://example.com/mcp",
+            "not-a-url",
+        ],
+    )
+    def test_non_loopback_urls_detected(self, url):
+        assert _is_loopback_url(url) is False
+
+    def test_loopback_client_ignores_environment_proxies(self, monkeypatch):
+        """The httpx client used for a loopback server must not pick up
+        http_proxy from the environment."""
+        monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+        monkeypatch.setenv("no_proxy", "127.0.0.0/8")  # the CIDR httpx can't match
+
+        client = MemoryMCPClient(url="http://127.0.0.1:8001/mcp", transport="streamable-http")
+        http_client = client._http_client_factory()()
+        try:
+            assert http_client.trust_env is False
+            assert http_client._mounts == {}
+        finally:
+            asyncio.run(http_client.aclose())
+
+    def test_remote_client_keeps_default_environment_behavior(self):
+        """A non-loopback server keeps the SDK's env-aware client factory —
+        the bypass is deliberately scoped to loopback."""
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        client = MemoryMCPClient(url="http://memory.internal:9000/mcp")
+        assert client._http_client_factory() is create_mcp_http_client
 
 
 class TestMemoryMCPClientToolCalls:
@@ -396,6 +603,26 @@ class TestMemoryMCPClientToolCalls:
 
         result = connected_client._call_tool_sync("test_tool", {"arg": "value"})
         assert result == test_data
+
+    def test_call_tool_sync_times_out(self, connected_client):
+        """A tool call whose response never arrives raises instead of hanging
+        (issue #108) — the transport can wedge mid-session just as it can
+        during connect()."""
+
+        async def never_returns(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        connected_client.timeout = 0.5
+        connected_client._session.call_tool = never_returns
+
+        started = time.monotonic()
+        with pytest.raises(MemoryMCPToolError) as exc_info:
+            connected_client._call_tool_sync("memory_get_statistics")
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10, "tool call hung well past its configured timeout"
+        assert "timed out" in str(exc_info.value)
+        assert "memory_get_statistics" in str(exc_info.value)
 
     def test_call_tool_sync_protocol_error(self, connected_client):
         """An MCP-protocol-level error (isError=True) is a tool error, distinct

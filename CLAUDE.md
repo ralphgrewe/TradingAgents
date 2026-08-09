@@ -175,6 +175,14 @@ Three independent, still-coexisting memory systems:
   deliberate behavior change from the prior in-process warn-and-continue pattern (issue #53).
   `skills/` agents access the same tools via MCP tool registration in Claude Desktop/Code
   (see README.md "To register the server with Claude agents").
+
+  Connecting and every tool call are bounded by `memory_mcp_timeout` (default 30s, env
+  `TRADINGAGENTS_MEMORY_MCP_TIMEOUT`): the MCP SDK surfaces transport-level failures only when
+  its internal task group unwinds, so without that bound an error answered by something other
+  than the server (e.g. an HTTP proxy) leaves `session.initialize()`/`call_tool()` waiting on a
+  response forever. Relatedly, requests to a *loopback* server URL bypass
+  `http_proxy`/`https_proxy` — httpx's `no_proxy` matching does not understand CIDR entries like
+  `127.0.0.0/8`, so loopback traffic would otherwise be handed to the proxy (issue #108).
   
   See the module docstrings in `store.py`, `resolve.py`, and `query.py` — they carry the
   design rationale (idempotency semantics, normalization boundary, single-transaction batching)
