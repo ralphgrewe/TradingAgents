@@ -382,11 +382,16 @@ class SimulationClient:
           from a one-element list by the fallback; wrap it as ``[result]``.
         - A ``dict`` *with* an ``'error'`` key — a real tool-level error;
           raise, surfacing that error.
-        - Anything else (bare string/number/None) — nonsensical for a
+        - A bare ``None`` — zero content blocks + no ``structuredContent``,
+          which by this point is known to be a successful call; treat as an
+          empty list ``[]``.
+        - Anything else (bare string/number) — nonsensical for a
           list-typed tool; raise the generic "non-list" error.
         """
         if isinstance(result, list):
             return result
+        if result is None:
+            return []
         if isinstance(result, dict):
             if "error" in result:
                 raise SimulationToolError(

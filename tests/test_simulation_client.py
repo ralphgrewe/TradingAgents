@@ -549,6 +549,23 @@ class TestListDepots:
             connected_client.list_depots()
         assert "non-list" in str(exc_info.value)
 
+    def test_list_depots_none_parse_treated_as_empty(self, connected_client):
+        """list_depots treats None parse result (zero blocks, no structuredContent) as empty list.
+
+        When the MCP server returns zero content blocks and no structuredContent,
+        _call_tool_sync returns None. Since the tool call succeeded (isError=False),
+        this None should be coerced to an empty list [] by _coerce_list_result."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = None
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.list_depots()
+        assert result_list == []
+        assert isinstance(result_list, list)
+
 
 class TestCreateDepot:
     """Tests for create_depot method."""
@@ -980,6 +997,23 @@ class TestGetTrades:
         with pytest.raises(SimulationToolError) as exc_info:
             connected_client.get_trades()
         assert "non-list" in str(exc_info.value)
+
+    def test_get_trades_none_parse_treated_as_empty(self, connected_client):
+        """get_trades treats None parse result (zero blocks, no structuredContent) as empty list.
+
+        When the MCP server returns zero content blocks and no structuredContent,
+        _call_tool_sync returns None. Since the tool call succeeded (isError=False),
+        this None should be coerced to an empty list [] by _coerce_list_result."""
+        result = MagicMock()
+        result.isError = False
+        result.structuredContent = None
+        result.content = []
+
+        connected_client._session.call_tool = AsyncMock(return_value=result)
+
+        result_list = connected_client.get_trades()
+        assert result_list == []
+        assert isinstance(result_list, list)
 
 
 class TestGetServerConfig:
