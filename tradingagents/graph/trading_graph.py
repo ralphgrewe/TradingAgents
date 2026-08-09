@@ -115,6 +115,7 @@ class TradingAgentsGraph:
             self.conditional_logic,
             analyst_concurrency_limit=self.config.get("analyst_concurrency_limit", 1),
             research_stage=self.config.get("research_stage", "none"),
+            swing_trader_enabled=self.config.get("swing_trader_enabled", False),
         )
 
         self.propagator = Propagator(
@@ -380,8 +381,20 @@ class TradingAgentsGraph:
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM.
         past_context = self.memory_log.get_past_context(company_name)
+
+        # Fetch swing trader past context via MCP if enabled (hard dependency #53).
+        swing_past_context = ""
+        if self.config.get("swing_trader_enabled"):
+            swing_past_context = self._memory_client.get_past_context(
+                agent="swing_trader", ticker=company_name
+            )
+
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, asset_type=asset_type, past_context=past_context
+            company_name,
+            trade_date,
+            asset_type=asset_type,
+            past_context=past_context,
+            swing_past_context=swing_past_context,
         )
         args = self.propagator.get_graph_args()
 
@@ -507,6 +520,65 @@ class TradingAgentsGraph:
             thesis=final_state.get("final_trade_decision", "")[:500],  # truncate for DB
         )
 
+        # Store swing trader decision when enabled (#93).
+        if self.config.get("swing_trader_enabled"):
+            swing_structured = final_state.get("swing_structured_data")
+            if swing_structured:
+                # Extract structured fields matching the schema.
+                signal = swing_structured.get("action", "Hold")
+                conviction = swing_structured.get("conviction")
+                thesis = swing_structured.get("thesis", "")
+                holding_period_days = swing_structured.get("holding_period_days")
+                entry_price = swing_structured.get("entry_price")
+                stop_loss = swing_structured.get("stop_loss")
+                take_profit = swing_structured.get("take_profit")
+                setup_type = swing_structured.get("setup_type", "")
+                regime = swing_structured.get("regime", "unknown")  # regime from precompute
+                drivers = swing_structured.get("key_drivers", [])
+
+                # Compute risk_reward from prices (same formula as swing_trader_computation).
+                risk_reward = None
+                if entry_price is not None and stop_loss is not None and take_profit is not None:
+                    risk = abs(entry_price - stop_loss)
+                    reward = abs(take_profit - entry_price)
+                    if risk > 0:
+                        risk_reward = round(reward / risk, 2)
+
+                # Build key_drivers JSON with regime, setup, prices, and driver list.
+                key_drivers_json = {
+                    "regime": regime,
+                    "setup_type": setup_type,
+                    "risk_reward": risk_reward,
+                    "planned_horizon_days": holding_period_days,
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "drivers": drivers,
+                }
+
+                self._memory_client.store_decision(
+                    agent="swing_trader",
+                    ticker=company_name,
+                    date=trade_date,
+                    signal=signal,
+                    confidence=conviction,
+                    key_drivers=key_drivers_json,
+                    thesis=thesis[:500] if thesis else "",  # truncate for DB
+                    horizon_days=holding_period_days,
+                )
+            else:
+                # Fallback: parse markdown when structured data unavailable (mirrors trader/PM behavior).
+                swing_signal = parse_rating(final_state.get("swing_trade_decision", ""))
+                self._memory_client.store_decision(
+                    agent="swing_trader",
+                    ticker=company_name,
+                    date=trade_date,
+                    signal=swing_signal,
+                    confidence=None,
+                    key_drivers=None,
+                    thesis=final_state.get("swing_trade_decision", "")[:500],  # truncate for DB
+                )
+
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
@@ -557,6 +629,14 @@ class TradingAgentsGraph:
             "history": final_state["risk_debate_state"]["history"],
             "judge_decision": final_state["risk_debate_state"]["judge_decision"],
         }
+
+        # Include swing trader decision when enabled (#93).
+        if self.config.get("swing_trader_enabled"):
+            swing_decision = final_state.get("swing_trade_decision", "")
+            if swing_decision:
+                log_dict["swing_trade_decision"] = swing_decision
+            if final_state.get("swing_structured_data"):
+                log_dict["swing_structured_data"] = final_state["swing_structured_data"]
 
         self.log_states_dict[str(trade_date)] = log_dict
 

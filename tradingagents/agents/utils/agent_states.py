@@ -75,3 +75,8 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+
+    # swing trader decision
+    swing_trade_decision: Annotated[str, "Swing trading decision rendered to markdown (when enabled)"]
+    swing_structured_data: Annotated[dict, "Swing trading decision as dict (for memory/full-state log)"]
+    swing_past_context: Annotated[str, "Memory context for swing trader (same-ticker + cross-ticker lessons)"]

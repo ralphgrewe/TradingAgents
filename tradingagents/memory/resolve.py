@@ -9,9 +9,15 @@ for prompt injection is separate, later work (issue #7).
 Design choices (see issue #6 discussion / the #5 handoff notes for the full
 rationale):
 
-- **Horizon**: a single module-level constant, ``DEFAULT_HORIZON_DAYS``
-  (default 10 trading days). There is currently no per-row override — every
-  resolved row gets this same horizon recorded in ``horizon_days``.
+- **Horizon**: per-row, with a module-level default fallback. Each row may
+  have been stored with a declared ``horizon_days`` (e.g., a swing trader's
+  1–15 trading day range, issue #91); when ``resolve_pending`` processes a
+  row, it uses that stored horizon if non-``NULL``, falling back to
+  ``DEFAULT_HORIZON_DAYS`` (default 10 trading days) if ``NULL``. Both the
+  eligibility window check and the forward-return window use the row's own
+  horizon. A row with ``NULL`` horizon at store time gets
+  ``DEFAULT_HORIZON_DAYS`` written to ``horizon_days`` at resolution time,
+  so all resolved rows have a non-``NULL`` horizon recorded.
 - **Elapsed check is trading-day-aware and happens *before* any external
   call**: ``_trading_days_elapsed`` uses ``numpy.busday_count`` (Mon-Fri,
   no market-holiday calendar — the same level of precision
@@ -64,9 +70,11 @@ from tradingagents.memory.store import get_connection
 
 logger = logging.getLogger(__name__)
 
-# Trading-day horizon used to decide when a pending decision is eligible to
-# be resolved, and the value written to ``decisions.horizon_days`` for every
-# row resolved by this module. Single, module-level knob by design (issue #6).
+# Fallback trading-day horizon used only for rows stored without their own
+# per-decision ``horizon_days`` (``NULL`` at store time, issue #91). Used both
+# to decide eligibility and as the value written to ``decisions.horizon_days``
+# at resolution time for such rows; rows with a non-``NULL`` stored horizon
+# use that value instead (see module docstring).
 DEFAULT_HORIZON_DAYS = 10
 
 
@@ -186,8 +194,9 @@ def resolve_pending(
     Selects rows from ``decisions`` where ``resolved_at IS NULL``
     (optionally filtered to a single ``agent`` and/or ``ticker``, matched
     exactly against the stored — un-normalized — values), then for each row
-    checks whether at least ``DEFAULT_HORIZON_DAYS`` trading days have
-    elapsed since ``decision_date`` (``_trading_days_elapsed``).
+    checks whether enough trading days have elapsed since ``decision_date``
+    (``_trading_days_elapsed``). Each row uses its own ``horizon_days`` if
+    non-``NULL``, falling back to ``DEFAULT_HORIZON_DAYS`` if ``NULL``.
 
     Rows whose window has **not** elapsed are left completely untouched —
     no write, and no external call (yfinance or LLM) is made for them.
@@ -197,9 +206,9 @@ def resolve_pending(
          ``tradingagents.dataflows.symbol_utils.normalize_symbol`` (issue #4)
          before the yfinance lookup, mirroring ``_fetch_returns``.
       2. The raw forward return is fetched (``_fetch_forward_return``,
-         same yfinance window math as ``_fetch_returns``). Only the raw
-         return is computed — ``benchmark_return`` is always left ``NULL``
-         by this function.
+         same yfinance window math as ``_fetch_returns``) using the row's
+         own horizon window. Only the raw return is computed —
+         ``benchmark_return`` is always left ``NULL`` by this function.
       3. If price data isn't available yet (``_fetch_forward_return``
          returns ``None`` — too recent, delisted, network error), the row
          is left pending to retry on a future call.
@@ -211,7 +220,8 @@ def resolve_pending(
     All resolved rows are written in a single transaction: the
     pending+eligible rows are read once up front, every external call
     happens against that snapshot, and then one ``sqlite3`` connection
-    issues every ``UPDATE`` and commits once.
+    issues every ``UPDATE`` and commits once. Each resolved row keeps its
+    own horizon (or has the default written if it was ``NULL``).
 
     Args:
         agent: If given, only consider pending rows for this agent.
@@ -246,12 +256,15 @@ def resolve_pending(
 
     updates: list[dict[str, Any]] = []
     for row in pending_rows:
-        if _trading_days_elapsed(row["decision_date"], today) < DEFAULT_HORIZON_DAYS:
+        # Use the row's own horizon if set, otherwise fall back to the default.
+        row_horizon = row["horizon_days"] if row["horizon_days"] is not None else DEFAULT_HORIZON_DAYS
+
+        if _trading_days_elapsed(row["decision_date"], today) < row_horizon:
             continue  # window not elapsed — leave pending, no external calls
 
         normalized_ticker = normalize_symbol(row["ticker"])
         forward_return = _fetch_forward_return(
-            normalized_ticker, row["decision_date"], DEFAULT_HORIZON_DAYS
+            normalized_ticker, row["decision_date"], row_horizon
         )
         if forward_return is None:
             continue  # price data not available yet — retry on a future call
@@ -275,7 +288,7 @@ def resolve_pending(
         updates.append(
             {
                 "id": row["id"],
-                "horizon_days": DEFAULT_HORIZON_DAYS,
+                "horizon_days": row_horizon,
                 "forward_return": forward_return,
                 "lesson": lesson,
                 "resolved_at": resolved_at,

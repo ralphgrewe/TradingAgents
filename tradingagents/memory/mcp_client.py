@@ -640,6 +640,7 @@ class MemoryMCPClient:
         key_drivers: Any = None,
         thesis: str | None = None,
         db_path: str | None = None,
+        horizon_days: int | None = None,
     ) -> bool:
         """Record a pending trading decision via ``memory_store_decision``.
 
@@ -656,6 +657,9 @@ class MemoryMCPClient:
             key_drivers: Optional JSON-serializable list/dict of key drivers.
             thesis: Optional short free-text rationale.
             db_path: Optional override for the memory DB path on the server.
+            horizon_days: Optional intended holding period in trading days. If
+                given, stored in the row's horizon_days column; if None, the
+                column is left NULL and filled by resolve_pending with the default.
 
         Returns:
             ``True`` if a new pending row was inserted, ``False`` if a row
@@ -676,6 +680,7 @@ class MemoryMCPClient:
                 "key_drivers": key_drivers,
                 "thesis": thesis,
                 "db_path": db_path,
+                "horizon_days": horizon_days,
             },
         )
         if not isinstance(result, bool):

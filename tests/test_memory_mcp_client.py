@@ -702,6 +702,39 @@ class TestStoreDecision:
             "key_drivers": ["earnings"],
             "thesis": "strong quarter",
             "db_path": None,
+            "horizon_days": None,
+        }
+
+    def test_store_decision_horizon_days_round_trip(self, connected_client, mock_call_tool_result):
+        content = MagicMock()
+        content.text = json.dumps(True)
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+
+        result = connected_client.store_decision(
+            "swing_trader",
+            "AAPL",
+            "2026-07-01",
+            "BUY",
+            confidence=0.7,
+            key_drivers=["earnings"],
+            thesis="strong quarter",
+            horizon_days=5,
+        )
+        assert result is True
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][0] == "memory_store_decision"
+        assert call_args[0][1] == {
+            "agent": "swing_trader",
+            "ticker": "AAPL",
+            "date": "2026-07-01",
+            "signal": "BUY",
+            "confidence": 0.7,
+            "key_drivers": ["earnings"],
+            "thesis": "strong quarter",
+            "db_path": None,
+            "horizon_days": 5,
         }
 
     def test_store_decision_duplicate_is_noop(self, connected_client, mock_call_tool_result):

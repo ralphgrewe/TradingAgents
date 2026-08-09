@@ -24,6 +24,7 @@ from tradingagents.agents.trader.trader import create_trader
 from tradingagents.agents.utils.agent_utils import (
     format_analyst_reports_section as shared_format,
 )
+from tradingagents.dataflows.config import set_config
 
 # Both trader.py and portfolio_manager.py call the same shared helper, so the
 # section-formatting tests exercise it directly once instead of duplicating
@@ -443,7 +444,19 @@ def _make_pm_state(**overrides):
 
 @pytest.mark.unit
 class TestPortfolioManagerPromptAssembly:
-    """Tests for portfolio manager node prompt assembly with analyst reports."""
+    """Tests for portfolio manager node prompt assembly with analyst reports.
+
+    These tests exercise the old direct (no-tool) invocation path, where
+    ``llm.invoke`` is called with the rendered prompt string directly, so they
+    disable the wiki tool-loop (``knowledge_base_enabled=False``) -- otherwise
+    (issue #105) PM would route through ``run_structured_with_tools`` and
+    ``llm.invoke`` would receive a list of messages instead of a plain string,
+    which is orthogonal to what this class is testing (prompt-section assembly).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_knowledge_base(self):
+        set_config({"knowledge_base_enabled": False})
 
     def test_pm_includes_analyst_reports_in_prompt(self):
         """Portfolio manager prompt should include all four analyst reports."""

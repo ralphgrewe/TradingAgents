@@ -11,10 +11,9 @@ Key design principle: pure computation, no LLM, deterministic signal/confidence.
 
 import json
 import math
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
-
 
 # ── Indicator functions ────────────────────────────────────────────────────────
 
@@ -62,9 +61,169 @@ def vwma(close: pd.Series, volume: pd.Series, length: int = 20) -> pd.Series:
     return (close * volume).rolling(window=length).sum() / volume.rolling(window=length).sum()
 
 
+# ── Swing trading indicators (issue #89) ──────────────────────────────────────
+
+def rolling_n_day_high_low(high: pd.Series, low: pd.Series, n: int = 20) -> tuple[pd.Series, pd.Series]:
+    """
+    Compute rolling N-day high and low.
+
+    Args:
+        high: Series of high prices
+        low: Series of low prices
+        n: number of trading days (default 20)
+
+    Returns:
+        (rolling_high, rolling_low) tuple of Series
+    """
+    rolling_high = high.rolling(window=n).max()
+    rolling_low = low.rolling(window=n).min()
+    return rolling_high, rolling_low
+
+
+def find_swing_high_low(high: pd.Series, low: pd.Series, lookback: int = 2) -> tuple[dict | None, dict | None]:
+    """
+    Find the most recent confirmed swing high and swing low.
+
+    A swing high is a bar whose high is the extreme (highest) of the lookback bars on each side.
+    A swing low is a bar whose low is the extreme (lowest) of the lookback bars on each side.
+    We use "confirmed" pivots: ones with at least lookback completed bars after them.
+
+    Vectorized via a centered rolling max/min over a window of `2 * lookback + 1`
+    bars: a bar is a pivot iff its own high/low equals the window extreme.
+    Pandas' centered rolling only yields a value once `lookback` bars exist on
+    both sides, which is exactly the "confirmed" boundary condition, so no
+    separate index-bounds bookkeeping is needed.
+
+    Args:
+        high: Series of high prices
+        low: Series of low prices
+        lookback: number of bars on each side to check (default 2)
+
+    Returns:
+        (swing_high_dict, swing_low_dict) where each dict has keys:
+        - value: the swing price
+        - bar_index: the (positional) index of the swing bar
+        - bars_since: how many bars ago the swing was
+        Or None if not enough confirmed pivots exist.
+    """
+    n = len(high)
+    window = lookback * 2 + 1
+    if n < window:
+        return None, None
+
+    high = high.reset_index(drop=True)
+    low = low.reset_index(drop=True)
+
+    rolling_max = high.rolling(window=window, center=True).max()
+    rolling_min = low.rolling(window=window, center=True).min()
+
+    is_swing_high = high == rolling_max
+    is_swing_low = low == rolling_min
+
+    swing_high_positions = is_swing_high[is_swing_high].index
+    swing_low_positions = is_swing_low[is_swing_low].index
+
+    swing_high_idx = int(swing_high_positions[-1]) if len(swing_high_positions) else None
+    swing_low_idx = int(swing_low_positions[-1]) if len(swing_low_positions) else None
+
+    swing_high = None
+    if swing_high_idx is not None:
+        swing_high = {
+            "value": v(high.iloc[swing_high_idx]),
+            "bar_index": swing_high_idx,
+            "bars_since": n - 1 - swing_high_idx,
+        }
+
+    swing_low = None
+    if swing_low_idx is not None:
+        swing_low = {
+            "value": v(low.iloc[swing_low_idx]),
+            "bar_index": swing_low_idx,
+            "bars_since": n - 1 - swing_low_idx,
+        }
+
+    return swing_high, swing_low
+
+
+def rate_of_change(close: pd.Series, periods: list[int]) -> dict[int, float | None]:
+    """
+    Compute rate of change (%) for multiple periods.
+
+    ROC = ((close_today - close_n_days_ago) / close_n_days_ago) * 100
+
+    Args:
+        close: Series of close prices
+        periods: list of periods to compute (e.g. [5, 20, 63])
+
+    Returns:
+        dict mapping period -> ROC % (or None if insufficient history)
+    """
+    result = {}
+    for period in periods:
+        if len(close) >= period + 1:
+            current = close.iloc[-1]
+            past = close.iloc[-(period + 1)]
+            if past != 0:
+                roc = ((current - past) / abs(past)) * 100
+                result[period] = v(roc)
+            else:
+                result[period] = None
+        else:
+            result[period] = None
+    return result
+
+
+def distance_from_52week_high(high: pd.Series, close: pd.Series) -> float | None:
+    """
+    Compute distance from 52-week high as % below the max.
+
+    Distance = ((max_high - current_close) / max_high) * 100
+
+    "Current price" is the latest bar's close (the module's established
+    convention elsewhere), compared against the max high of the past 252
+    trading days.
+
+    Returns None if insufficient history (< 252 bars).
+    """
+    if len(high) < 252:
+        return None
+
+    # Look back 252 trading days
+    lookback_high = high.iloc[-252:].max()
+    current_close = close.iloc[-1]
+
+    if lookback_high > 0:
+        distance = ((lookback_high - current_close) / lookback_high) * 100
+        return v(distance)
+
+    return None
+
+
+def volume_surge_ratio(volume: pd.Series) -> float | None:
+    """
+    Compute volume surge ratio: latest day's volume / prior 20-day average volume.
+
+    The baseline average excludes the latest bar itself, so a surge on the
+    latest day is not diluted by its own volume.
+
+    Returns None if insufficient history (< 21 bars: 20 baseline days + latest).
+    """
+    if len(volume) < 21:
+        return None
+
+    latest_vol = volume.iloc[-1]
+    avg_vol = volume.iloc[-21:-1].mean()
+
+    if avg_vol > 0:
+        ratio = latest_vol / avg_vol
+        return v(ratio)
+
+    return None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def v(x: Any) -> Optional[float]:
+def v(x: Any) -> float | None:
     """Safely convert to float, returning None for NaN/inf."""
     if x is None or (hasattr(x, '__float__') and pd.isna(x)):
         return None
@@ -75,7 +234,7 @@ def v(x: Any) -> Optional[float]:
         return None
 
 
-def trend(cur: Optional[float], prv: Optional[float]) -> str:
+def trend(cur: float | None, prv: float | None) -> str:
     """Determine trend: Rising/Falling/Flat."""
     if cur is None or prv is None:
         return "Flat"
@@ -97,7 +256,7 @@ ROLES = {
 }
 
 
-def interpret_signal(indicator: str, val: Optional[float], prv: Optional[float], close: Optional[float]) -> str:
+def interpret_signal(indicator: str, val: float | None, prv: float | None, close: float | None) -> str:
     """Return Bullish/Bearish/Neutral for an indicator."""
     tr = trend(val, prv)
     if indicator == "sma_50":
@@ -215,6 +374,13 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
     df["atr"] = atr(df["High"], df["Low"], df["Close"], 14)
     df["vwma"] = vwma(df["Close"], df["Volume"], 20)
 
+    # ── Swing trading indicators (issue #89) ──────────────────────────────────
+    df["n20_high"], df["n20_low"] = rolling_n_day_high_low(df["High"], df["Low"], n=20)
+    swing_high, swing_low = find_swing_high_low(df["High"], df["Low"], lookback=2)
+    roc_vals = rate_of_change(df["Close"], [5, 20, 63])
+    distance_52w = distance_from_52week_high(df["High"], df["Close"])
+    vol_surge = volume_surge_ratio(df["Volume"])
+
     last, prev = df.iloc[-1], df.iloc[-2]
     close = v(last["Close"])
 
@@ -324,6 +490,48 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
         f"{n_bull} bullish, {n_bear} bearish, {len(miss)} missing"
     )
 
+    # ── Build swing trading indicators section ──────────────────────────────────
+    swing_indicators = {}
+
+    # N-day high/low
+    n20_high_val = v(df["n20_high"].iloc[-1])
+    n20_low_val = v(df["n20_low"].iloc[-1])
+    if n20_high_val is not None or n20_low_val is not None:
+        swing_indicators["n20_high"] = n20_high_val
+        swing_indicators["n20_low"] = n20_low_val
+
+    # Swing high/low — replace the internal `bar_index` (meaningless once the
+    # envelope is serialized) with the pivot's calendar date, matching the
+    # envelope's other calendar-date fields (details.as_of).
+    if swing_high is not None:
+        swing_indicators["swing_high"] = {
+            "value": swing_high["value"],
+            "date": str(df["Date"].iloc[swing_high["bar_index"]].date()),
+            "bars_since": swing_high["bars_since"],
+        }
+    if swing_low is not None:
+        swing_indicators["swing_low"] = {
+            "value": swing_low["value"],
+            "date": str(df["Date"].iloc[swing_low["bar_index"]].date()),
+            "bars_since": swing_low["bars_since"],
+        }
+
+    # Rate of change
+    roc_section = {}
+    for period, roc_val in roc_vals.items():
+        if roc_val is not None:
+            roc_section[f"roc_{period}d"] = roc_val
+    if roc_section:
+        swing_indicators["rate_of_change"] = roc_section
+
+    # Distance from 52-week high
+    if distance_52w is not None:
+        swing_indicators["distance_from_52week_high_pct"] = distance_52w
+
+    # Volume surge ratio
+    if vol_surge is not None:
+        swing_indicators["volume_surge_ratio"] = vol_surge
+
     result = {
         "signal": bias,
         "confidence": confidence,
@@ -335,6 +543,7 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
             "indicators": indicators,
             "convergence": convergence,
             "trade_setup": trade_setup,
+            "swing_indicators": swing_indicators if swing_indicators else None,
         },
     }
 
@@ -342,8 +551,8 @@ def compute_indicators(records: list[dict], ticker: str) -> dict[str, Any]:
 
 
 def build_json_envelope(
-    signal: Optional[str],
-    confidence: Optional[str],
+    signal: str | None,
+    confidence: str | None,
     summary: str,
     details: dict,
     ticker: str,

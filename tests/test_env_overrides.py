@@ -6,6 +6,7 @@ import importlib
 
 import pytest
 
+import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config_module
 
 
@@ -132,3 +133,118 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+# --- Nested (dot-notation) overrides, e.g. "data_vendors.knowledge_base" (#107) ---
+#
+# `_ENV_OVERRIDES["TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE"]` maps to the
+# dotted key path "data_vendors.knowledge_base" rather than a flat config key.
+# These tests exercise that branch of `_apply_env_overrides` end-to-end
+# through `get_config()` (the read path every agent/tool actually uses), and
+# unit-test `_get_nested`/`_set_nested` directly.
+
+
+def _sync_get_config_to_reloaded_module(dc):
+    """Force ``tradingagents.dataflows.config``'s global to re-derive from the
+    just-reloaded ``default_config`` module, then return ``get_config()``.
+
+    ``get_config()`` normally reads a process-global singleton
+    (``config_module._config``) that is only (re)seeded from
+    ``DEFAULT_CONFIG`` lazily on first use. Since ``_reload_with_env`` mutates
+    ``DEFAULT_CONFIG`` in place via ``importlib.reload``, the singleton must be
+    invalidated for the reload to actually surface through ``get_config()``,
+    the same way the ``_isolate_config`` autouse fixture in conftest.py does
+    for every other test.
+    """
+    config_module._config = None
+    return config_module.get_config()
+
+
+def test_knowledge_base_vendor_override_applies_via_get_config(monkeypatch):
+    """TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE reaches
+    data_vendors["knowledge_base"] through get_config(), not just DEFAULT_CONFIG."""
+    dc = _reload_with_env(
+        monkeypatch, TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE="faiss"
+    )
+    cfg = _sync_get_config_to_reloaded_module(dc)
+    assert cfg["data_vendors"]["knowledge_base"] == "faiss"
+
+    # Leave module state clean for subsequent tests/files (mirrors
+    # test_invalid_int_raises's restore-after-mutation pattern above).
+    _reload_with_env(monkeypatch)
+    config_module._config = None
+
+
+def test_knowledge_base_override_leaves_other_data_vendors_keys_unaffected(
+    monkeypatch,
+):
+    """Setting only the knowledge_base override must not disturb sibling
+    data_vendors keys (web_search, core_stock_apis, ...)."""
+    dc = _reload_with_env(
+        monkeypatch, TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE="faiss"
+    )
+    cfg = _sync_get_config_to_reloaded_module(dc)
+    assert cfg["data_vendors"]["web_search"] == "tavily"
+    assert cfg["data_vendors"]["core_stock_apis"] == "yfinance"
+    assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
+    assert cfg["data_vendors"]["fundamental_data"] == "yfinance"
+    assert cfg["data_vendors"]["news_data"] == "yfinance"
+    assert cfg["data_vendors"]["macro_data"] == "fred"
+    assert cfg["data_vendors"]["prediction_markets"] == "polymarket"
+
+    _reload_with_env(monkeypatch)
+    config_module._config = None
+
+
+def test_knowledge_base_vendor_default_preserved_when_env_unset(monkeypatch):
+    """With no TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE set, the built-in
+    "bm25" default must survive the nested-override code path unchanged."""
+    dc = _reload_with_env(monkeypatch)
+    cfg = _sync_get_config_to_reloaded_module(dc)
+    assert cfg["data_vendors"]["knowledge_base"] == "bm25"
+
+    config_module._config = None
+
+
+class TestGetSetNestedHelpers:
+    """Direct unit coverage for _get_nested / _set_nested (#107 finding 1)."""
+
+    def test_get_nested_returns_leaf_value(self):
+        d = {"a": {"b": "c"}}
+        assert default_config_module._get_nested(d, ["a", "b"]) == "c"
+
+    def test_get_nested_missing_leaf_key_returns_none(self):
+        d = {"a": {}}
+        assert default_config_module._get_nested(d, ["a", "b"]) is None
+
+    def test_get_nested_missing_intermediate_key_returns_none(self):
+        d = {}
+        assert default_config_module._get_nested(d, ["a", "b"]) is None
+
+    def test_get_nested_non_dict_intermediate_returns_none(self):
+        d = {"a": "not-a-dict"}
+        assert default_config_module._get_nested(d, ["a", "b"]) is None
+
+    def test_get_nested_single_key_top_level(self):
+        d = {"a": "value"}
+        assert default_config_module._get_nested(d, ["a"]) == "value"
+
+    def test_set_nested_creates_intermediate_dicts(self):
+        d = {}
+        default_config_module._set_nested(d, ["a", "b"], "value")
+        assert d == {"a": {"b": "value"}}
+
+    def test_set_nested_overwrites_existing_leaf_value(self):
+        d = {"a": {"b": "old"}}
+        default_config_module._set_nested(d, ["a", "b"], "new")
+        assert d["a"]["b"] == "new"
+
+    def test_set_nested_preserves_sibling_keys(self):
+        d = {"a": {"b": "old", "c": "keep"}}
+        default_config_module._set_nested(d, ["a", "b"], "new")
+        assert d["a"] == {"b": "new", "c": "keep"}
+
+    def test_set_nested_single_key_top_level(self):
+        d = {}
+        default_config_module._set_nested(d, ["a"], "value")
+        assert d == {"a": "value"}

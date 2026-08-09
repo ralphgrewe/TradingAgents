@@ -67,12 +67,23 @@ class FakeMemoryMCPClient:
     new hard-fail behavior.
     """
 
-    def __init__(self, *, connect_error=None, resolve_side_effect=None, store_side_effects=None):
+    def __init__(
+        self,
+        *,
+        connect_error=None,
+        resolve_side_effect=None,
+        store_side_effects=None,
+        get_past_context_return="",
+        get_past_context_side_effect=None,
+    ):
         self.connect_error = connect_error
         self.resolve_side_effect = resolve_side_effect
         self._store_side_effects = list(store_side_effects or [])
+        self.get_past_context_return = get_past_context_return
+        self.get_past_context_side_effect = get_past_context_side_effect
         self.resolve_calls = []
         self.store_calls = []
+        self.get_past_context_calls = []
         self.connected = False
         self.closed = False
 
@@ -94,11 +105,12 @@ class FakeMemoryMCPClient:
 
     def store_decision(
         self, agent, ticker, date, signal,
-        confidence=None, key_drivers=None, thesis=None, db_path=None,
+        confidence=None, key_drivers=None, thesis=None, db_path=None, horizon_days=None,
     ):
         call = {
             "agent": agent, "ticker": ticker, "date": date, "signal": signal,
             "confidence": confidence, "key_drivers": key_drivers, "thesis": thesis,
+            "horizon_days": horizon_days,
         }
         self.store_calls.append(call)
         if self._store_side_effects:
@@ -106,6 +118,12 @@ class FakeMemoryMCPClient:
             if effect is not None:
                 raise effect
         return True
+
+    def get_past_context(self, agent, ticker, n_same=5, n_cross=3, db_path=None):
+        self.get_past_context_calls.append({"agent": agent, "ticker": ticker, "db_path": db_path})
+        if self.get_past_context_side_effect is not None:
+            raise self.get_past_context_side_effect
+        return self.get_past_context_return
 
 
 def _store_call(fake, agent):

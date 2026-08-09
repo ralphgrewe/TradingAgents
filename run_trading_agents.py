@@ -112,6 +112,11 @@ def display_summary(final_state, ticker):
         print("\n💼 TRADING TEAM PLAN:")
         print(f"• Trader: {final_state['trader_investment_plan'][:200]}...")
 
+    # Swing Trader (when enabled)
+    if final_state.get("swing_trade_decision"):
+        print("\n⚡ SWING TRADER DECISION:")
+        print(f"• Swing Trader: {final_state['swing_trade_decision'][:200]}...")
+
     # Risk Management
     if final_state.get("risk_debate_state"):
         risk = final_state["risk_debate_state"]

@@ -41,6 +41,61 @@ analyst reports and live web search evidence. Two alternative modes are availabl
 - **`research_stage=none`**: Skipping the research stage entirely, sending
   analyst reports directly to the trader. Set via `TRADINGAGENTS_RESEARCH_STAGE=none`.
 
+### Swing Trader (optional)
+
+The swing trader is an optional stage that makes regime-gated short-term (3–15 trading day) swing
+trade decisions with numeric entry/stop/target levels. It runs after the portfolio manager when enabled:
+
+- **Enable with:** `TRADINGAGENTS_SWING_TRADER_ENABLED=true`
+- **Config keys:**
+  - `swing_trader_min_risk_reward` (default 1.5): minimum reward-to-risk ratio
+  - `swing_trader_max_holding_days` (default 15): hard cap on holding period
+  - `swing_trader_conviction_threshold` (default 0.55): minimum conviction to force action
+
+Example:
+
+```bash
+TRADINGAGENTS_SWING_TRADER_ENABLED=true ./venv/bin/python run_trading_agents.py stocks.json --show-summary
+```
+
+When enabled, the swing trader outputs appear in the CLI report under "Swing Trader Decision" and in
+the full-state JSON log. Decisions are stored in the SQLite memory core under agent key `"swing_trader"`
+for pattern analysis and reflection.
+
+### LLM-wiki strategy knowledge base (optional)
+
+The knowledge base is a curated reference library of trading strategies, signals, and risk-management
+principles extracted from academic research and practitioner wisdom. It's consulted by the portfolio
+manager and swing trader on demand (when enabled) to ground decisions in established approaches.
+
+**Adding knowledge:**
+
+1. **Drop a PDF** into the `paper/` folder (or your configured `knowledge_ingest_dir`).
+2. **Run the ingestion pipeline:**
+   ```bash
+   ./venv/bin/python scripts/ingest_wiki.py
+   ```
+   This reads the PDF, has the LLM draft a structured article, and saves it under `knowledge/wiki/`.
+3. **Review and commit** the generated article (check that summary, signals, computation, evidence,
+   and caveats are accurate).
+
+**Enabling/disabling the wiki:**
+
+- **Enable (default):** by default, `knowledge_base_enabled=True` and wiki tool calls are available
+  to the portfolio manager and swing trader.
+- **Disable:** set `TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED=false` to skip wiki lookups (faster runs,
+  lower token usage).
+
+**Configuration:**
+
+- `knowledge_base_dir` (default `knowledge/wiki`): where articles live.
+- `knowledge_ingest_dir` (default `paper`): where the ingestion pipeline looks for PDFs.
+- `data_vendors["knowledge_base"]` (default `"bm25"`): retrieval backend (currently only BM25).
+- `knowledge_base_tool_max_rounds` (default `2`): maximum tool-calling loop rounds to prevent
+  unbounded searches.
+
+Set any of these via `TRADINGAGENTS_*` env vars (e.g., `TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED=false`).
+
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:
 
 ```bash

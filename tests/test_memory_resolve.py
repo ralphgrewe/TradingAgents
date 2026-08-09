@@ -31,7 +31,7 @@ def _row(conn, row_id):
     return conn.execute("SELECT * FROM decisions WHERE id = ?", (row_id,)).fetchone()
 
 
-def _seed(db_path, agent="trader", ticker="AAPL", date=BACKDATED, **kwargs):
+def _seed(db_path, agent="trader", ticker="AAPL", date=BACKDATED, horizon_days=None, **kwargs):
     defaults = {
         "signal": "Buy",
         "confidence": 0.7,
@@ -39,7 +39,10 @@ def _seed(db_path, agent="trader", ticker="AAPL", date=BACKDATED, **kwargs):
         "thesis": "Momentum plus fundamentals align.",
     }
     defaults.update(kwargs)
-    store_decision(agent=agent, ticker=ticker, date=date, db_path=db_path, **defaults)
+    store_decision(
+        agent=agent, ticker=ticker, date=date, db_path=db_path,
+        horizon_days=horizon_days, **defaults
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -271,3 +274,114 @@ def test_lesson_generation_failure_does_not_abort_batch(tmp_path, _stub_forward_
     assert rows["MSFT"]["forward_return"] is None
     assert rows["MSFT"]["lesson"] is None
     assert rows["MSFT"]["horizon_days"] is None
+
+
+# ---------------------------------------------------------------------------
+# Per-decision horizon_days (issue #91)
+# ---------------------------------------------------------------------------
+
+def test_per_decision_horizons_mixed_batch(tmp_path, _stub_lesson, _stub_forward_return):
+    """A batch with mixed horizons: one row with explicit horizon, one with NULL.
+    Both should resolve correctly using their own horizons."""
+    db_path = _db_path(tmp_path)
+
+    # Store a row with explicit short horizon (5 days)
+    _seed(db_path, agent="swing", ticker="AAPL", date=BACKDATED, horizon_days=5)
+
+    # Store a row without horizon (will use DEFAULT_HORIZON_DAYS at resolution)
+    _seed(db_path, agent="trader", ticker="MSFT", date=BACKDATED, horizon_days=None)
+
+    resolved_ids = resolve_pending(db_path=db_path)
+
+    # Both should have resolved (both windows elapsed, both had price data)
+    assert len(resolved_ids) == 2
+
+    conn = get_connection(db_path)
+    try:
+        rows = {row["ticker"]: row for row in conn.execute("SELECT * FROM decisions").fetchall()}
+    finally:
+        conn.close()
+
+    # The explicit-horizon row keeps its own horizon
+    assert rows["AAPL"]["horizon_days"] == 5
+    assert rows["AAPL"]["resolved_at"] is not None
+    assert rows["AAPL"]["forward_return"] == pytest.approx(0.05)
+
+    # The NULL-horizon row gets the default at resolution
+    assert rows["MSFT"]["horizon_days"] == DEFAULT_HORIZON_DAYS
+    assert rows["MSFT"]["resolved_at"] is not None
+    assert rows["MSFT"]["forward_return"] == pytest.approx(0.05)
+
+    # Verify both external calls were made with the correct windows
+    assert _stub_forward_return.call_count == 2
+    calls = _stub_forward_return.call_args_list
+    # First call should be with horizon 5 (AAPL)
+    assert calls[0][0][2] == 5  # third argument is holding_days
+    # Second call should be with default horizon (MSFT)
+    assert calls[1][0][2] == DEFAULT_HORIZON_DAYS
+
+
+def test_short_horizon_eligibility_sooner_than_default(tmp_path, _stub_lesson):
+    """A row with a 2-day horizon becomes eligible sooner than a row with
+    DEFAULT_HORIZON_DAYS. Test that the short-horizon row is resolvable while
+    the longer-horizon row remains pending."""
+    db_path = _db_path(tmp_path)
+
+    # A decision from ~3 calendar days ago (ensures at least 2 trading days have elapsed)
+    short_horizon_date = _iso_days_ago(3)
+
+    # The same decision date, but this row needs the default horizon
+    _seed(db_path, agent="swing", ticker="AAPL", date=short_horizon_date, horizon_days=2)
+    _seed(db_path, agent="trader", ticker="MSFT", date=short_horizon_date, horizon_days=None)
+
+    # Mock forward return to fail for the second row (to keep it pending)
+    def return_side_effect(ticker, decision_date, holding_days):
+        if ticker == "MSFT" and holding_days == DEFAULT_HORIZON_DAYS:
+            return None  # data not available for the long horizon
+        return 0.05  # data available for short horizon
+
+    with patch("tradingagents.memory.resolve._fetch_forward_return", side_effect=return_side_effect):
+        resolved_ids = resolve_pending(db_path=db_path)
+
+    # Only the short-horizon row should be resolved
+    assert len(resolved_ids) == 1
+
+    conn = get_connection(db_path)
+    try:
+        rows = {row["ticker"]: row for row in conn.execute("SELECT * FROM decisions").fetchall()}
+    finally:
+        conn.close()
+
+    # AAPL (2-day horizon) should be resolved
+    assert rows["AAPL"]["resolved_at"] is not None
+    assert rows["AAPL"]["horizon_days"] == 2
+
+    # MSFT (default horizon) should still be pending
+    assert rows["MSFT"]["resolved_at"] is None
+    assert rows["MSFT"]["horizon_days"] is None  # still NULL
+
+
+def test_existing_null_horizon_rows_resolve_exactly_as_before(tmp_path, _stub_lesson, _stub_forward_return):
+    """Regression test: rows stored without horizon_days (all existing agents)
+    should resolve exactly as before — using DEFAULT_HORIZON_DAYS throughout."""
+    db_path = _db_path(tmp_path)
+
+    # Store several rows without explicit horizons (like the current system)
+    for ticker in ["AAPL", "MSFT", "GOOGL"]:
+        _seed(db_path, agent="trader", ticker=ticker, date=BACKDATED, horizon_days=None)
+
+    resolved_ids = resolve_pending(db_path=db_path)
+
+    assert len(resolved_ids) == 3
+
+    conn = get_connection(db_path)
+    try:
+        rows = {row["ticker"]: row for row in conn.execute("SELECT * FROM decisions").fetchall()}
+    finally:
+        conn.close()
+
+    # All rows should have DEFAULT_HORIZON_DAYS recorded
+    for ticker in ["AAPL", "MSFT", "GOOGL"]:
+        assert rows[ticker]["horizon_days"] == DEFAULT_HORIZON_DAYS
+        assert rows[ticker]["resolved_at"] is not None
+        assert rows[ticker]["forward_return"] == pytest.approx(0.05)

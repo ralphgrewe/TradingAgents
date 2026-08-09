@@ -12,7 +12,7 @@ from .stockstats_utils import (
     load_ohlcv,
     yf_retry,
 )
-from .symbol_utils import NoMarketDataError, normalize_symbol
+from .symbol_utils import NoMarketDataError, is_non_equity_symbol, normalize_symbol
 
 
 def get_YFin_data_online(
@@ -468,3 +468,95 @@ def get_insider_transactions(
 
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+
+
+def get_earnings_calendar(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str, "current date in YYYY-MM-DD format"]
+):
+    """Get earnings calendar data from yfinance.
+
+    Returns the next scheduled earnings date on/after curr_date and the number of
+    calendar days until it. Where available, also includes the most recent past
+    earnings date.
+
+    Non-equity symbols (indices, commodities, forex, crypto) return an explicit
+    "no earnings calendar" result. When the vendor returns no rows, raises
+    NoMarketDataError like the sibling fundamental_data functions, so
+    route_to_vendor turns it into the standard NO_DATA_AVAILABLE sentinel (and
+    can trigger a multi-vendor fallback chain). A genuine vendor error (e.g.
+    network failure) is caught and returned as an "Error retrieving earnings
+    calendar for ..." string, matching the other yfinance functions in this
+    module — distinct from the no-data case, never raised past this function.
+    """
+    canonical = normalize_symbol(ticker)
+
+    # Non-equity symbols (indices, futures/commodities, forex, crypto) do not
+    # have earnings calendars. Classification is structural (is_non_equity_symbol),
+    # not a bare character check, so hyphenated equity share classes like
+    # BRK-B/BF-B are correctly left as equities.
+    if is_non_equity_symbol(canonical):
+        return (
+            f"NO_EARNINGS_CALENDAR_AVAILABLE: {canonical} represents a non-equity "
+            f"instrument (index/commodity/forex/crypto) and does not have an earnings calendar."
+        )
+
+    try:
+        curr_date_obj = datetime.strptime(curr_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return f"UNKNOWN: Invalid current date format '{curr_date}'; expected YYYY-MM-DD"
+
+    try:
+        ticker_obj = yf.Ticker(canonical)
+        earnings_df = yf_retry(lambda: ticker_obj.get_earnings_dates())
+
+        if earnings_df is None or earnings_df.empty:
+            # No usable rows: raise the typed error like the sibling
+            # fundamental_data functions (get_fundamentals, get_balance_sheet, ...)
+            # so route_to_vendor turns this into the standard NO_DATA_AVAILABLE
+            # sentinel and can trigger a multi-vendor fallback chain, instead of
+            # a hand-rolled string that bypasses the router contract.
+            raise NoMarketDataError(ticker, canonical, "no earnings calendar data")
+
+        # Convert index to datetime and extract the date component.
+        # yfinance returns the index as a DatetimeIndex with timezone info.
+        earnings_dates = pd.to_datetime(earnings_df.index).date
+
+        # Separate future and past earnings
+        next_earnings = None
+        next_days_until = None
+        most_recent_past = None
+
+        for earning_date in earnings_dates:
+            if earning_date >= curr_date_obj:
+                if next_earnings is None:
+                    next_earnings = earning_date
+                    next_days_until = (earning_date - curr_date_obj).days
+            elif most_recent_past is None:
+                most_recent_past = earning_date
+
+        # Build response
+        lines = [f"# Earnings Calendar for {canonical}"]
+        lines.append(f"# Current date: {curr_date_obj.strftime('%Y-%m-%d')}")
+        lines.append("")
+
+        if next_earnings is not None:
+            lines.append(f"Next Earnings Date: {next_earnings.strftime('%Y-%m-%d')}")
+            lines.append(f"Days Until Next Earnings: {next_days_until}")
+        else:
+            lines.append("Next Earnings Date: Not scheduled (or no upcoming dates known)")
+            lines.append("Days Until Next Earnings: Unknown")
+
+        if most_recent_past is not None:
+            lines.append(f"Most Recent Past Earnings Date: {most_recent_past.strftime('%Y-%m-%d')}")
+
+        return "\n".join(lines)
+
+    except NoMarketDataError:
+        raise
+    except Exception as e:
+        # Genuine vendor error (network/parsing/etc.), distinct from "no data
+        # known" above: mirrors the sibling fundamental_data functions' plain
+        # "Error retrieving <thing> for <ticker>: <detail>" convention rather
+        # than sharing a prefix with the no-data case.
+        return f"Error retrieving earnings calendar for {ticker}: {str(e)}"

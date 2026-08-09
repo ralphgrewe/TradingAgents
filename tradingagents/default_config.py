@@ -28,6 +28,15 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
     "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
+    "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
+    "TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD": "swing_trader_min_risk_reward",
+    "TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS": "swing_trader_max_holding_days",
+    "TRADINGAGENTS_SWING_TRADER_CONVICTION_THRESHOLD": "swing_trader_conviction_threshold",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED": "knowledge_base_enabled",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_DIR":     "knowledge_base_dir",
+    "TRADINGAGENTS_KNOWLEDGE_INGEST_DIR":   "knowledge_ingest_dir",
+    "TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS": "knowledge_base_tool_max_rounds",
+    "TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE": "data_vendors.knowledge_base",
 }
 
 
@@ -45,13 +54,45 @@ def _coerce(value: str, reference):
     return value
 
 
+def _get_nested(d, keys):
+    """Get a nested value from a dict using a list of keys (separated by dot in key_path)."""
+    current = d
+    for k in keys:
+        if isinstance(current, dict):
+            current = current.get(k)
+        else:
+            return None
+    return current
+
+
+def _set_nested(d, keys, value):
+    """Set a nested value in a dict using a list of keys, creating intermediate dicts as needed."""
+    current = d
+    for k in keys[:-1]:
+        if k not in current:
+            current[k] = {}
+        current = current[k]
+    current[keys[-1]] = value
+
+
 def _apply_env_overrides(config: dict) -> dict:
-    """Apply TRADINGAGENTS_* env vars to the config dict in-place."""
-    for env_var, key in _ENV_OVERRIDES.items():
+    """Apply TRADINGAGENTS_* env vars to the config dict in-place.
+
+    Supports both top-level keys and nested keys using dot notation (e.g., "data_vendors.knowledge_base").
+    """
+    for env_var, key_path in _ENV_OVERRIDES.items():
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
             continue
-        config[key] = _coerce(raw, config.get(key))
+
+        # Handle nested keys using dot notation (e.g., "data_vendors.knowledge_base")
+        if "." in key_path:
+            keys = key_path.split(".")
+            reference = _get_nested(config, keys)
+            _set_nested(config, keys, _coerce(raw, reference))
+        else:
+            # Top-level key
+            config[key_path] = _coerce(raw, config.get(key_path))
     return config
 
 
@@ -108,6 +149,18 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "research_web_search": True,           # Enable/disable web search for live runs
     "research_search_queries_max": 4,      # Maximum number of search queries
     "research_evidence_token_budget": 3000, # Token budget for assembled evidence pack
+    # Swing Trader settings
+    "swing_trader_enabled": False,         # Enable/disable the swing trader node
+    "swing_trader_min_risk_reward": 1.5,   # Minimum reward:risk for non-HOLD decisions
+    "swing_trader_max_holding_days": 15,   # Hard cap on holding period (trading days)
+    "swing_trader_conviction_threshold": 0.55, # Minimum conviction to force action
+    # LLM-wiki strategy knowledge base (issue #100/#103): BM25 keyword retrieval
+    # over knowledge/wiki/*.md articles, consulted by the portfolio manager and
+    # swing trader via the search_wiki tool.
+    "knowledge_base_enabled": True,       # Enable/disable knowledge-base retrieval
+    "knowledge_base_dir": "knowledge/wiki", # Article directory (relative to cwd)
+    "knowledge_ingest_dir": "paper",      # Default folder the ingestion pipeline scans (#102)
+    "knowledge_base_tool_max_rounds": 2,  # Max tool-calling loop rounds for wiki search (issue #104)
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -138,6 +191,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
         "web_search": "tavily",              # Options: tavily (needs TAVILY_API_KEY)
+        "knowledge_base": "bm25",            # Options: bm25 (keyless, local)
     },
     # Perplexity-specific configuration
     "perplexity_model": "sonar-pro",

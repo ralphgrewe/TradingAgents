@@ -21,6 +21,7 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.researchers.researcher import create_researcher
+from tradingagents.agents.trader.swing_trader import create_swing_trader
 from tradingagents.agents.utils.agent_states import AgentState
 
 from .analyst_execution import build_analyst_execution_plan
@@ -38,6 +39,7 @@ class GraphSetup:
         conditional_logic: ConditionalLogic,
         analyst_concurrency_limit: int = 1,
         research_stage: str = "none",
+        swing_trader_enabled: bool = False,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
@@ -46,6 +48,7 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
         self.analyst_concurrency_limit = analyst_concurrency_limit
         self.research_stage = research_stage
+        self.swing_trader_enabled = swing_trader_enabled
 
     def setup_graph(
         self, selected_analysts=None
@@ -95,6 +98,11 @@ class GraphSetup:
         conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
         portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
 
+        # Create swing trader node (if enabled)
+        swing_trader_node = None
+        if self.swing_trader_enabled:
+            swing_trader_node = create_swing_trader(self.quick_thinking_llm)
+
         # Create workflow
         workflow = StateGraph(AgentState)
 
@@ -117,6 +125,8 @@ class GraphSetup:
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        if self.swing_trader_enabled:
+            workflow.add_node("Swing Trader", swing_trader_node)
 
         # Define edges
         # Start with the first analyst
@@ -211,6 +221,11 @@ class GraphSetup:
             },
         )
 
-        workflow.add_edge("Portfolio Manager", END)
+        # Portfolio Manager routes to Swing Trader (if enabled) or END
+        if self.swing_trader_enabled:
+            workflow.add_edge("Portfolio Manager", "Swing Trader")
+            workflow.add_edge("Swing Trader", END)
+        else:
+            workflow.add_edge("Portfolio Manager", END)
 
         return workflow

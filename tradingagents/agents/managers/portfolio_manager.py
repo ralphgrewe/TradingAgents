@@ -6,9 +6,15 @@ back to markdown for storage in ``final_trade_decision`` so memory log,
 CLI display, and saved reports continue to consume the same shape they do
 today.  When a provider does not expose structured output, the agent falls
 back gracefully to free-text generation.
+
+When ``knowledge_base_enabled`` is True (default), the Portfolio Manager
+consults the strategy wiki via a bounded tool-calling loop before delivering
+the final decision, using ``run_structured_with_tools``.
 """
 
 from __future__ import annotations
+
+from langchain_core.messages import HumanMessage
 
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
@@ -17,7 +23,9 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     is_present_text,
 )
-from tradingagents.agents.utils.structured import bind_structured
+from tradingagents.agents.utils.structured import bind_structured, run_structured_with_tools
+from tradingagents.agents.utils.wiki_tools import search_strategy_wiki
+from tradingagents.dataflows.config import get_config
 
 
 def create_portfolio_manager(llm):
@@ -59,6 +67,20 @@ def create_portfolio_manager(llm):
         if research_trader_line:
             research_trader_line += "\n"
 
+        # Determine if wiki tool should be available
+        config = get_config()
+        knowledge_base_enabled = config.get("knowledge_base_enabled", True)
+        knowledge_base_tool_max_rounds = config.get("knowledge_base_tool_max_rounds", 2)
+
+        wiki_availability_note = ""
+        if knowledge_base_enabled:
+            wiki_availability_note = """
+**Available Tools:**
+You have access to a strategy knowledge base. Consult it when you want to sanity-check
+your decision against established trading principles, risk management frameworks, or
+regime-specific approaches (e.g., "Should I use mean reversion in this regime?" or
+"What does research say about holding through earnings?")."""
+
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
@@ -79,38 +101,54 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.{wiki_availability_note}{get_language_instruction()}"""
 
-        # Try structured output first
-        if structured_llm is not None:
-            try:
-                structured_result = structured_llm.invoke(prompt)
+        # Determine which path to take: with tools or without.
+        # Gate solely on knowledge_base_enabled -- run_structured_with_tools binds
+        # tools via llm.bind_tools(tools) independently of structured-output support,
+        # and handles structured_llm being unusable/None internally by falling back
+        # to free text on the final call. Gating on `structured_llm is not None` here
+        # too would silently skip tool binding (and the wiki_availability_note becomes
+        # a lie to the LLM) whenever the provider doesn't support structured output.
+        if knowledge_base_enabled:
+            # Use the wiki-aware tool-loop path
+            messages = [HumanMessage(content=prompt)]
+            tools = [search_strategy_wiki]
+            structured_result, fallback_text, message_trace = run_structured_with_tools(
+                llm,
+                messages,
+                tools,
+                PortfolioDecision,
+                max_rounds=knowledge_base_tool_max_rounds,
+                agent_name="PortfolioManager",
+            )
+
+            # Decide which output to use: structured result or fallback text
+            if structured_result is not None:
                 final_trade_decision = render_pm_decision(structured_result)
-                # Store both the rendered markdown and the structured data
-                new_risk_debate_state = {
-                    "judge_decision": final_trade_decision,
-                    "history": risk_debate_state["history"],
-                    "aggressive_history": risk_debate_state["aggressive_history"],
-                    "conservative_history": risk_debate_state["conservative_history"],
-                    "neutral_history": risk_debate_state["neutral_history"],
-                    "latest_speaker": "Judge",
-                    "current_aggressive_response": risk_debate_state["current_aggressive_response"],
-                    "current_conservative_response": risk_debate_state["current_conservative_response"],
-                    "current_neutral_response": risk_debate_state["current_neutral_response"],
-                    "count": risk_debate_state["count"],
-                }
+                portfolio_structured_data = structured_result.dict()
+            else:
+                # fallback_text is guaranteed to be non-None when structured_result is None
+                final_trade_decision = fallback_text
+                portfolio_structured_data = None
+        else:
+            # Original direct path (no tools): only reached when knowledge_base_enabled
+            # is explicitly False.
+            if structured_llm is not None:
+                try:
+                    structured_result = structured_llm.invoke(prompt)
+                    final_trade_decision = render_pm_decision(structured_result)
+                    portfolio_structured_data = structured_result.dict()
+                except Exception:
+                    # Fall back to free-text generation
+                    final_trade_decision = llm.invoke(prompt).content
+                    portfolio_structured_data = None
+            else:
+                # Provider doesn't support structured output
+                final_trade_decision = llm.invoke(prompt).content
+                portfolio_structured_data = None
 
-                return {
-                    "risk_debate_state": new_risk_debate_state,
-                    "final_trade_decision": final_trade_decision,
-                    "portfolio_structured_data": structured_result.dict(),
-                }
-            except Exception:
-                # Fall back to free-text generation
-                pass
-
-        # Free-text fallback
-        final_trade_decision = llm.invoke(prompt).content
+        # Update risk_debate_state with the judge decision (same logic for both paths)
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
             "history": risk_debate_state["history"],
@@ -124,9 +162,15 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             "count": risk_debate_state["count"],
         }
 
-        return {
+        result = {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
         }
+
+        # Only include portfolio_structured_data if it's not None
+        if portfolio_structured_data is not None:
+            result["portfolio_structured_data"] = portfolio_structured_data
+
+        return result
 
     return portfolio_manager_node
