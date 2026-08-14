@@ -417,9 +417,11 @@ class TestMemoryCoreHardFailure:
             connect_error=MemoryMCPConnectionError("server unreachable")
         )
         monkeypatch.setattr(trading_graph_module, "MemoryMCPClient", lambda *a, **kw: fake_client)
-        with patch.object(TradingAgentsGraph, "_resolve_pending_entries"):
-            with pytest.raises(MemoryMCPConnectionError):
-                TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
+        with (
+            patch.object(TradingAgentsGraph, "_resolve_pending_entries"),
+            pytest.raises(MemoryMCPConnectionError),
+        ):
+            TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
 
         # The graph never ran — connection failure aborts before that.
         mock_graph._run_graph.assert_not_called()
@@ -434,9 +436,11 @@ class TestMemoryCoreHardFailure:
             resolve_side_effect=MemoryMCPToolError("db unavailable")
         )
         monkeypatch.setattr(trading_graph_module, "MemoryMCPClient", lambda *a, **kw: fake_client)
-        with patch.object(TradingAgentsGraph, "_resolve_pending_entries"):
-            with pytest.raises(MemoryMCPToolError):
-                TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
+        with (
+            patch.object(TradingAgentsGraph, "_resolve_pending_entries"),
+            pytest.raises(MemoryMCPToolError),
+        ):
+            TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
 
         mock_graph._run_graph.assert_not_called()
 

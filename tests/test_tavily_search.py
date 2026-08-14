@@ -49,12 +49,14 @@ class TavilySearchTests(unittest.TestCase):
             ]
         }
 
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
-            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
-                mock_post.return_value.json.return_value = mock_response
-                mock_post.return_value.raise_for_status.return_value = None
+        with (
+            mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}),
+            mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post,
+        ):
+            mock_post.return_value.json.return_value = mock_response
+            mock_post.return_value.raise_for_status.return_value = None
 
-                results = get_web_search_results("test query")
+            results = get_web_search_results("test query")
 
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["title"], "Article 1")
@@ -65,26 +67,30 @@ class TavilySearchTests(unittest.TestCase):
     def test_search_handles_api_request_failure(self):
         """API request failure raises TavilySearchError, not VendorNotConfiguredError."""
         import requests
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
-            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
-                mock_post.side_effect = requests.exceptions.RequestException("Network error")
+        with (
+            mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}),
+            mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post,
+        ):
+            mock_post.side_effect = requests.exceptions.RequestException("Network error")
 
-                with self.assertRaises(TavilySearchError) as ctx:
-                    get_web_search_results("test query")
-                self.assertIn("Tavily API request failed", str(ctx.exception))
-                self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
+            with self.assertRaises(TavilySearchError) as ctx:
+                get_web_search_results("test query")
+            self.assertIn("Tavily API request failed", str(ctx.exception))
+            self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
 
     def test_search_handles_json_parse_error(self):
         """JSON parsing error raises TavilySearchError, not VendorNotConfiguredError."""
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
-            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
-                mock_post.return_value.json.side_effect = ValueError("Invalid JSON")
-                mock_post.return_value.raise_for_status.return_value = None
+        with (
+            mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}),
+            mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post,
+        ):
+            mock_post.return_value.json.side_effect = ValueError("Invalid JSON")
+            mock_post.return_value.raise_for_status.return_value = None
 
-                with self.assertRaises(TavilySearchError) as ctx:
-                    get_web_search_results("test query")
-                self.assertIn("Error parsing Tavily response", str(ctx.exception))
-                self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
+            with self.assertRaises(TavilySearchError) as ctx:
+                get_web_search_results("test query")
+            self.assertIn("Error parsing Tavily response", str(ctx.exception))
+            self.assertNotIsInstance(ctx.exception, VendorNotConfiguredError)
 
     def test_missing_key_and_http_failure_are_distinct_exception_types(self):
         """Missing-API-key and HTTP/JSON failures raise distinguishable exception types.
@@ -95,16 +101,20 @@ class TavilySearchTests(unittest.TestCase):
         """
         import requests
 
-        with mock.patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(VendorNotConfiguredError) as key_ctx:
-                get_web_search_results("test query")
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            self.assertRaises(VendorNotConfiguredError) as key_ctx,
+        ):
+            get_web_search_results("test query")
         self.assertNotIsInstance(key_ctx.exception, TavilySearchError)
 
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
-            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
-                mock_post.side_effect = requests.exceptions.RequestException("boom")
-                with self.assertRaises(TavilySearchError) as http_ctx:
-                    get_web_search_results("test query")
+        with (
+            mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}),
+            mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post,
+        ):
+            mock_post.side_effect = requests.exceptions.RequestException("boom")
+            with self.assertRaises(TavilySearchError) as http_ctx:
+                get_web_search_results("test query")
         self.assertNotIsInstance(http_ctx.exception, VendorNotConfiguredError)
 
     def test_search_handles_missing_fields(self):
@@ -120,12 +130,14 @@ class TavilySearchTests(unittest.TestCase):
             ]
         }
 
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}):
-            with mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post:
-                mock_post.return_value.json.return_value = mock_response
-                mock_post.return_value.raise_for_status.return_value = None
+        with (
+            mock.patch.dict("os.environ", {"TAVILY_API_KEY": "test_key"}),
+            mock.patch("tradingagents.dataflows.tavily_search.requests.post") as mock_post,
+        ):
+            mock_post.return_value.json.return_value = mock_response
+            mock_post.return_value.raise_for_status.return_value = None
 
-                results = get_web_search_results("test query")
+            results = get_web_search_results("test query")
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"], "")

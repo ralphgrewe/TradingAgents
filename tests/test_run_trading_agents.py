@@ -61,10 +61,13 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
             # Capture output
             output = io.StringIO()
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
-                with redirect_stdout(output), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # Verify exit code
                 self.assertEqual(cm.exception.code, 1)
@@ -119,11 +122,14 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
             # Capture output
             output = io.StringIO()
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--portfolio', '--style', 'aggressive', '--depot-id', 'test-depot']):
-                with redirect_stdout(output), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--portfolio', '--style', 'aggressive', '--depot-id', 'test-depot']),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # Verify exit code
                 self.assertEqual(cm.exception.code, 1)
@@ -156,11 +162,14 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
             # Capture output
             output = io.StringIO()
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--portfolio', '--style', 'aggressive', '--depot-id', 'test-depot']):
-                with redirect_stdout(output), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--portfolio', '--style', 'aggressive', '--depot-id', 'test-depot']),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # Verify exit code
                 self.assertEqual(cm.exception.code, 1)
@@ -310,20 +319,23 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
         self.setUp()  # Recreate the JSON file
 
         output = io.StringIO()
-        with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                               '--use-dates-from-json']):
-            with redirect_stdout(output), redirect_stderr(output):
-                with self.assertRaises(SystemExit) as cm:
-                    run_trading_agents.main()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                               '--use-dates-from-json']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
 
-                # Should exit with code 1
-                self.assertEqual(cm.exception.code, 1)
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
 
-                # Verify error message indicates the problem
-                output_str = output.getvalue()
-                self.assertIn('Error', output_str)
-                self.assertIn('date', output_str.lower())
-                self.assertIn('use-dates-from-json', output_str.lower() or 'from_json' in output_str.lower())
+        # Verify error message indicates the problem
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('date', output_str.lower())
+        self.assertIn('use-dates-from-json', output_str.lower() or 'from_json' in output_str.lower())
 
     def test_default_mode_writes_consolidated_summary_with_serializable_date(self):
         """Test that the default-mode date survives a real json.dumps of the
@@ -395,17 +407,20 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
             mock_graph.return_value = mock_instance
 
             output = io.StringIO()
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--use-dates-from-json']):
-                with redirect_stdout(output), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--use-dates-from-json']),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
-                    # Should exit with code 1
-                    self.assertEqual(cm.exception.code, 1)
+            # Should exit with code 1
+            self.assertEqual(cm.exception.code, 1)
 
-                    # Verify propagate was never called (validation happened upfront)
-                    self.assertEqual(mock_instance.propagate.call_count, 0)
+            # Verify propagate was never called (validation happened upfront)
+            self.assertEqual(mock_instance.propagate.call_count, 0)
 
 
 @pytest.mark.unit
@@ -470,14 +485,18 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
 
         import run_trading_agents
 
-        with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--llm-provider', 'mistral',
-                                   '--quick-think-llm', 'mistral-small']):
-                output = io.StringIO()
-                with redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+        with (
+            patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}),
+            patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                               '--llm-provider', 'mistral',
+                               '--quick-think-llm', 'mistral-small']),
+        ):
+            output = io.StringIO()
+            with (
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # argparse.error() calls sys.exit(2)
                 self.assertEqual(cm.exception.code, 2)
@@ -491,14 +510,18 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
 
         import run_trading_agents
 
-        with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--llm-provider', 'mistral',
-                                   '--deep-think-llm', 'mistral-large']):
-                output = io.StringIO()
-                with redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+        with (
+            patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}),
+            patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                               '--llm-provider', 'mistral',
+                               '--deep-think-llm', 'mistral-large']),
+        ):
+            output = io.StringIO()
+            with (
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # argparse.error() calls sys.exit(2)
                 self.assertEqual(cm.exception.code, 2)
@@ -516,15 +539,20 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
         env_copy = os.environ.copy()
         env_copy.pop('MISTRAL_API_KEY', None)
 
-        with patch.dict(os.environ, env_copy, clear=True):
-            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
-                                   '--llm-provider', 'mistral',
-                                   '--deep-think-llm', 'mistral-large',
-                                   '--quick-think-llm', 'mistral-small']):
-                output = io.StringIO()
-                with redirect_stdout(output), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as cm:
-                        run_trading_agents.main()
+        with (
+            patch.dict(os.environ, env_copy, clear=True),
+            patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                               '--llm-provider', 'mistral',
+                               '--deep-think-llm', 'mistral-large',
+                               '--quick-think-llm', 'mistral-small']),
+        ):
+            output = io.StringIO()
+            with (
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
 
                 # Should exit with code 1
                 self.assertEqual(cm.exception.code, 1)

@@ -134,13 +134,15 @@ class TestToolLogging:
 
     def test_analyze_stock_logs_start_and_completion(self, caplog):
         """analyze_stock should log when starting and completing with arguments."""
-        with caplog.at_level(logging.INFO):
-            with patch(
+        with (
+            caplog.at_level(logging.INFO),
+            patch(
                 "mcp_server._run_analysis",
                 return_value=("# Report", {}, "BUY"),
-            ):
-                result = mcp_server.analyze_stock("AAPL", "2024-05-10")
-                assert "## Final Decision: BUY" in result
+            ),
+        ):
+            result = mcp_server.analyze_stock("AAPL", "2024-05-10")
+            assert "## Final Decision: BUY" in result
 
         assert any(
             "analyze_stock: starting" in record.message
@@ -156,13 +158,15 @@ class TestToolLogging:
 
     def test_analyze_stock_logs_error_on_failure(self, caplog):
         """analyze_stock should log errors when execution fails."""
-        with caplog.at_level(logging.ERROR):
-            with patch(
+        with (
+            caplog.at_level(logging.ERROR),
+            patch(
                 "mcp_server._run_analysis",
                 side_effect=ValueError("Test error"),
-            ):
-                result = mcp_server.analyze_stock("AAPL", "2024-05-10")
-                assert "ERROR:" in result
+            ),
+        ):
+            result = mcp_server.analyze_stock("AAPL", "2024-05-10")
+            assert "ERROR:" in result
 
         assert any(
             "analyze_stock: failed" in record.message
@@ -199,9 +203,11 @@ class TestToolLogging:
 
     def test_memory_resolve_pending_logs_with_arguments(self, caplog):
         """memory_resolve_pending should log with arguments."""
-        with caplog.at_level(logging.INFO):
-            with patch("tradingagents.memory.resolve_pending", return_value=[]):
-                mcp_server.memory_resolve_pending(agent="trader", ticker="AAPL")
+        with (
+            caplog.at_level(logging.INFO),
+            patch("tradingagents.memory.resolve_pending", return_value=[]),
+        ):
+            mcp_server.memory_resolve_pending(agent="trader", ticker="AAPL")
 
         assert any(
             "memory_resolve_pending: starting" in record.message
@@ -217,14 +223,16 @@ class TestToolLogging:
 
     def test_memory_get_past_context_logs_with_arguments(self, caplog):
         """memory_get_past_context should log with arguments."""
-        with caplog.at_level(logging.INFO):
-            with patch(
+        with (
+            caplog.at_level(logging.INFO),
+            patch(
                 "tradingagents.memory.get_past_context",
                 return_value="No prior lessons.",
-            ):
-                mcp_server.memory_get_past_context(
-                    agent="trader", ticker="AAPL", n_same=5, n_cross=3
-                )
+            ),
+        ):
+            mcp_server.memory_get_past_context(
+                agent="trader", ticker="AAPL", n_same=5, n_cross=3
+            )
 
         assert any(
             "memory_get_past_context: starting" in record.message
@@ -242,16 +250,18 @@ class TestToolLogging:
 
     def test_memory_get_statistics_logs_with_arguments(self, caplog):
         """memory_get_statistics should log with arguments."""
-        with caplog.at_level(logging.INFO):
-            with patch(
+        with (
+            caplog.at_level(logging.INFO),
+            patch(
                 "tradingagents.memory.get_statistics",
                 return_value={
                     "filters": {"agent": "trader", "ticker": "AAPL", "since": None}
                 },
-            ):
-                mcp_server.memory_get_statistics(
-                    agent="trader", ticker="AAPL", since="2024-01-01"
-                )
+            ),
+        ):
+            mcp_server.memory_get_statistics(
+                agent="trader", ticker="AAPL", since="2024-01-01"
+            )
 
         assert any(
             "memory_get_statistics: starting" in record.message
@@ -268,11 +278,13 @@ class TestToolLogging:
 
     def test_memory_get_decisions_logs_with_arguments(self, caplog):
         """memory_get_decisions should log with arguments."""
-        with caplog.at_level(logging.INFO):
-            with patch("tradingagents.memory.gather_context_rows", return_value=[]):
-                mcp_server.memory_get_decisions(
-                    agent="trader", ticker="AAPL", limit=5, misses_only=True
-                )
+        with (
+            caplog.at_level(logging.INFO),
+            patch("tradingagents.memory.gather_context_rows", return_value=[]),
+        ):
+            mcp_server.memory_get_decisions(
+                agent="trader", ticker="AAPL", limit=5, misses_only=True
+            )
 
         assert any(
             "memory_get_decisions: starting" in record.message
@@ -290,13 +302,15 @@ class TestToolLogging:
 
     def test_memory_resolve_pending_logs_error_on_failure(self, caplog):
         """A failing tool call logs a "failed" line (not just "starting")."""
-        with caplog.at_level(logging.ERROR):
-            with patch(
+        with (
+            caplog.at_level(logging.ERROR),
+            patch(
                 "tradingagents.memory.resolve_pending",
                 side_effect=RuntimeError("boom"),
-            ):
-                result = mcp_server.memory_resolve_pending(agent="trader", ticker="AAPL")
-                assert result == "ERROR: boom"
+            ),
+        ):
+            result = mcp_server.memory_resolve_pending(agent="trader", ticker="AAPL")
+            assert result == "ERROR: boom"
 
         assert any(
             "memory_resolve_pending: failed" in record.message
@@ -332,12 +346,14 @@ class TestStdioStdoutCleanliness:
         assert logging.root.manager.disable == logging.CRITICAL  # sanity: stdio disables logging
 
         captured_stdout = io.StringIO()
-        with patch("sys.stdout", captured_stdout):
-            with patch(
+        with (
+            patch("sys.stdout", captured_stdout),
+            patch(
                 "mcp_server._run_analysis",
                 return_value=("# Report", {"foo": "bar"}, "HOLD"),
-            ):
-                result = mcp_server.analyze_stock("AAPL", "2024-05-10")
+            ),
+        ):
+            result = mcp_server.analyze_stock("AAPL", "2024-05-10")
 
         assert "## Final Decision: HOLD" in result
         assert captured_stdout.getvalue() == ""
