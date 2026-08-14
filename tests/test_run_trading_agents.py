@@ -69,14 +69,14 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # Verify exit code
-                self.assertEqual(cm.exception.code, 1)
+            # Verify exit code
+            self.assertEqual(cm.exception.code, 1)
 
-                # Verify diagnostic output includes exception type and message
-                output_str = output.getvalue()
-                self.assertIn('Fatal error processing', output_str)
-                self.assertIn('ConnectionError', output_str)
-                self.assertIn('Failed to connect to Ollama', output_str)
+            # Verify diagnostic output includes exception type and message
+            output_str = output.getvalue()
+            self.assertIn('Fatal error processing', output_str)
+            self.assertIn('ConnectionError', output_str)
+            self.assertIn('Failed to connect to Ollama', output_str)
 
     def test_propagate_stops_processing_on_first_failure(self):
         """Test that the script fails fast and doesn't continue to next ticker."""
@@ -131,13 +131,13 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # Verify exit code
-                self.assertEqual(cm.exception.code, 1)
+            # Verify exit code
+            self.assertEqual(cm.exception.code, 1)
 
-                # Verify diagnostic output
-                output_str = output.getvalue()
-                self.assertIn('Fatal error', output_str)
-                self.assertIn('SimulationClientError', output_str)
+            # Verify diagnostic output
+            output_str = output.getvalue()
+            self.assertIn('Fatal error', output_str)
+            self.assertIn('SimulationClientError', output_str)
 
     def test_generic_portfolio_mode_exception_exits_with_diagnostic(self):
         """Test that generic exceptions in portfolio mode also exit properly."""
@@ -171,12 +171,12 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # Verify exit code
-                self.assertEqual(cm.exception.code, 1)
+            # Verify exit code
+            self.assertEqual(cm.exception.code, 1)
 
-                # Verify exception type is in output
-                output_str = output.getvalue()
-                self.assertIn('ValueError', output_str)
+            # Verify exception type is in output
+            output_str = output.getvalue()
+            self.assertIn('ValueError', output_str)
 
     def test_report_saving_failure_does_not_exit(self):
         """Test that failures in report saving are non-fatal (don't exit).
@@ -498,10 +498,10 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # argparse.error() calls sys.exit(2)
-                self.assertEqual(cm.exception.code, 2)
-                error_output = output.getvalue()
-                self.assertIn('--deep-think-llm', error_output)
+            # argparse.error() calls sys.exit(2)
+            self.assertEqual(cm.exception.code, 2)
+            error_output = output.getvalue()
+            self.assertIn('--deep-think-llm', error_output)
 
     def test_non_ollama_provider_missing_quick_think_model_fails(self):
         """Test that non-ollama provider without --quick-think-llm fails with argparse error."""
@@ -523,10 +523,10 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # argparse.error() calls sys.exit(2)
-                self.assertEqual(cm.exception.code, 2)
-                error_output = output.getvalue()
-                self.assertIn('--quick-think-llm', error_output)
+            # argparse.error() calls sys.exit(2)
+            self.assertEqual(cm.exception.code, 2)
+            error_output = output.getvalue()
+            self.assertIn('--quick-think-llm', error_output)
 
     def test_missing_api_key_for_mistral_exits_before_processing(self):
         """Test that missing MISTRAL_API_KEY exits with code 1 before processing tickers."""
@@ -554,14 +554,14 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
             ):
                 run_trading_agents.main()
 
-                # Should exit with code 1
-                self.assertEqual(cm.exception.code, 1)
+            # Should exit with code 1
+            self.assertEqual(cm.exception.code, 1)
 
-                # Verify error message names the provider and the env var
-                output_str = output.getvalue()
-                self.assertIn('Error', output_str)
-                self.assertIn('mistral', output_str)
-                self.assertIn('MISTRAL_API_KEY', output_str)
+            # Verify error message names the provider and the env var
+            output_str = output.getvalue()
+            self.assertIn('Error', output_str)
+            self.assertIn('mistral', output_str)
+            self.assertIn('MISTRAL_API_KEY', output_str)
 
     def test_ollama_provider_does_not_require_api_key(self):
         """Test that ollama provider (which requires no API key) works without MISTRAL_API_KEY."""
