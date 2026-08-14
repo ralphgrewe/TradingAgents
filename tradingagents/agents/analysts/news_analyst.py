@@ -105,14 +105,14 @@ Aim for 10-20 articles spanning the last 30 days.""" + get_language_instruction(
                 # Try to parse the LLM's JSON output
                 parsed = json.loads(llm_response)
                 # Validate the structure matches our schema
-                llm_output = NewsAnalystOutput(**parsed)
+                NewsAnalystOutput(**parsed)
 
                 # Extract the details payload for the envelope
                 details = parsed
 
                 # Derive signal and confidence from conservative/risky ratings
                 signal, confidence = derive_signal_and_confidence(details)
-            except (json.JSONDecodeError, ValueError) as e:
+            except (json.JSONDecodeError, ValueError):
                 # Graceful fallback: could not parse LLM's JSON response
                 pass
 

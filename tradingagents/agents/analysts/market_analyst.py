@@ -6,7 +6,6 @@ from tradingagents.agents.analysts.market_indicators_computation import (
     compute_indicators,
 )
 from tradingagents.agents.utils.agent_utils import (
-    get_instrument_context_from_state,
     get_language_instruction,
 )
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
@@ -17,7 +16,6 @@ def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        instrument_context = get_instrument_context_from_state(state)
 
         # Step 1: Compute indicators deterministically from OHLCV
         signal = None

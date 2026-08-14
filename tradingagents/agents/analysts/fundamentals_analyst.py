@@ -7,7 +7,6 @@ from tradingagents.agents.analysts.fundamentals_computation import (
     compute,
 )
 from tradingagents.agents.utils.agent_utils import (
-    get_instrument_context_from_state,
     get_language_instruction,
 )
 
@@ -16,7 +15,6 @@ def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        instrument_context = get_instrument_context_from_state(state)
 
         # Step 1: Compute ratio tables deterministically
         signal = None
@@ -125,8 +123,6 @@ Context: {context_info}"""
 
         # Confidence: if they agree, take higher; if disagree, take lower
         conf_map = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
-        value_conf_score = conf_map.get(str(value_conf).upper(), 0)
-        growth_conf_score = conf_map.get(str(growth_conf).upper(), 0)
 
         if value_signal == growth_signal:
             confidence = max(value_conf, growth_conf, key=lambda x: conf_map.get(str(x).upper(), 0))

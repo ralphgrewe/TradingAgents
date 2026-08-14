@@ -231,7 +231,6 @@ class TestResearcherNodeGateClosed:
                 # invoke_structured_or_freetext) should have run.
                 quick_llm.invoke.assert_not_called()
                 mock_invoke.assert_called_once()
-                call_args = mock_invoke.call_args
                 # The render function should be passed, but the synthesis prompt should
                 # indicate gate is closed
                 assert "disabled (historical date)" in rendered_brief

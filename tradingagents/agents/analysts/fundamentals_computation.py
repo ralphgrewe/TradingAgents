@@ -113,7 +113,7 @@ def fetch_ticker_info(ticker: str) -> dict:
         ticker_obj = yf.Ticker(canonical)
         info = yf_retry(lambda: ticker_obj.info)
         return info if info else {}
-    except Exception as e:
+    except Exception:
         return {}
 
 
@@ -130,7 +130,7 @@ def fetch_income_statement(ticker: str, freq: str = "annual") -> dict:
         if isinstance(data, pd.DataFrame):
             return data.to_dict()
         return data if isinstance(data, dict) else {}
-    except Exception as e:
+    except Exception:
         return {}
 
 
@@ -147,7 +147,7 @@ def fetch_balance_sheet(ticker: str, freq: str = "annual") -> dict:
         if isinstance(data, pd.DataFrame):
             return data.to_dict()
         return data if isinstance(data, dict) else {}
-    except Exception as e:
+    except Exception:
         return {}
 
 
@@ -164,7 +164,7 @@ def fetch_cashflow(ticker: str, freq: str = "annual") -> dict:
         if isinstance(data, pd.DataFrame):
             return data.to_dict()
         return data if isinstance(data, dict) else {}
-    except Exception as e:
+    except Exception:
         return {}
 
 

@@ -277,9 +277,8 @@ def interpret_signal(indicator: str, val: float | None, prv: float | None, close
             if val > 70:
                 return "Bearish"
     elif indicator == "boll_ub":
-        if val is not None and close is not None:
-            if close >= val:
-                return "Bearish"
+        if val is not None and close is not None and close >= val:
+            return "Bearish"
     elif indicator == "boll_lb":
         if val is not None and close is not None:
             if close <= val:
@@ -289,11 +288,10 @@ def interpret_signal(indicator: str, val: float | None, prv: float | None, close
     elif indicator == "atr":
         return "Neutral"  # sizing only
     elif indicator == "vwma":
-        if val is not None and close is not None:
-            if close > val:
-                return "Bullish"
-            if close < val:
-                return "Bearish"
+        if val is not None and close is not None and close > val:
+            return "Bullish"
+        elif val is not None and close is not None and close < val:
+            return "Bearish"
     return "Neutral"
 
 

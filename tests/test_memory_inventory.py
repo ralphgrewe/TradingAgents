@@ -425,11 +425,11 @@ def test_format_ticker_entries_text_status_resolved_vs_pending():
 
     # Find the line with quant (resolved)
     lines = output.split("\n")
-    quant_line = [l for l in lines if l.startswith("quant")][0]
+    quant_line = [line for line in lines if line.startswith("quant")][0]
     assert "resolved" in quant_line
 
     # Find the line with technical (pending)
-    technical_line = [l for l in lines if l.startswith("technical")][0]
+    technical_line = [line for line in lines if line.startswith("technical")][0]
     assert "pending" in technical_line
 
 
@@ -516,8 +516,8 @@ def test_format_ticker_entries_text_multiple_entries_spacing():
     # Check that entries are separated
     lines = output.split("\n")
     # Find line indices
-    quant_idx = next(i for i, l in enumerate(lines) if l.startswith("quant"))
-    fund_idx = next(i for i, l in enumerate(lines) if l.startswith("fundamental"))
+    quant_idx = next(i for i, line in enumerate(lines) if line.startswith("quant"))
+    fund_idx = next(i for i, line in enumerate(lines) if line.startswith("fundamental"))
     # There should be blank lines in between
     assert quant_idx < fund_idx
     assert "" in lines[quant_idx : fund_idx + 1]
@@ -552,8 +552,8 @@ def test_format_ticker_entries_text_confidence_formatting():
 
     # Find lines with confidence
     lines = output.split("\n")
-    quant_line = [l for l in lines if l.startswith("quant")][0]
-    tech_line = [l for l in lines if l.startswith("technical")][0]
+    quant_line = [line for line in lines if line.startswith("quant")][0]
+    tech_line = [line for line in lines if line.startswith("technical")][0]
 
     # quant should have "n/a" for confidence
     assert "n/a" in quant_line
