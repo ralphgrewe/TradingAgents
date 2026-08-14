@@ -1,18 +1,17 @@
 import json
-from typing import Optional
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from tradingagents.agents.utils.agent_utils import (
-    get_global_news,
-    get_language_instruction,
-    get_news,
-    get_instrument_context_from_state,
-)
 from tradingagents.agents.analysts.news_computation import (
     NewsAnalystOutput,
     build_json_envelope,
     derive_signal_and_confidence,
+)
+from tradingagents.agents.utils.agent_utils import (
+    get_global_news,
+    get_instrument_context_from_state,
+    get_language_instruction,
+    get_news,
 )
 
 

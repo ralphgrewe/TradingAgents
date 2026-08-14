@@ -6,7 +6,6 @@ the script with mocked dependencies and checking the exit behavior.
 
 import json
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,9 +48,10 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
         message (not just str(e)), so e.g. an LLM-provider connection failure
         is distinguishable from a bad ticker/date or a data-vendor error."
         """
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
 
         # Mock the TradingAgentsGraph to raise a clear exception
         with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
@@ -96,9 +96,10 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
     def test_portfolio_mode_failure_exits_with_diagnostic(self):
         """Test that portfolio mode failures also exit with code 1 and print diagnostics."""
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
         from tradingagents.simulation import SimulationClientError
 
         # Mock both TradingAgentsGraph and run_portfolio_mode
@@ -134,9 +135,10 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
 
     def test_generic_portfolio_mode_exception_exits_with_diagnostic(self):
         """Test that generic exceptions in portfolio mode also exit properly."""
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
 
         with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
              patch('run_trading_agents.run_portfolio_mode') as mock_portfolio:
@@ -188,7 +190,7 @@ class RunTradingAgentsErrorHandlingTests(_TempStockFileTestCase):
             )
 
             # Setup failing report saving
-            mock_save_report.side_effect = IOError("Cannot write to disk")
+            mock_save_report.side_effect = OSError("Cannot write to disk")
 
             with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
                                    '--report-dir', './reports']):
@@ -205,8 +207,9 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
     def test_default_mode_uses_todays_date_when_date_field_omitted(self):
         """Test that in default mode, stocks without 'date' field use today's date."""
-        import run_trading_agents
         import datetime
+
+        import run_trading_agents
 
         # Stocks with no 'date' field
         self.STOCKS = [{"ticker": "AAPL"}, {"ticker": "MSFT"}]
@@ -238,8 +241,9 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
     def test_default_mode_ignores_date_field_if_present(self):
         """Test that in default mode, 'date' field in JSON is ignored."""
-        import run_trading_agents
         import datetime
+
+        import run_trading_agents
 
         # Stocks with 'date' field that should be ignored
         self.STOCKS = [
@@ -268,8 +272,8 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
     def test_use_dates_from_json_mode_uses_stock_dates(self):
         """Test that --use-dates-from-json mode uses each stock's 'date' field."""
+
         import run_trading_agents
-        import datetime
 
         self.STOCKS = [
             {"ticker": "AAPL", "date": "2024-01-15"},
@@ -296,9 +300,10 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
     def test_use_dates_from_json_mode_requires_date_field(self):
         """Test that --use-dates-from-json mode fails if 'date' field is missing."""
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
 
         # Stock without 'date' field
         self.STOCKS = [{"ticker": "AAPL"}]
@@ -373,9 +378,10 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
     def test_use_dates_from_json_mode_validates_all_stocks_upfront(self):
         """Test that --use-dates-from-json mode validates all stocks before processing any."""
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
 
         # First stock is valid, second is missing 'date'
         self.STOCKS = [
@@ -459,9 +465,10 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
 
     def test_non_ollama_provider_missing_deep_think_model_fails(self):
         """Test that non-ollama provider without --deep-think-llm fails with argparse error."""
-        import run_trading_agents
         import io
         from contextlib import redirect_stderr
+
+        import run_trading_agents
 
         with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
             with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
@@ -479,9 +486,10 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
 
     def test_non_ollama_provider_missing_quick_think_model_fails(self):
         """Test that non-ollama provider without --quick-think-llm fails with argparse error."""
-        import run_trading_agents
         import io
         from contextlib import redirect_stderr
+
+        import run_trading_agents
 
         with patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
             with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
@@ -499,9 +507,10 @@ class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
 
     def test_missing_api_key_for_mistral_exits_before_processing(self):
         """Test that missing MISTRAL_API_KEY exits with code 1 before processing tickers."""
-        import run_trading_agents
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
 
         # Remove MISTRAL_API_KEY from environment if it exists
         env_copy = os.environ.copy()

@@ -9,14 +9,13 @@ import json
 import pytest
 
 from tradingagents.agents.analysts.fundamentals_computation import (
-    compute,
     build_json_envelope,
-    confidence_to_score,
     build_key_drivers,
+    confidence_to_score,
+    normalize_statements,
+    pick,
     r2,
     ratio,
-    pick,
-    normalize_statements,
 )
 
 

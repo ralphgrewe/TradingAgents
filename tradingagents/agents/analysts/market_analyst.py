@@ -1,15 +1,15 @@
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.market_indicators_computation import (
+    build_json_envelope,
+    compute_indicators,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
-from tradingagents.agents.analysts.market_indicators_computation import (
-    compute_indicators,
-    build_json_envelope,
-)
 
 
 def create_market_analyst(llm):

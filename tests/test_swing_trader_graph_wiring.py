@@ -8,11 +8,12 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 
-from tradingagents.graph.setup import GraphSetup
+import pytest
+
 from tradingagents.graph.conditional_logic import ConditionalLogic
+from tradingagents.graph.setup import GraphSetup
 
 pytestmark = pytest.mark.unit
 

@@ -11,15 +11,13 @@ Key design principle: pure computation, no LLM, deterministic ratio tables.
 """
 
 import json
-import math
-from typing import Any, Optional
+from typing import Any
 
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 
 from tradingagents.dataflows.symbol_utils import normalize_symbol
 from tradingagents.dataflows.y_finance import yf_retry
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -383,8 +381,8 @@ def compute(ticker: str) -> dict[str, Any]:
 
 
 def build_json_envelope(
-    signal: Optional[str],
-    confidence: Optional[str],
+    signal: str | None,
+    confidence: str | None,
     summary: str,
     details: dict,
     ticker: str,

@@ -5,18 +5,18 @@ gate true/false cases, and missing-key path with mocked HTTP.
 """
 
 import unittest
-from unittest import mock
 from datetime import datetime, timedelta
+from unittest import mock
 
 import pytest
 
-from tradingagents.dataflows.tavily_search import (
-    get_web_search_results,
-    build_evidence_pack,
-    is_web_search_allowed,
-    TavilySearchError,
-)
 from tradingagents.dataflows.errors import VendorNotConfiguredError
+from tradingagents.dataflows.tavily_search import (
+    TavilySearchError,
+    build_evidence_pack,
+    get_web_search_results,
+    is_web_search_allowed,
+)
 
 
 @pytest.mark.unit

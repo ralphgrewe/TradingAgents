@@ -19,7 +19,6 @@ import tradingagents.graph.trading_graph as trading_graph_module
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.memory.mcp_client import MemoryMCPConnectionError, MemoryMCPToolError
 
-
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------

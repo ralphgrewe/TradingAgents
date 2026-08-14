@@ -31,8 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tradingagents.memory import query as memory_query
-from tradingagents.memory import stats as memory_stats
+from tradingagents.memory import query as memory_query, stats as memory_stats
 from tradingagents.memory.store import get_connection, store_decision
 
 # ---------------------------------------------------------------------------

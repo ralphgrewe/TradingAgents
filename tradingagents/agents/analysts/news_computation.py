@@ -10,7 +10,6 @@ Key design principle: LLM scores articles, Python aggregates and derives top-lev
 """
 
 import json
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -88,8 +87,8 @@ class NewsAnalystOutput(BaseModel):
 
 
 def build_json_envelope(
-    signal: Optional[str],
-    confidence: Optional[str],
+    signal: str | None,
+    confidence: str | None,
     summary: str,
     details: dict,
     ticker: str,
@@ -123,7 +122,7 @@ def build_json_envelope(
 
 def derive_signal_and_confidence(
     details: dict,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """
     Derive top-level signal and confidence from conservative/risky ratings.
 

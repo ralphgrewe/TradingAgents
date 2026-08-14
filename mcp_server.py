@@ -46,9 +46,10 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 # ── make sure the TradingAgents package is importable ───────────────────────
 _HERE = Path(__file__).parent.resolve()

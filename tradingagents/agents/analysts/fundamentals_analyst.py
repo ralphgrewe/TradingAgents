@@ -1,15 +1,14 @@
 import json
-from typing import Optional
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.fundamentals_computation import (
+    build_json_envelope,
+    compute,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
-)
-from tradingagents.agents.analysts.fundamentals_computation import (
-    compute,
-    build_json_envelope,
 )
 
 
@@ -89,7 +88,7 @@ Context: {context_info}"""
         system_message += get_language_instruction()
 
         # Use a simple message structure to avoid LangChain template parsing issues
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import SystemMessage
 
         prompt_messages = [
             SystemMessage(content=system_message),
@@ -122,10 +121,7 @@ Context: {context_info}"""
         growth_conf = details.get("growth", {}).get("confidence")
 
         # Signal: if both agree, use that signal; else HOLD
-        if value_signal == growth_signal:
-            signal = value_signal
-        else:
-            signal = "HOLD"
+        signal = value_signal if value_signal == growth_signal else "HOLD"
 
         # Confidence: if they agree, take higher; if disagree, take lower
         conf_map = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}

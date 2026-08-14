@@ -39,19 +39,18 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     format_analyst_reports_section,
     get_language_instruction,
-    is_present_text,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
 from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.errors import VendorError
 from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.dataflows.tavily_search import (
     build_evidence_pack,
     is_web_search_allowed,
 )
-from tradingagents.dataflows.errors import VendorError
 
 logger = logging.getLogger(__name__)
 

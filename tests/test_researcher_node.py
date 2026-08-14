@@ -15,7 +15,6 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
 
 from tradingagents.agents.researchers.researcher import (
     _validate_and_patch_plan,

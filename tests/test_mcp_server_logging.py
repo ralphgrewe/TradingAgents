@@ -26,7 +26,6 @@ import pytest
 
 import mcp_server
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Helper to run mcp_server as a subprocess with a probe to capture logging

@@ -3,9 +3,9 @@
 from datetime import datetime, timezone
 
 from tradingagents.memory.inventory import (
+    _format_ticker_entries_text,
     get_inventory,
     get_ticker_entries,
-    _format_ticker_entries_text,
 )
 from tradingagents.memory.store import get_connection, store_decision
 

@@ -1,6 +1,5 @@
 """Tests for tradingagents.memory.query — get_past_context (issue #7) and gather_context_rows (issue #52)."""
 
-import json
 from datetime import datetime, timezone
 
 from tradingagents.memory.query import gather_context_rows, get_past_context
