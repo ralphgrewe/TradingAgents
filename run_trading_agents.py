@@ -2,13 +2,16 @@
 """
 Script to run Trading Agents for a list of stocks from JSON file or a run config file.
 
+Usage (no arguments — help):
+    python run_trading_agents.py
+
 Usage (stock list — legacy behavior, unchanged):
     python run_trading_agents.py stocks.json [--report-dir REPORT_DIR] [--show-summary]
     python run_trading_agents.py stocks.json --use-dates-from-json  # to use dates from JSON
     python run_trading_agents.py stocks.json --portfolio --style aggressive --depot-id my-depot
     python run_trading_agents.py stocks.json --llm-provider mistral --deep-think-llm mistral-large --quick-think-llm mistral-small
 
-Usage (run config file — new in issue #116):
+Usage (run config file — new in issue #116, exclusive — no CLI flags):
     python run_trading_agents.py config.json
 
 Expected JSON format for stock lists (date field is optional by default):
@@ -74,12 +77,17 @@ Recognized top-level config keys (exactly the argparse dest names in snake_case,
   _validate_config_block/_type_is_compatible for the implementation. Top-level keys (above) take
   precedence if set in both places.
 
-Precedence (highest to lowest):
-1. CLI flag (if provided on command line)
+Precedence (highest to lowest) — **STOCK-LIST MODE ONLY**:
+1. CLI flag (if provided on command line; stock-list mode only)
 2. Top-level config file key (if the positional argument is a config object)
 3. Config file's nested "config" block (issue #117)
 4. TRADINGAGENTS_* environment variable
 5. DEFAULT_CONFIG
+
+**Config-file mode is exclusive**: a run config file (JSON object) cannot be
+combined with CLI flags. If both are provided, the script exits with code 1
+before doing any work (before the API-key check and before constructing
+TradingAgentsGraph), printing an error that names every offending flag.
 
 The full five-tier chain applies to keys that are backed by a DEFAULT_CONFIG
 entry (those in _ENV_OVERRIDES: llm_provider, deep_think_llm,
@@ -96,7 +104,8 @@ The remaining recognized keys (report_dir, show_summary, use_dates_from_json,
 portfolio, style, depot_id) are script-only settings with no DEFAULT_CONFIG
 entry or TRADINGAGENTS_* env var of their own; for those, "default" in tier 5
 above is just this script's built-in literal (e.g. report_dir → "./reports"),
-so effectively only tiers 1, 2, and 5 apply.
+so effectively only tiers 2 (top-level config key) and 5 apply in config-file
+mode, and tiers 1, 2, and 5 in stock-list mode.
 
 The set of recognized config-file keys and the CLI/config-file merge live in
 one place in the source (_CONFIG_FILE_FLAG_KEYS in run_trading_agents.py) so
@@ -407,7 +416,8 @@ def _resolve_stocks_file_path(stocks_file: str, config_path: str | None) -> str:
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file or run config file')
-    parser.add_argument('json_file', help='Path to JSON file (stock list array or run config object)')
+    parser.add_argument('json_file', nargs='?', default=None,
+                        help='Path to JSON file (stock list array or run config object)')
     parser.add_argument('--llm-provider', dest='llm_provider', default=None,
                         help='LLM provider to use (default: ollama). Examples: openai, anthropic, mistral, google, etc.')
     parser.add_argument('--deep-think-llm', dest='deep_think_llm', default=None,
@@ -434,6 +444,11 @@ def main():
                              '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
 
+    # No arguments case: print help to stdout and exit 0
+    if args.json_file is None:
+        parser.print_help()
+        sys.exit(0)
+
     # Load and parse json_file exactly once. The parsed value's top-level
     # JSON type disambiguates a stock list (array) from a run config file
     # (object) — see _validate_config_file, which validates this same
@@ -453,6 +468,18 @@ def main():
     # Disambiguate: array → stock list, object → config file
     if isinstance(data, dict):
         # It's a config file
+        # Check for config file + CLI flags mixing (new in issue #124)
+        explicitly_given_flags = [
+            flag_name for flag_name in _CONFIG_FILE_FLAG_KEYS
+            if getattr(args, flag_name) is not None
+        ]
+        if explicitly_given_flags:
+            # Format the flag names back to CLI spelling (e.g., "llm_provider" → "--llm-provider")
+            cli_flag_names = ', '.join(f'--{name.replace("_", "-")}' for name in explicitly_given_flags)
+            print(f"Error: Config file mode is exclusive — cannot combine '{args.json_file}' with CLI flags: {cli_flag_names}")
+            print("       Either move those settings into the config file, or drop the config file and pass everything on the command line.")
+            sys.exit(1)
+
         _validate_config_file(data, args.json_file)
         config_data = data
         config_path = args.json_file

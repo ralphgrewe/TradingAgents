@@ -149,23 +149,23 @@ use the same defaults as CLI flags.
 - `depot_id`: named depot (required with portfolio)
 - `memory_id`: isolate decision history (optional)
 
-**Config precedence:** CLI flags override top-level config keys, which override the nested `"config"` block,
-which override environment variables, which override defaults. This full five-tier chain applies to any
+**Config precedence:** In **stock-list mode** (JSON array), CLI flags override environment variables,
+which override defaults. In **config-file mode** (JSON object), CLI flags cannot be combined with the config
+file — the run is configured either by a config file or on the command line, not both. If you attempt to mix
+them, the script exits with an error before doing any work.
+
+When using a config file, the precedence is: top-level config keys override the nested `"config"` block,
+which overrides environment variables, which override defaults. This five-tier chain applies to any
 `DEFAULT_CONFIG` key (those in `tradingagents/default_config.py` with a corresponding `TRADINGAGENTS_*`
 env var: `research_stage`, `max_debate_rounds`, `temperature`, `swing_trader_enabled`, etc., plus
 `llm_provider`, `deep_think_llm`, `quick_think_llm`, and `memory_id`). The remaining keys
 (`report_dir`, `show_summary`, `use_dates_from_json`, `portfolio`, `style`, `depot_id`) are script-only
-with no env var of their own, so only the CLI-flag/top-level-config/built-in-default tiers apply to them.
+with no env var of their own, so only the top-level-config/built-in-default tiers apply to them
+in config-file mode.
 
 If a key appears in both a top-level field and in the nested `"config"` block, the top-level value wins.
 For nested dict keys (like `data_vendors`), the `"config"` block does a one-level deep merge: setting
 `"config": {"data_vendors": {"news_data": "alpha_vantage"}}` keeps the other `data_vendors` entries intact.
-
-This allows tweaking a saved config ad hoc without editing the file:
-
-```bash
-./venv/bin/python run_trading_agents.py config.json --show-summary  # Override config if needed
-```
 
 #### Nested "config" block for DEFAULT_CONFIG keys
 

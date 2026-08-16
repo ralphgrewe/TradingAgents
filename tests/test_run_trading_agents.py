@@ -427,6 +427,43 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
 
 @pytest.mark.unit
+class RunTradingAgentsHelpTests(_TempStockFileTestCase):
+    """Test no-arguments help behavior (new in issue #124)."""
+
+    STOCKS = [
+        {"ticker": "AAPL", "date": "2024-01-15"},
+        {"ticker": "MSFT", "date": "2024-01-15"},
+    ]
+
+    def test_no_arguments_prints_help_and_exits_0(self):
+        """With no command-line arguments, script prints help to stdout and exits 0 (issue #124)."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 0 (not 2, not 1)
+        self.assertEqual(cm.exception.code, 0)
+
+        # Should print help to stdout (not usage error)
+        output_str = output.getvalue()
+        # Help output should contain usage and description
+        self.assertIn('usage:', output_str.lower())
+        self.assertIn('positional arguments', output_str.lower())
+        # "optional arguments" in older argparse, "options:" in newer versions
+        self.assertTrue('optional arguments' in output_str.lower() or 'options:' in output_str.lower())
+
+
+@pytest.mark.unit
 class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
     """Test run config file functionality."""
 
@@ -434,6 +471,38 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
         {"ticker": "AAPL", "date": "2024-01-15"},
         {"ticker": "MSFT", "date": "2024-01-15"},
     ]
+
+    def test_config_file_plus_string_flag_rejected(self):
+        """Config file + string flag (e.g. --llm-provider) is rejected (issue #124)."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+        }))
+
+        # Config file + string flag should be rejected before doing work
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                               '--llm-provider', 'mistral']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
+
+        # Verify error message names the flag
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--llm-provider', output_str)
 
     def test_config_file_basic_loading(self):
         """Test that a basic config file is loaded and applied correctly."""
@@ -469,8 +538,11 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 self.assertEqual(config["deep_think_llm"], "mistral-large")
                 self.assertEqual(config["quick_think_llm"], "mistral-small")
 
-    def test_config_file_cli_precedence(self):
-        """Test that CLI flags override config file values."""
+    def test_config_file_cli_mixing_rejected(self):
+        """Config file + CLI flags is rejected (strict exclusive mode per issue #124)."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
         import run_trading_agents
 
         # Create a config file
@@ -482,29 +554,29 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
             "quick_think_llm": "mistral-small",
         }))
 
-        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
-             patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}):
+        # Config file + CLI flags should be rejected before doing any work
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                               '--llm-provider', 'openai',
+                               '--deep-think-llm', 'gpt-4-turbo',
+                               '--quick-think-llm', 'gpt-4o']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
 
-            mock_instance = MagicMock()
-            mock_graph.return_value = mock_instance
-            mock_instance.propagate.return_value = (
-                {"final_trade_decision": "BUY"},
-                "BUY"
-            )
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
 
-            # CLI flag should override config file
-            with patch('sys.argv', ['run_trading_agents.py', str(config_file),
-                                   '--llm-provider', 'openai',
-                                   '--deep-think-llm', 'gpt-4-turbo',
-                                   '--quick-think-llm', 'gpt-4o']):
-                run_trading_agents.main()
-
-                # Verify CLI values win over config file
-                call_args = mock_graph.call_args
-                config = call_args[1]['config']
-                self.assertEqual(config["llm_provider"], "openai")
-                self.assertEqual(config["deep_think_llm"], "gpt-4-turbo")
-                self.assertEqual(config["quick_think_llm"], "gpt-4o")
+        # Verify error message names the offending flags
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--llm-provider', output_str)
+        self.assertIn('--deep-think-llm', output_str)
+        self.assertIn('--quick-think-llm', output_str)
+        self.assertIn('exclusive', output_str.lower())
 
     def test_config_file_relative_stocks_file_path(self):
         """Test that relative stocks_file paths resolve against config directory."""
@@ -728,8 +800,11 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 config = call_args[1]['config']
                 self.assertEqual(config["llm_provider"], "ollama")
 
-    def test_config_file_boolean_precedence_cli_flag_wins(self):
-        """store_true key precedence: CLI flag wins over an explicit config value."""
+    def test_config_file_store_true_flag_mixing_rejected(self):
+        """Config file + store_true flag (e.g. --show-summary) is rejected (issue #124)."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
         import run_trading_agents
 
         config_file = Path(self.temp_dir.name) / "config.json"
@@ -738,22 +813,23 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
             "show_summary": False,
         }))
 
+        # Config file + store_true flag should be rejected before doing work
+        output = io.StringIO()
         with (
-            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
-            patch('run_trading_agents.display_summary') as mock_display,
+            patch('sys.argv', ['run_trading_agents.py', str(config_file), '--show-summary']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
         ):
-            mock_instance = MagicMock()
-            mock_graph.return_value = mock_instance
-            mock_instance.propagate.return_value = (
-                {"final_trade_decision": "BUY"},
-                "BUY"
-            )
+            run_trading_agents.main()
 
-            with patch('sys.argv', ['run_trading_agents.py', str(config_file), '--show-summary']):
-                run_trading_agents.main()
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
 
-                # The CLI flag (True) must win over the config file's explicit False.
-                self.assertTrue(mock_display.called)
+        # Verify error message names the flag
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--show-summary', output_str)
 
     def test_config_file_boolean_precedence_config_wins_when_flag_absent(self):
         """store_true key precedence: config file value wins when the flag is absent."""
@@ -1369,7 +1445,14 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 self.assertEqual(config["memory_id"], "top-level-id")
 
     def test_config_file_cli_flag_beats_nested_config_block(self):
-        """CLI flag (tier 1) beats config block key (tier 3)."""
+        """Config file + actual CLI flag (not top-level key) is rejected (issue #124).
+
+        This test verifies that a CLI flag like --memory-id cannot be mixed with a config file.
+        The test name is preserved from the original for backwards compatibility with test discovery.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
         import run_trading_agents
 
         config_file = Path(self.temp_dir.name) / "config.json"
@@ -1380,54 +1463,73 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
             },
         }))
 
-        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
-            mock_instance = MagicMock()
-            mock_graph.return_value = mock_instance
-            mock_instance.propagate.return_value = (
-                {"final_trade_decision": "BUY"},
-                "BUY"
-            )
+        # Config file + CLI flag --memory-id should be rejected
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                               '--memory-id', 'cli-memory']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
 
-            # CLI flag wins — but run_trading_agents.py doesn't have a --temperature
-            # flag, so we test with a config-block-settable key that IS also a
-            # top-level key: llm_provider via top-level + config block.
-            # Actually, let me use a different approach: test with a key from
-            # _CONFIG_FILE_FLAG_KEYS that's also in DEFAULT_CONFIG. memory_id qualifies.
-            config_file.write_text(json.dumps({
-                "stocks_file": str(self.stock_list_file),
-                "memory_id": "cli-memory",  # Top-level (this is the CLI)
-                "config": {
-                    "memory_id": "config-block-memory",  # Nested (loses)
-                },
-            }))
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
 
-            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
-                run_trading_agents.main()
-
-                call_args = mock_graph.call_args
-                config = call_args[1]['config']
-                self.assertEqual(config["memory_id"], "cli-memory")
+        # Verify error message names the flag
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--memory-id', output_str)
 
     def test_config_file_cli_flag_beats_all_tiers(self):
-        """Actual CLI flag (tier 1) beats config block (tier 3) and env var (tier 4)."""
+        """Config file + multiple CLI flags is rejected, message names all flags (issue #124).
+
+        This test verifies that multiple CLI flags cannot be mixed with a config file,
+        and the error message names all offending flags.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
         import run_trading_agents
 
         config_file = Path(self.temp_dir.name) / "config.json"
         config_file.write_text(json.dumps({
             "stocks_file": str(self.stock_list_file),
             "config": {
-                "temperature": 0.3,  # Config block temperature
+                "temperature": 0.3,
             },
         }))
 
-        # Note: run_trading_agents.py doesn't expose a --temperature CLI flag,
-        # so we test with --memory-id, which IS a CLI flag and also settable
-        # in config/config-block.
+        # Config file + multiple CLI flags should be rejected
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                               '--memory-id', 'cli-memory',
+                               '--show-summary']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
+
+        # Verify error message names both flags
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--memory-id', output_str)
+        self.assertIn('--show-summary', output_str)
+
+    def test_config_file_alone_still_works(self):
+        """Regression: config file alone (no CLI flags) still works unchanged (issue #124)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
         config_file.write_text(json.dumps({
             "stocks_file": str(self.stock_list_file),
-            "config": {
-                "memory_id": "config-block-memory",
-            },
+            "llm_provider": "ollama",
         }))
 
         with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
@@ -1438,14 +1540,31 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 "BUY"
             )
 
-            # CLI flag --memory-id should beat config block
-            with patch('sys.argv', ['run_trading_agents.py', str(config_file),
-                                   '--memory-id', 'cli-memory']):
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
                 run_trading_agents.main()
 
-                call_args = mock_graph.call_args
-                config = call_args[1]['config']
-                self.assertEqual(config["memory_id"], "cli-memory")
+                # Verify propagate was called twice (for both stocks in config file)
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+
+    def test_stock_list_with_cli_flags_still_works(self):
+        """Regression: stock-list array + CLI flags still works (stock-list mode unchanged)."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # Stock list (array) + CLI flags should work fine (stock-list mode is unchanged)
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                   '--show-summary', '--report-dir', './my-reports']):
+                run_trading_agents.main()
+
+                # Verify propagate was called and flags were respected
+                self.assertEqual(mock_instance.propagate.call_count, 2)
 
     def test_legacy_stock_list_still_works(self):
         """Test that legacy stock list arrays still work (backward compatibility)."""

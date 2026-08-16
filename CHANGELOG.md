@@ -8,8 +8,21 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **Strict config-file-vs-CLI exclusivity.** `run_trading_agents.py` now enforces
+  an exclusive contract: a run is configured either by a config file (JSON object)
+  or on the command line (JSON array + flags), never both. If a config file and any
+  CLI flag are combined, the script exits with code 1 before doing work, printing
+  an error that names the offending flags. This fixes a prior-unintended precedence
+  that made mixing valid in issue #116. Existing uses of pure config files or pure
+  CLI flags are unchanged; only the mixed-mode runs (if any) are affected. (#124)
+
 ### Added
 
+- **No-arguments help.** Running `run_trading_agents.py` with no arguments prints
+  the full help message to stdout and exits cleanly (code 0), instead of a one-line
+  usage error. (#124)
 - **Named memory IDs.** `--memory-id MEMORY_ID` (`run_trading_agents.py`) and
   `TRADINGAGENTS_MEMORY_ID` isolate the SQLite decision-memory store per run —
   each ID gets its own DB at `runs/memory/<id>/memory.db` instead of the
