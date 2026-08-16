@@ -1566,6 +1566,311 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 # Verify propagate was called and flags were respected
                 self.assertEqual(mock_instance.propagate.call_count, 2)
 
+@pytest.mark.unit
+class RunTradingAgentsTickersAndStocksFileTests(_TempStockFileTestCase):
+    """Test new --tickers and --stocks-file flags (issue #125)."""
+
+    STOCKS = [
+        {"ticker": "AAPL", "date": "2024-01-15"},
+        {"ticker": "MSFT", "date": "2024-01-15"},
+    ]
+
+    def test_tickers_flag_basic(self):
+        """Test --tickers with single and multiple tickers."""
+        import datetime
+
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # Test single ticker
+            with patch('sys.argv', ['run_trading_agents.py', '--tickers', 'AAPL']):
+                run_trading_agents.main()
+
+                # Verify propagate was called once with today's date
+                self.assertEqual(mock_instance.propagate.call_count, 1)
+                call = mock_instance.propagate.call_args_list[0]
+                self.assertEqual(call[0][0], "AAPL")
+                self.assertEqual(call[0][1], datetime.date.today().isoformat())
+
+            # Reset mock
+            mock_instance.reset_mock()
+
+            # Test multiple tickers
+            with patch('sys.argv', ['run_trading_agents.py', '--tickers', 'AAPL,MSFT']):
+                run_trading_agents.main()
+
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+                calls = mock_instance.propagate.call_args_list
+                today = datetime.date.today().isoformat()
+                self.assertEqual(calls[0][0], ("AAPL", today))
+                self.assertEqual(calls[1][0], ("MSFT", today))
+
+    def test_tickers_flag_with_whitespace(self):
+        """Test --tickers with surrounding whitespace per entry."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # Test whitespace stripping
+            with patch('sys.argv', ['run_trading_agents.py', '--tickers', 'AAPL, MSFT, GOOGL']):
+                run_trading_agents.main()
+
+                self.assertEqual(mock_instance.propagate.call_count, 3)
+                calls = mock_instance.propagate.call_args_list
+                self.assertEqual(calls[0][0][0], "AAPL")
+                self.assertEqual(calls[1][0][0], "MSFT")
+                self.assertEqual(calls[2][0][0], "GOOGL")
+
+    def test_tickers_flag_empty_entry_fails(self):
+        """Test that --tickers with empty entries exits with error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        # Test empty after stripping (e.g., trailing comma)
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--tickers', 'AAPL,,MSFT']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('empty', output_str.lower())
+
+        # Test just a comma
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--tickers', ',']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_tickers_flag_with_use_dates_from_json_fails(self):
+        """Test that --tickers + --use-dates-from-json is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--tickers', 'AAPL',
+                              '--use-dates-from-json']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('--tickers', output_str)
+        self.assertIn('--use-dates-from-json', output_str)
+
+    def test_stocks_file_flag_basic(self):
+        """Test --stocks-file loads a stock list correctly."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', '--stocks-file', str(self.stock_list_file)]):
+                run_trading_agents.main()
+
+                # Verify propagate was called twice
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+
+    def test_stocks_file_flag_missing_file_fails(self):
+        """Test that --stocks-file with missing file exits with error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--stocks-file', '/nonexistent/stocks.json']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('not found', output_str)
+
+    def test_stocks_file_flag_malformed_json_fails(self):
+        """Test that --stocks-file with malformed JSON exits with error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_json = Path(temp_dir) / "bad.json"
+            bad_json.write_text("{invalid json")
+
+            output = io.StringIO()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', '--stocks-file', str(bad_json)]),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
+
+            self.assertEqual(cm.exception.code, 1)
+            output_str = output.getvalue()
+            self.assertIn('Invalid JSON', output_str)
+
+    def test_stocks_file_flag_non_array_fails(self):
+        """Test that --stocks-file with non-array JSON exits with error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            not_array = Path(temp_dir) / "not_array.json"
+            not_array.write_text('{"ticker": "AAPL"}')
+
+            output = io.StringIO()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', '--stocks-file', str(not_array)]),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
+
+            self.assertEqual(cm.exception.code, 1)
+            output_str = output.getvalue()
+            self.assertIn('should contain an array', output_str)
+
+    def test_stocks_file_flag_with_use_dates_from_json(self):
+        """Test that --stocks-file works with --use-dates-from-json."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', '--stocks-file', str(self.stock_list_file),
+                                   '--use-dates-from-json']):
+                run_trading_agents.main()
+
+                # Verify dates from JSON were used
+                calls = mock_instance.propagate.call_args_list
+                self.assertEqual(calls[0][0], ("AAPL", "2024-01-15"))
+                self.assertEqual(calls[1][0], ("MSFT", "2024-01-15"))
+
+    def test_positional_and_stocks_file_mutually_exclusive(self):
+        """Test that positional JSON + --stocks-file is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stocks_file = Path(temp_dir) / "stocks.json"
+            stocks_file.write_text(json.dumps([{"ticker": "AAPL"}]))
+
+            output = io.StringIO()
+            with (
+                patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file),
+                                  '--stocks-file', str(stocks_file)]),
+                redirect_stdout(output),
+                redirect_stderr(output),
+                self.assertRaises(SystemExit) as cm,
+            ):
+                run_trading_agents.main()
+
+            self.assertEqual(cm.exception.code, 1)
+            output_str = output.getvalue()
+            self.assertIn('Cannot combine multiple stocks sources', output_str)
+
+    def test_stocks_file_and_tickers_mutually_exclusive(self):
+        """Test that --stocks-file + --tickers is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--stocks-file', str(self.stock_list_file),
+                              '--tickers', 'AAPL']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Cannot combine multiple stocks sources', output_str)
+
+    def test_config_file_plus_tickers_rejected(self):
+        """Test that config file + --tickers is rejected via #124 mixing check."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file), '--tickers', 'AAPL']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('exclusive', output_str.lower())
+        self.assertIn('--tickers', output_str)
+
     def test_legacy_stock_list_still_works(self):
         """Test that legacy stock list arrays still work (backward compatibility)."""
         import run_trading_agents
@@ -1583,6 +1888,26 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
 
                 # Verify propagate was called twice (for both stocks)
                 self.assertEqual(mock_instance.propagate.call_count, 2)
+
+    def test_positional_and_tickers_mutually_exclusive(self):
+        """Test that positional JSON + --tickers is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file), '--tickers', 'AAPL']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Cannot combine multiple stocks sources', output_str)
 
 
 @pytest.mark.unit

@@ -23,6 +23,14 @@ Breaking changes within the 0.x line are called out explicitly.
 - **No-arguments help.** Running `run_trading_agents.py` with no arguments prints
   the full help message to stdout and exits cleanly (code 0), instead of a one-line
   usage error. (#124)
+- **Command-line-only ticker input:** `run_trading_agents.py` now supports two new
+  flags for specifying tickers without a JSON file: `--stocks-file FILE` (path to
+  stock-list JSON, resolved relative to cwd) and `--tickers AAPL,MSFT` (comma-separated
+  inline tickers, each running against today's date). Both are mutually exclusive with
+  the positional JSON file and with each other. `--tickers` cannot be combined with
+  `--use-dates-from-json`; use `--stocks-file` instead for per-ticker dates. These
+  flags integrate with the config-file-vs-CLI exclusivity from #124 (config file
+  rejects both flags). (#125)
 - **Named memory IDs.** `--memory-id MEMORY_ID` (`run_trading_agents.py`) and
   `TRADINGAGENTS_MEMORY_ID` isolate the SQLite decision-memory store per run —
   each ID gets its own DB at `runs/memory/<id>/memory.db` instead of the

@@ -11,6 +11,11 @@ Usage (stock list — legacy behavior, unchanged):
     python run_trading_agents.py stocks.json --portfolio --style aggressive --depot-id my-depot
     python run_trading_agents.py stocks.json --llm-provider mistral --deep-think-llm mistral-large --quick-think-llm mistral-small
 
+Usage (stocks from command-line — new in issue #125, mutually exclusive with positional/config):
+    python run_trading_agents.py --stocks-file stocks.json [--use-dates-from-json] [--report-dir REPORT_DIR]
+    python run_trading_agents.py --tickers AAPL,MSFT [--report-dir REPORT_DIR] [--show-summary]
+    python run_trading_agents.py --tickers "AAPL, MSFT" --portfolio --style aggressive --depot-id my-depot
+
 Usage (run config file — new in issue #116, exclusive — no CLI flags):
     python run_trading_agents.py config.json
 
@@ -113,6 +118,15 @@ The set of recognized config-file keys and the CLI/config-file merge live in
 one place in the source (_CONFIG_FILE_FLAG_KEYS in run_trading_agents.py) so
 they cannot drift out of sync with each other.
 
+Stocks source selection (exactly one required):
+    --stocks-file FILE       Path to JSON file with stock list (same format as positional, resolved
+                             relative to cwd). Compatible with --use-dates-from-json. Mutually exclusive
+                             with positional and --tickers.
+    --tickers AAPL,MSFT      Comma-separated inline tickers (e.g., "AAPL, MSFT"). Each runs against
+                             today's date (computed once). Whitespace per entry is stripped. Mutually
+                             exclusive with positional and --stocks-file. Cannot be combined with
+                             --use-dates-from-json.
+
 Optional arguments (CLI-only):
     --llm-provider PROVIDER  LLM provider to use (default: ollama). Supported providers:
                             openai, anthropic, google, mistral, ollama, etc.
@@ -121,6 +135,7 @@ Optional arguments (CLI-only):
     --report-dir REPORT_DIR  Directory to save analysis reports (default: ./reports)
     --show-summary           Display formatted analysis summary for each stock
     --use-dates-from-json    Use date field from JSON file for each ticker (default: off, use today's date).
+                             Works with --stocks-file (each entry must have a date); cannot be used with --tickers.
     --portfolio               Opt-in portfolio mode (see below). Requires --style and --depot-id.
     --style {aggressive,conservative}  Portfolio style-table to use.
     --depot-id DEPOT_ID       Named simulated depot to get-or-create and rebalance.
@@ -420,6 +435,12 @@ def main():
     parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file or run config file')
     parser.add_argument('json_file', nargs='?', default=None,
                         help='Path to JSON file (stock list array or run config object)')
+    parser.add_argument('--stocks-file', dest='stocks_file', default=None,
+                        help='Path to JSON file with stock list (resolved relative to cwd, not config dir). '
+                             'Mutually exclusive with positional and --tickers.')
+    parser.add_argument('--tickers', dest='tickers', default=None,
+                        help='Comma-separated inline tickers (e.g., "AAPL, MSFT"). Each runs against today\'s date. '
+                             'Mutually exclusive with positional and --stocks-file.')
     parser.add_argument('--llm-provider', dest='llm_provider', default=None,
                         help='LLM provider to use (default: ollama). Examples: openai, anthropic, mistral, google, etc.')
     parser.add_argument('--deep-think-llm', dest='deep_think_llm', default=None,
@@ -431,7 +452,8 @@ def main():
     parser.add_argument('--show-summary', dest='show_summary', action='store_true', default=None,
                         help='Display formatted analysis summary')
     parser.add_argument('--use-dates-from-json', dest='use_dates_from_json', action='store_true', default=None,
-                         help='Use date field from JSON file for each ticker (default: off, use today\'s date).')
+                         help='Use date field from JSON file for each ticker (default: off, use today\'s date). '
+                              'Works with --stocks-file; cannot be used with --tickers.')
     parser.add_argument('--portfolio', dest='portfolio', action='store_true', default=None,
                          help='Opt-in portfolio mode: after running the full pipeline for every '
                               'ticker, compute a style-table allocation and execute rebalancing '
@@ -446,51 +468,120 @@ def main():
                              '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
 
-    # No arguments case: print help to stdout and exit 0
-    if args.json_file is None:
+    # No arguments case: print help to stdout and exit 0 (issue #124)
+    if not args.json_file and not args.stocks_file and not args.tickers:
         parser.print_help()
         sys.exit(0)
 
-    # Load and parse json_file exactly once. The parsed value's top-level
-    # JSON type disambiguates a stock list (array) from a run config file
-    # (object) — see _validate_config_file, which validates this same
-    # already-parsed dict rather than re-opening/re-parsing the file.
+    # Load and parse json_file (positional) exactly once if present. The parsed value's top-level
+    # JSON type disambiguates a stock list (array) from a run config file (object) — see
+    # _validate_config_file, which validates this same already-parsed dict rather than
+    # re-opening/re-parsing the file.
     config_data = None
     config_path = None
-    try:
-        with open(args.json_file) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: File '{args.json_file}' not found")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Invalid JSON format in '{args.json_file}'")
-        sys.exit(1)
+    stocks = None
+    is_config_file = False
 
-    # Disambiguate: array → stock list, object → config file
-    if isinstance(data, dict):
-        # It's a config file
-        # Check for config file + CLI flags mixing (new in issue #124)
-        explicitly_given_flags = [
-            flag_name for flag_name in _CONFIG_FILE_FLAG_KEYS
-            if getattr(args, flag_name) is not None
-        ]
-        if explicitly_given_flags:
-            # Format the flag names back to CLI spelling (e.g., "llm_provider" → "--llm-provider")
-            cli_flag_names = ', '.join(f'--{name.replace("_", "-")}' for name in explicitly_given_flags)
-            print(f"Error: Config file mode is exclusive — cannot combine '{args.json_file}' with CLI flags: {cli_flag_names}")
-            print("       Either move those settings into the config file, or drop the config file and pass everything on the command line.")
+    if args.json_file:
+        try:
+            with open(args.json_file) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: File '{args.json_file}' not found")
+            sys.exit(1)
+        except json.JSONDecodeError:
+            print(f"Error: Invalid JSON format in '{args.json_file}'")
             sys.exit(1)
 
-        _validate_config_file(data, args.json_file)
-        config_data = data
-        config_path = args.json_file
-    elif isinstance(data, list):
-        # It's a stock list (legacy)
+        # Disambiguate: array → stock list, object → config file
+        if isinstance(data, dict):
+            # It's a config file
+            is_config_file = True
+            # Check for config file + CLI flags mixing (new in issue #124)
+            # Note: also check for --stocks-file and --tickers as stocks sources (new in issue #125)
+            explicitly_given_flags = [
+                flag_name for flag_name in _CONFIG_FILE_FLAG_KEYS
+                if getattr(args, flag_name) is not None
+            ]
+            # --stocks-file and --tickers are stocks sources, not config-file flags
+            if args.stocks_file is not None:
+                explicitly_given_flags.append('stocks_file')
+            if args.tickers is not None:
+                explicitly_given_flags.append('tickers')
+
+            if explicitly_given_flags:
+                # Format the flag names back to CLI spelling (e.g., "llm_provider" → "--llm-provider")
+                cli_flag_names = ', '.join(
+                    f'--{name.replace("_", "-")}' for name in explicitly_given_flags
+                )
+                print(f"Error: Config file mode is exclusive — cannot combine '{args.json_file}' with CLI flags: {cli_flag_names}")
+                print("       Either move those settings into the config file, or drop the config file and pass everything on the command line.")
+                sys.exit(1)
+
+            _validate_config_file(data, args.json_file)
+            config_data = data
+            config_path = args.json_file
+        elif isinstance(data, list):
+            # It's a stock list (legacy)
+            stocks = data
+        else:
+            print("Error: JSON should contain either an array (stock list) or an object (run config)")
+            sys.exit(1)
+
+    # Check for stocks source mutual exclusivity (only if positional wasn't a config file)
+    if not is_config_file:
+        stocks_sources = [
+            ("positional JSON file", args.json_file is not None),
+            ("--stocks-file", args.stocks_file is not None),
+            ("--tickers", args.tickers is not None),
+        ]
+        active_sources = [name for name, is_active in stocks_sources if is_active]
+
+        # Check for mutual exclusivity: at most one stocks source
+        if len(active_sources) > 1:
+            sources_str = ' and '.join(active_sources)
+            print(f"Error: Cannot combine multiple stocks sources: {sources_str}")
+            print("       Use exactly one of: positional JSON file, --stocks-file, or --tickers")
+            sys.exit(1)
+
+        # Check that we have at least one stocks source (since we're not in config file mode)
+        if not active_sources:
+            print("Error: No stocks source provided. Use one of: positional JSON file, --stocks-file, or --tickers")
+            sys.exit(1)
+
+    if not is_config_file and args.stocks_file:
+        # Load from --stocks-file (resolved relative to cwd, not config dir)
+        try:
+            with open(args.stocks_file) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: File '{args.stocks_file}' not found")
+            sys.exit(1)
+        except json.JSONDecodeError:
+            print(f"Error: Invalid JSON format in '{args.stocks_file}'")
+            sys.exit(1)
+
+        if not isinstance(data, list):
+            print(f"Error: stocks_file '{args.stocks_file}' should contain an array of stock objects")
+            sys.exit(1)
         stocks = data
-    else:
-        print("Error: JSON should contain either an array (stock list) or an object (run config)")
-        sys.exit(1)
+    elif not is_config_file and args.tickers:
+        # Parse comma-separated tickers and convert to stock list
+        ticker_strings = args.tickers.split(',')
+        tickers_list = []
+        for ticker_str in ticker_strings:
+            ticker = ticker_str.strip()
+            if not ticker:  # Empty after stripping
+                print("Error: --tickers contains an empty entry (e.g., 'AAPL,,MSFT' or trailing comma)")
+                sys.exit(1)
+            tickers_list.append(ticker)
+
+        if not tickers_list:
+            print("Error: --tickers must contain at least one ticker")
+            sys.exit(1)
+
+        # Convert tickers to stock list format (no dates, will use today's date)
+        stocks = [{"ticker": ticker} for ticker in tickers_list]
 
     # If config file was loaded, extract stocks_file and merge config into args
     if config_data:
@@ -626,6 +717,13 @@ def main():
     api_key_env = get_api_key_env(effective_provider)
     if api_key_env is not None and api_key_env not in os.environ:
         print(f"Error: LLM provider '{effective_provider}' requires environment variable '{api_key_env}' to be set")
+        sys.exit(1)
+
+    # Validate --tickers + --use-dates-from-json (mutually incompatible)
+    if args.tickers and args.use_dates_from_json:
+        print("Error: --tickers cannot be combined with --use-dates-from-json")
+        print("       --tickers always runs each ticker against today's date.")
+        print("       If you need per-ticker dates, use --stocks-file instead.")
         sys.exit(1)
 
     # Determine the date to use for all tickers
