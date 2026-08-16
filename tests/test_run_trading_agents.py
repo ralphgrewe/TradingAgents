@@ -4,6 +4,7 @@ These are integration-level tests that verify the error handling by running
 the script with mocked dependencies and checking the exit behavior.
 """
 
+import importlib
 import json
 import os
 import tempfile
@@ -12,6 +13,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+import tradingagents.default_config as default_config_module
 
 
 class _TempStockFileTestCase(unittest.TestCase):
@@ -690,6 +693,263 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 config = call_args[1]['config']
                 self.assertEqual(config["memory_id"], "test-memory-1")
 
+    def test_config_file_llm_provider_absent_falls_back_to_ollama_default(self):
+        """Precedence 'neither' case for the string key llm_provider.
+
+        Neither the CLI flag nor the config file sets llm_provider, and no
+        TRADINGAGENTS_LLM_PROVIDER env var is set in the test environment, so
+        the resolved config must fall back to DEFAULT_CONFIG's built-in
+        "ollama" default.
+        """
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            # llm_provider intentionally omitted
+        }))
+
+        with (
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop('TRADINGAGENTS_LLM_PROVIDER', None)
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "ollama")
+
+    def test_config_file_boolean_precedence_cli_flag_wins(self):
+        """store_true key precedence: CLI flag wins over an explicit config value."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "show_summary": False,
+        }))
+
+        with (
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch('run_trading_agents.display_summary') as mock_display,
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file), '--show-summary']):
+                run_trading_agents.main()
+
+                # The CLI flag (True) must win over the config file's explicit False.
+                self.assertTrue(mock_display.called)
+
+    def test_config_file_boolean_precedence_config_wins_when_flag_absent(self):
+        """store_true key precedence: config file value wins when the flag is absent."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "show_summary": True,
+        }))
+
+        with (
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch('run_trading_agents.display_summary') as mock_display,
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                self.assertTrue(mock_display.called)
+
+    def test_config_file_boolean_precedence_default_when_neither(self):
+        """store_true key precedence: falls back to False when neither flag nor config set it.
+
+        This is the subtle case flagged by design review: with
+        action='store_true', default=None, "flag absent" must be
+        distinguishable from "flag given" so the config-file value isn't
+        clobbered by a stray truthy default.
+        """
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            # show_summary intentionally omitted
+        }))
+
+        with (
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch('run_trading_agents.display_summary') as mock_display,
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                self.assertFalse(mock_display.called)
+
+    def test_config_file_stocks_file_not_array_object(self):
+        """A stocks_file that parses but is a JSON object (not an array) is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        bad_stocks_file = Path(self.temp_dir.name) / "bad_stocks.json"
+        bad_stocks_file.write_text(json.dumps({"ticker": "AAPL"}))
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({"stocks_file": str(bad_stocks_file)}))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn('array', output.getvalue().lower())
+
+    def test_config_file_stocks_file_not_array_scalar(self):
+        """A stocks_file that parses but is a scalar (not an array) is rejected."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        bad_stocks_file = Path(self.temp_dir.name) / "bad_stocks.json"
+        bad_stocks_file.write_text(json.dumps("not a list"))
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({"stocks_file": str(bad_stocks_file)}))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn('array', output.getvalue().lower())
+
+    def test_config_file_stocks_file_malformed_json(self):
+        """A stocks_file containing malformed JSON is rejected with a clear error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        bad_stocks_file = Path(self.temp_dir.name) / "bad_stocks.json"
+        bad_stocks_file.write_text("{not valid json")
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({"stocks_file": str(bad_stocks_file)}))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Invalid JSON', output_str)
+        self.assertIn('stocks_file', output_str)
+
+    def test_config_file_invalid_style_value_rejected(self):
+        """An invalid style value coming from the config file is rejected.
+
+        argparse's `choices=` only validates --style on the command line, so
+        this path (config-file-supplied style) needs its own check.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "portfolio": True,
+            "style": "moderate",
+            "depot_id": "test-depot",
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('style', output_str.lower())
+        self.assertIn('moderate', output_str)
+
+    def test_config_file_config_key_rejected_as_unrecognized(self):
+        """A top-level 'config' key is rejected by name (issue #117 stays out of scope)."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {"research_stage": "debate"},
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Unrecognized', output_str)
+        self.assertIn('config', output_str)
+
     def test_legacy_stock_list_still_works(self):
         """Test that legacy stock list arrays still work (backward compatibility)."""
         import run_trading_agents
@@ -707,6 +967,130 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
 
                 # Verify propagate was called twice (for both stocks)
                 self.assertEqual(mock_instance.propagate.call_count, 2)
+
+
+@pytest.mark.unit
+class RunTradingAgentsEnvVarPrecedenceTests(_TempStockFileTestCase):
+    """Test the TRADINGAGENTS_* env var tier of the precedence chain.
+
+    Design review finding #4: llm_provider must fall back to
+    DEFAULT_CONFIG's env-override-aware value (TRADINGAGENTS_LLM_PROVIDER)
+    when neither the CLI flag nor the config file sets it, instead of a
+    hardcoded 'ollama' literal silently overwriting it. These tests reload
+    tradingagents.default_config with the env var set (mirroring the
+    established pattern in tests/test_env_overrides.py) and point
+    run_trading_agents.DEFAULT_CONFIG at the reloaded object, since
+    run_trading_agents imported the DEFAULT_CONFIG binding once at module
+    load time.
+    """
+
+    STOCKS = [{"ticker": "AAPL", "date": "2024-01-15"}]
+
+    def _reload_default_config_with_env(self, **env_overrides):
+        """Reload default_config with only the given env overrides set.
+
+        Returns the reloaded module's DEFAULT_CONFIG dict. Callers are
+        responsible for restoring process-global state in tearDown (done by
+        this class's tearDown below), mirroring test_env_overrides.py's
+        reload-then-restore convention.
+        """
+        for key in list(default_config_module._ENV_OVERRIDES):
+            self._env_backup.setdefault(key, os.environ.get(key))
+            os.environ.pop(key, None)
+        for key, val in env_overrides.items():
+            os.environ[key] = val
+        reloaded = importlib.reload(default_config_module)
+        return reloaded.DEFAULT_CONFIG
+
+    def setUp(self):
+        super().setUp()
+        self._env_backup = {}
+
+    def tearDown(self):
+        super().tearDown()
+        # Restore whatever env vars were present before this test touched
+        # them, then reload default_config once more so the process-global
+        # DEFAULT_CONFIG singleton doesn't leak into later tests in this
+        # session (same restoration step test_env_overrides.py takes after
+        # a reload).
+        for key, val in self._env_backup.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        importlib.reload(default_config_module)
+
+    def test_llm_provider_env_var_honored_when_absent_from_flag_and_config(self):
+        """TRADINGAGENTS_LLM_PROVIDER is honoured when neither flag nor config file sets it."""
+        import run_trading_agents
+
+        reloaded_default_config = self._reload_default_config_with_env(
+            TRADINGAGENTS_LLM_PROVIDER="mistral",
+        )
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            # llm_provider intentionally omitted; deep/quick think models are
+            # still supplied via the config file since the non-ollama model
+            # requirement is checked independently of the provider's source.
+            "deep_think_llm": "mistral-large",
+            "quick_think_llm": "mistral-small",
+        }))
+
+        with (
+            patch.object(run_trading_agents, 'DEFAULT_CONFIG', reloaded_default_config),
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}),
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "mistral")
+
+    def test_config_file_llm_provider_beats_env_var(self):
+        """A config-file llm_provider value still beats the TRADINGAGENTS_LLM_PROVIDER env var."""
+        import run_trading_agents
+
+        reloaded_default_config = self._reload_default_config_with_env(
+            TRADINGAGENTS_LLM_PROVIDER="openai",
+        )
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "mistral",
+            "deep_think_llm": "mistral-large",
+            "quick_think_llm": "mistral-small",
+        }))
+
+        with (
+            patch.object(run_trading_agents, 'DEFAULT_CONFIG', reloaded_default_config),
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+            patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}),
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "mistral")
 
 
 @pytest.mark.unit

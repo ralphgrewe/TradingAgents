@@ -58,6 +58,25 @@ Precedence (highest to lowest):
 3. TRADINGAGENTS_* environment variable
 4. DEFAULT_CONFIG
 
+The full four-tier chain only applies to the keys that are backed by a
+DEFAULT_CONFIG entry: llm_provider, deep_think_llm, quick_think_llm, and
+memory_id (see tradingagents/default_config.py's _ENV_OVERRIDES table for
+the env var each one honors). When neither the CLI flag nor the config file
+sets one of these, the script leaves it unset so DEFAULT_CONFIG.copy()'s own
+value — already resolved against its TRADINGAGENTS_* env var at import time
+— takes effect untouched, rather than a hardcoded literal silently
+overwriting it.
+
+The remaining recognized keys (report_dir, show_summary, use_dates_from_json,
+portfolio, style, depot_id) are script-only settings with no DEFAULT_CONFIG
+entry or TRADINGAGENTS_* env var of their own; for those, "default" in tier 4
+above is just this script's built-in literal (e.g. report_dir → "./reports"),
+so effectively only tiers 1, 2, and 4 apply.
+
+The set of recognized config-file keys and the CLI/config-file merge live in
+one place in the source (_CONFIG_FILE_FLAG_KEYS in run_trading_agents.py) so
+they cannot drift out of sync with each other.
+
 Optional arguments (CLI-only):
     --llm-provider PROVIDER  LLM provider to use (default: ollama). Supported providers:
                             openai, anthropic, google, mistral, ollama, etc.
@@ -121,6 +140,23 @@ from tradingagents.report_generator import save_report_to_disk
 from tradingagents.reporting import format_report_preview
 from tradingagents.simulation import SimulationClientError
 
+# Single source of truth: the config-file keys that mirror an existing CLI
+# flag, in snake_case argparse-dest form. Both the config-file validation
+# (recognized vs. unrecognized top-level keys) and the CLI/config-file merge
+# loop in main() derive from this one tuple, so a new flag added later can't
+# update one and forget the other (this is the same pattern used by
+# tradingagents/default_config.py's _ENV_OVERRIDES table). `stocks_file` is
+# handled separately because it is required and has no corresponding CLI
+# flag. Kept as its own tuple (rather than folded into argparse itself) so
+# issue #117's nested "config" block can extend recognition later without
+# touching this set.
+_CONFIG_FILE_FLAG_KEYS = (
+    "llm_provider", "deep_think_llm", "quick_think_llm", "report_dir",
+    "show_summary", "use_dates_from_json", "portfolio", "style",
+    "depot_id", "memory_id",
+)
+_CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", *_CONFIG_FILE_FLAG_KEYS})
+
 
 def display_summary(final_state, ticker):
     """Display a formatted summary of the analysis similar to CLI output."""
@@ -170,54 +206,33 @@ def display_summary(final_state, ticker):
     print(f"FINAL DECISION: {final_state.get('final_trade_decision', 'N/A')}")
     print(f"{'='*60}\n")
 
-def _load_config_file(config_path: str) -> dict:
-    """Load and parse a run config file.
+def _validate_config_file(config_data: dict, config_path: str) -> None:
+    """Validate an already-parsed run config file's shape.
+
+    The caller (main()) is responsible for opening and json.load()-ing the
+    file exactly once (it already has to, to disambiguate array-vs-object);
+    this function only validates the resulting dict, so the file is never
+    read or parsed a second time here.
 
     Args:
-        config_path: Path to the config JSON file (should be an object/dict)
-
-    Returns:
-        The parsed config dict
+        config_data: The parsed config dict (top-level JSON object).
+        config_path: Path to the config file, used only in error messages.
 
     Raises:
-        SystemExit on any validation error
+        SystemExit on any validation error.
     """
-    try:
-        with open(config_path) as f:
-            config_data = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: Config file '{config_path}' not found")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Invalid JSON format in config file '{config_path}'")
-        sys.exit(1)
-
-    # Validate it's an object (dict), not an array
-    if not isinstance(config_data, dict):
-        print("Error: JSON should contain an object (run config) or array (stock list)")
-        sys.exit(1)
-
     # Check for required stocks_file key
     if "stocks_file" not in config_data:
-        print("Error: Config file missing required key 'stocks_file'")
+        print(f"Error: Config file '{config_path}' missing required key 'stocks_file'")
         sys.exit(1)
 
-    # Recognized keys (argparse dest names + stocks_file)
-    recognized_keys = {
-        "stocks_file", "llm_provider", "deep_think_llm", "quick_think_llm",
-        "report_dir", "show_summary", "use_dates_from_json", "portfolio",
-        "style", "depot_id", "memory_id"
-    }
-
     # Check for unrecognized keys
-    unrecognized = set(config_data.keys()) - recognized_keys
+    unrecognized = set(config_data.keys()) - _CONFIG_FILE_RECOGNIZED_KEYS
     if unrecognized:
-        sorted_keys = sorted(recognized_keys)
+        sorted_keys = sorted(_CONFIG_FILE_RECOGNIZED_KEYS)
         print(f"Error: Unrecognized config key(s): {', '.join(sorted(unrecognized))}")
         print(f"Recognized keys: {', '.join(sorted_keys)}")
         sys.exit(1)
-
-    return config_data
 
 
 def _resolve_stocks_file_path(stocks_file: str, config_path: str | None) -> str:
@@ -271,7 +286,10 @@ def main():
                              '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
 
-    # Determine if json_file is a config file or stock list
+    # Load and parse json_file exactly once. The parsed value's top-level
+    # JSON type disambiguates a stock list (array) from a run config file
+    # (object) — see _validate_config_file, which validates this same
+    # already-parsed dict rather than re-opening/re-parsing the file.
     config_data = None
     config_path = None
     try:
@@ -287,7 +305,8 @@ def main():
     # Disambiguate: array → stock list, object → config file
     if isinstance(data, dict):
         # It's a config file
-        config_data = _load_config_file(args.json_file)
+        _validate_config_file(data, args.json_file)
+        config_data = data
         config_path = args.json_file
     elif isinstance(data, list):
         # It's a stock list (legacy)
@@ -318,8 +337,7 @@ def main():
 
         # Merge config file values into args, respecting precedence: CLI > config > defaults
         # For each key, use: CLI value (if provided) > config value > existing arg default (None)
-        for key in ["llm_provider", "deep_think_llm", "quick_think_llm", "report_dir",
-                    "show_summary", "use_dates_from_json", "portfolio", "style", "depot_id", "memory_id"]:
+        for key in _CONFIG_FILE_FLAG_KEYS:
             cli_value = getattr(args, key)
             config_value = config_data.get(key)
 
@@ -331,9 +349,13 @@ def main():
                 # Use config value
                 setattr(args, key, config_value)
 
-    # Apply defaults for any remaining None values
-    if args.llm_provider is None:
-        args.llm_provider = 'ollama'
+    # Apply defaults for any remaining None values. These are script-only
+    # settings with no DEFAULT_CONFIG/TRADINGAGENTS_* env-var backing, so a
+    # plain hardcoded fallback is correct for them (unlike llm_provider,
+    # deep_think_llm, quick_think_llm, and memory_id below, which are backed
+    # by DEFAULT_CONFIG entries and must stay None here so an unset value
+    # defers to DEFAULT_CONFIG's own — possibly env-resolved — default
+    # instead of a literal baked in at this point).
     if args.report_dir is None:
         args.report_dir = './reports'
     if args.show_summary is None:
@@ -342,10 +364,6 @@ def main():
         args.use_dates_from_json = False
     if args.portfolio is None:
         args.portfolio = False
-
-    # Validate provider and model requirements
-    if args.llm_provider.lower() != 'ollama' and (not args.deep_think_llm or not args.quick_think_llm):
-        parser.error(f"--llm-provider {args.llm_provider} requires both --deep-think-llm and --quick-think-llm")
 
     if args.portfolio and (not args.style or not args.depot_id):
         print("Error: --portfolio requires both --style and --depot-id")
@@ -365,10 +383,46 @@ def main():
             print(f"Error: Invalid --memory-id: {e}")
             sys.exit(1)
 
+    # Configure Trading Agents. Built here, BEFORE the provider-dependent
+    # validation below, so that validation and the API-key check can use the
+    # fully resolved effective provider (config["llm_provider"]) rather than
+    # the raw args.llm_provider — which is None whenever neither the
+    # --llm-provider flag nor the config file set it, deliberately, so that
+    # DEFAULT_CONFIG.copy()'s own env-override-aware value (honoring
+    # TRADINGAGENTS_LLM_PROVIDER) is used instead of being silently
+    # overwritten by a hardcoded 'ollama' literal here.
+    config = DEFAULT_CONFIG.copy()
+    if args.llm_provider:
+        config["llm_provider"] = args.llm_provider
+
+    # Set model names: only override the DEFAULT_CONFIG.copy() values when the
+    # corresponding CLI flag / config-file key was actually provided, so the
+    # ollama defaults stay sourced from DEFAULT_CONFIG (single source of
+    # truth) instead of being duplicated here.
+    if args.deep_think_llm:
+        config["deep_think_llm"] = args.deep_think_llm
+
+    if args.quick_think_llm:
+        config["quick_think_llm"] = args.quick_think_llm
+
+    # Set memory_id if provided (issue #114)
+    if args.memory_id:
+        config["memory_id"] = args.memory_id
+
+    effective_provider = config["llm_provider"]
+
+    # Validate provider and model requirements. deep_think_llm/quick_think_llm
+    # are checked at the args level (not config's DEFAULT_CONFIG-backed
+    # value): they are required to be explicitly set via CLI flag or config
+    # file whenever the effective provider isn't ollama, regardless of any
+    # TRADINGAGENTS_DEEP_THINK_LLM/TRADINGAGENTS_QUICK_THINK_LLM env default.
+    if effective_provider.lower() != 'ollama' and (not args.deep_think_llm or not args.quick_think_llm):
+        parser.error(f"--llm-provider {effective_provider} requires both --deep-think-llm and --quick-think-llm")
+
     # Check API key environment variable for the provider before processing tickers
-    api_key_env = get_api_key_env(args.llm_provider)
+    api_key_env = get_api_key_env(effective_provider)
     if api_key_env is not None and api_key_env not in os.environ:
-        print(f"Error: LLM provider '{args.llm_provider}' requires environment variable '{api_key_env}' to be set")
+        print(f"Error: LLM provider '{effective_provider}' requires environment variable '{api_key_env}' to be set")
         sys.exit(1)
 
     # Determine the date to use for all tickers
@@ -396,26 +450,6 @@ def main():
     # consolidated trading_summary.json and would break the memory MCP
     # client's JSON-RPC store_decision call.
     run_date = datetime.date.today().isoformat() if not args.use_dates_from_json else None
-
-    # Configure Trading Agents with the specified LLM provider
-    config = DEFAULT_CONFIG.copy()
-    config["llm_provider"] = args.llm_provider
-
-    # Set model names: only override the DEFAULT_CONFIG.copy() values when the
-    # corresponding CLI flag was actually provided, so the ollama defaults stay
-    # sourced from DEFAULT_CONFIG (single source of truth) instead of being
-    # duplicated here.
-    if args.deep_think_llm:
-        config["deep_think_llm"] = args.deep_think_llm
-
-    if args.quick_think_llm:
-        config["quick_think_llm"] = args.quick_think_llm
-
-    # Set memory_id if provided (issue #114)
-    if args.memory_id:
-        config["memory_id"] = args.memory_id
-
-    # Respect configured debate/risk rounds (do not override with hardcoded values)
 
     # Initialize Trading Agents with explicit analyst selection (same as CLI)
     # These are the same analysts that CLI uses by default

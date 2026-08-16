@@ -139,6 +139,12 @@ use the same defaults as CLI flags.
 - `memory_id`: isolate decision history (optional)
 
 **Precedence:** CLI flags override config file, which override environment variables, which override defaults.
+This full four-tier chain applies to `llm_provider`, `deep_think_llm`, `quick_think_llm`, and
+`memory_id` (each backed by a `DEFAULT_CONFIG`/`TRADINGAGENTS_*` entry — see
+`tradingagents/default_config.py`). The remaining keys (`report_dir`, `show_summary`,
+`use_dates_from_json`, `portfolio`, `style`, `depot_id`) are script-only settings with no env var
+of their own, so only the CLI-flag/config-file/built-in-default tiers apply to them.
+
 This allows tweaking a saved config ad hoc without editing the file:
 
 ```bash
