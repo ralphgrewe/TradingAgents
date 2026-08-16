@@ -1,0 +1,10 @@
+{
+    "stocks_file": "stability-stocks.json",
+    "report_dir": "reports/stability/no-social",
+    "portfolio": false,
+    "memory_id": "no-social-stability",
+    "config": {
+        "selected_analysts": ["market", "news", "fundamentals"],
+        "memory_log_path": "~/.tradingagents/memory/no-social-stability/trading_memory.md"
+    }
+}

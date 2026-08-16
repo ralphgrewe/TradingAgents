@@ -1,0 +1,9 @@
+{
+    "stocks_file": "stability-stocks.json",
+    "report_dir": "reports/stability/control",
+    "portfolio": false,
+    "memory_id": "control-stability",
+    "config": {
+        "memory_log_path": "~/.tradingagents/memory/control-stability/trading_memory.md"
+    }
+}

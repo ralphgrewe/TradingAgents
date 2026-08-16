@@ -1,0 +1,10 @@
+{
+    "stocks_file": "stability-stocks.json",
+    "report_dir": "reports/stability/no-risk",
+    "portfolio": false,
+    "memory_id": "no-risk-stability",
+    "config": {
+        "risk_stage": "none",
+        "memory_log_path": "~/.tradingagents/memory/no-risk-stability/trading_memory.md"
+    }
+}
