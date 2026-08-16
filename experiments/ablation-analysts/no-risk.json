@@ -1,0 +1,12 @@
+{
+    "stocks_file": "stocks.json",
+    "report_dir": "reports/no-risk",
+    "portfolio": true,
+    "style": "aggressive",
+    "depot_id": "no-risk-depot",
+    "memory_id": "no-risk",
+    "config": {
+        "risk_stage": "none",
+        "memory_log_path": "~/.tradingagents/memory/no-risk/trading_memory.md"
+    }
+}

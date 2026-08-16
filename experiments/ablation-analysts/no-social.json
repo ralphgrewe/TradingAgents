@@ -1,0 +1,12 @@
+{
+    "stocks_file": "stocks.json",
+    "report_dir": "reports/no-social",
+    "portfolio": true,
+    "style": "aggressive",
+    "depot_id": "no-social-depot",
+    "memory_id": "no-social",
+    "config": {
+        "selected_analysts": ["market", "news", "fundamentals"],
+        "memory_log_path": "~/.tradingagents/memory/no-social/trading_memory.md"
+    }
+}
