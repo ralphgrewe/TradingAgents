@@ -155,12 +155,12 @@ file — the run is configured either by a config file or on the command line, n
 them, the script exits with an error before doing any work.
 
 When using a config file, the precedence is: top-level config keys override the nested `"config"` block,
-which overrides environment variables, which override defaults. This five-tier chain applies to any
+which overrides environment variables, which override defaults. This four-tier chain applies to any
 `DEFAULT_CONFIG` key (those in `tradingagents/default_config.py` with a corresponding `TRADINGAGENTS_*`
 env var: `research_stage`, `max_debate_rounds`, `temperature`, `swing_trader_enabled`, etc., plus
 `llm_provider`, `deep_think_llm`, `quick_think_llm`, and `memory_id`). The remaining keys
 (`report_dir`, `show_summary`, `use_dates_from_json`, `portfolio`, `style`, `depot_id`) are script-only
-with no env var of their own, so only the top-level-config/built-in-default tiers apply to them
+with no env var of their own, so only the top-level-config and built-in-default tiers apply to them
 in config-file mode.
 
 If a key appears in both a top-level field and in the nested `"config"` block, the top-level value wins.

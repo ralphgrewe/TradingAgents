@@ -77,35 +77,37 @@ Recognized top-level config keys (exactly the argparse dest names in snake_case,
   _validate_config_block/_type_is_compatible for the implementation. Top-level keys (above) take
   precedence if set in both places.
 
-Precedence (highest to lowest) — **STOCK-LIST MODE ONLY**:
-1. CLI flag (if provided on command line; stock-list mode only)
-2. Top-level config file key (if the positional argument is a config object)
-3. Config file's nested "config" block (issue #117)
-4. TRADINGAGENTS_* environment variable
-5. DEFAULT_CONFIG
+Precedence — stock-list mode (highest to lowest):
+1. CLI flag (if provided on command line)
+2. TRADINGAGENTS_* environment variable
+3. DEFAULT_CONFIG
+
+Precedence — config-file mode (highest to lowest):
+1. Top-level config file key (e.g., "llm_provider")
+2. Config file's nested "config" block (issue #117)
+3. TRADINGAGENTS_* environment variable
+4. DEFAULT_CONFIG
 
 **Config-file mode is exclusive**: a run config file (JSON object) cannot be
 combined with CLI flags. If both are provided, the script exits with code 1
 before doing any work (before the API-key check and before constructing
 TradingAgentsGraph), printing an error that names every offending flag.
 
-The full five-tier chain applies to keys that are backed by a DEFAULT_CONFIG
-entry (those in _ENV_OVERRIDES: llm_provider, deep_think_llm,
+The four-tier chain in config-file mode applies to keys backed by a
+DEFAULT_CONFIG entry (those in _ENV_OVERRIDES: llm_provider, deep_think_llm,
 quick_think_llm, memory_id, research_stage, swing_trader_enabled, etc.).
-When neither the CLI flag nor a top-level config key sets one of these, the
-nested "config" block is consulted. If neither that nor any TRADINGAGENTS_*
-env var is set, the script leaves it unset so the DEFAULT_CONFIG copy's own
-value — already resolved against its TRADINGAGENTS_* env var at import time
-— takes effect untouched, rather than a hardcoded literal silently
-overwriting it. Top-level keys (tier 2) take precedence over the nested
-"config" block (tier 3) for any key that appears in both places.
+When neither the top-level config key, nested "config" block, nor any
+TRADINGAGENTS_* env var sets one of these, the script leaves it unset so the
+DEFAULT_CONFIG copy's own value — already resolved against its TRADINGAGENTS_*
+env var at import time — takes effect untouched, rather than a hardcoded
+literal silently overwriting it. Top-level config keys take precedence over the
+nested "config" block for any key that appears in both places.
 
 The remaining recognized keys (report_dir, show_summary, use_dates_from_json,
 portfolio, style, depot_id) are script-only settings with no DEFAULT_CONFIG
-entry or TRADINGAGENTS_* env var of their own; for those, "default" in tier 5
-above is just this script's built-in literal (e.g. report_dir → "./reports"),
-so effectively only tiers 2 (top-level config key) and 5 apply in config-file
-mode, and tiers 1, 2, and 5 in stock-list mode.
+entry or TRADINGAGENTS_* env var of their own. In config-file mode, only the
+top-level config key and built-in default tiers apply to these keys. In
+stock-list mode, only the CLI flag and built-in default tiers apply.
 
 The set of recognized config-file keys and the CLI/config-file merge live in
 one place in the source (_CONFIG_FILE_FLAG_KEYS in run_trading_agents.py) so
