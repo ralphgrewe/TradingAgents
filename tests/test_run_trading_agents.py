@@ -424,6 +424,292 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
 
 
 @pytest.mark.unit
+class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
+    """Test run config file functionality."""
+
+    STOCKS = [
+        {"ticker": "AAPL", "date": "2024-01-15"},
+        {"ticker": "MSFT", "date": "2024-01-15"},
+    ]
+
+    def test_config_file_basic_loading(self):
+        """Test that a basic config file is loaded and applied correctly."""
+        import run_trading_agents
+
+        # Create a config file
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "mistral",
+            "deep_think_llm": "mistral-large",
+            "quick_think_llm": "mistral-small",
+            "show_summary": True,
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
+             patch.dict(os.environ, {'MISTRAL_API_KEY': 'test-key'}):
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                # Verify config was applied
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "mistral")
+                self.assertEqual(config["deep_think_llm"], "mistral-large")
+                self.assertEqual(config["quick_think_llm"], "mistral-small")
+
+    def test_config_file_cli_precedence(self):
+        """Test that CLI flags override config file values."""
+        import run_trading_agents
+
+        # Create a config file
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "mistral",
+            "deep_think_llm": "mistral-large",
+            "quick_think_llm": "mistral-small",
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
+             patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}):
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # CLI flag should override config file
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                                   '--llm-provider', 'openai',
+                                   '--deep-think-llm', 'gpt-4-turbo',
+                                   '--quick-think-llm', 'gpt-4o']):
+                run_trading_agents.main()
+
+                # Verify CLI values win over config file
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["llm_provider"], "openai")
+                self.assertEqual(config["deep_think_llm"], "gpt-4-turbo")
+                self.assertEqual(config["quick_think_llm"], "gpt-4o")
+
+    def test_config_file_relative_stocks_file_path(self):
+        """Test that relative stocks_file paths resolve against config directory."""
+        import run_trading_agents
+
+        # Create config file in temp dir, stocks file relative to it
+        config_file = Path(self.temp_dir.name) / "config.json"
+        stocks_file_name = "my_stocks.json"
+        stocks_file = Path(self.temp_dir.name) / stocks_file_name
+        stocks_file.write_text(json.dumps(self.STOCKS))
+
+        config_file.write_text(json.dumps({
+            "stocks_file": stocks_file_name,  # Relative path
+            "llm_provider": "ollama",
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                # Verify propagate was called twice (for both stocks)
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+
+    def test_config_file_unrecognized_key_error(self):
+        """Test that unrecognized config keys cause an error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        # Create a config file with unrecognized key
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+            "invalid_key": "some_value",
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
+
+        # Verify error message names the unrecognized key
+        output_str = output.getvalue()
+        self.assertIn('Unrecognized', output_str)
+        self.assertIn('invalid_key', output_str)
+        self.assertIn('Recognized keys', output_str)
+
+    def test_config_file_missing_stocks_file_key(self):
+        """Test that missing stocks_file key causes an error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        # Create a config file without stocks_file
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "llm_provider": "ollama",
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
+
+        # Verify error message
+        output_str = output.getvalue()
+        self.assertIn('stocks_file', output_str)
+
+    def test_config_file_missing_stocks_file_error(self):
+        """Test that missing stocks_file itself causes an error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        # Create a config file pointing to non-existent stocks file
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": "/nonexistent/stocks.json",
+            "llm_provider": "ollama",
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        # Should exit with code 1
+        self.assertEqual(cm.exception.code, 1)
+
+        # Verify error message
+        output_str = output.getvalue()
+        self.assertIn('stocks_file', output_str)
+        self.assertIn('not found', output_str)
+
+    def test_config_file_with_portfolio_mode(self):
+        """Test config file with portfolio mode enabled."""
+        import run_trading_agents
+
+        # Create a config file with portfolio mode
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+            "portfolio": True,
+            "style": "aggressive",
+            "depot_id": "test-depot",
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph, \
+             patch('run_trading_agents.run_portfolio_mode') as mock_portfolio:
+
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+            mock_portfolio.return_value = (
+                {"summary": "Portfolio rebalancing summary"},
+                "portfolio_report.json"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                # Verify portfolio mode was called
+                self.assertTrue(mock_portfolio.called)
+                call_args = mock_portfolio.call_args
+                self.assertEqual(call_args[1]['style'], 'aggressive')
+                self.assertEqual(call_args[1]['depot_id'], 'test-depot')
+
+    def test_config_file_with_memory_id(self):
+        """Test config file with memory_id specified."""
+        import run_trading_agents
+
+        # Create a config file with memory_id
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+            "memory_id": "test-memory-1",
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                # Verify memory_id was applied to config
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["memory_id"], "test-memory-1")
+
+    def test_legacy_stock_list_still_works(self):
+        """Test that legacy stock list arrays still work (backward compatibility)."""
+        import run_trading_agents
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(self.stock_list_file)]):
+                run_trading_agents.main()
+
+                # Verify propagate was called twice (for both stocks)
+                self.assertEqual(mock_instance.propagate.call_count, 2)
+
+
+@pytest.mark.unit
 class RunTradingAgentsLLMProviderTests(_TempStockFileTestCase):
     """Test LLM provider configuration via CLI flags."""
 

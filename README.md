@@ -21,8 +21,9 @@ python -m venv venv
 
 ## Running a single trading agent
 
-`run_trading_agents.py` runs the full agent pipeline for one or more tickers from a JSON file and
-prints the resulting decision.
+`run_trading_agents.py` runs the full agent pipeline for one or more tickers. It accepts either:
+1. A **stock list file** (legacy): a JSON array of `{"ticker": ..., "date": ...}` objects
+2. A **run config file** (new): a JSON object with pipeline parameters and a `stocks_file` reference
 
 ### Research stages
 
@@ -95,6 +96,56 @@ manager and swing trader on demand (when enabled) to ground decisions in establi
   unbounded searches.
 
 Set any of these via `TRADINGAGENTS_*` env vars (e.g., `TRADINGAGENTS_KNOWLEDGE_BASE_ENABLED=false`).
+
+### Using a run config file
+
+Instead of typing long command lines, save your run parameters in a config file:
+
+```json
+{
+  "stocks_file": "stocks.json",
+  "llm_provider": "mistral",
+  "deep_think_llm": "mistral-large",
+  "quick_think_llm": "mistral-small",
+  "report_dir": "./reports/mistral-aggressive",
+  "show_summary": true,
+  "portfolio": true,
+  "style": "aggressive",
+  "depot_id": "mistral-depot",
+  "memory_id": "mistral-aggressive"
+}
+```
+
+Then run it with:
+
+```bash
+./venv/bin/python run_trading_agents.py config.json
+```
+
+The `stocks_file` path is resolved relative to the config file's directory if relative, or used
+as-is if absolute. All recognized config keys are optional except `stocks_file`; unspecified keys
+use the same defaults as CLI flags.
+
+**Config key reference:**
+- `stocks_file` (required): path to stock list JSON
+- `llm_provider` (default: "ollama"): LLM provider
+- `deep_think_llm`, `quick_think_llm`: model names (required when llm_provider is not ollama)
+- `report_dir` (default: "./reports"): output directory for reports
+- `show_summary` (default: false): display formatted summary
+- `use_dates_from_json` (default: false): use date field from stock list
+- `portfolio` (default: false): enable portfolio mode
+- `style`: "aggressive" or "conservative" (required with portfolio)
+- `depot_id`: named depot (required with portfolio)
+- `memory_id`: isolate decision history (optional)
+
+**Precedence:** CLI flags override config file, which override environment variables, which override defaults.
+This allows tweaking a saved config ad hoc without editing the file:
+
+```bash
+./venv/bin/python run_trading_agents.py config.json --show-summary  # Override config if needed
+```
+
+### Stock list format
 
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:
 

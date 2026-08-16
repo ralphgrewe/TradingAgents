@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Script to run Trading Agents for a list of stocks from JSON file.
+Script to run Trading Agents for a list of stocks from JSON file or a run config file.
 
-Usage:
+Usage (stock list — legacy behavior, unchanged):
     python run_trading_agents.py stocks.json [--report-dir REPORT_DIR] [--show-summary]
     python run_trading_agents.py stocks.json --use-dates-from-json  # to use dates from JSON
     python run_trading_agents.py stocks.json --portfolio --style aggressive --depot-id my-depot
     python run_trading_agents.py stocks.json --llm-provider mistral --deep-think-llm mistral-large --quick-think-llm mistral-small
 
-Expected JSON format (date field is optional by default):
+Usage (run config file — new in issue #116):
+    python run_trading_agents.py config.json
+
+Expected JSON format for stock lists (date field is optional by default):
     [
         {"ticker": "AAPL"},  # date defaults to today when script runs
         {"ticker": "MSFT"}   # date defaults to today when script runs
@@ -20,7 +23,42 @@ With --use-dates-from-json, date field is required:
         {"ticker": "MSFT", "date": "2024-01-15"}
     ]
 
-Optional arguments:
+Run config file format (top-level JSON object, new feature):
+    {
+        "stocks_file": "stocks.json",
+        "llm_provider": "mistral",
+        "deep_think_llm": "mistral-large",
+        "quick_think_llm": "mistral-small",
+        "report_dir": "./reports/mistral-aggressive",
+        "show_summary": true,
+        "use_dates_from_json": false,
+        "portfolio": true,
+        "style": "aggressive",
+        "depot_id": "mistral-depot",
+        "memory_id": "mistral-aggressive"
+    }
+
+Recognized config keys (exactly the argparse dest names in snake_case, plus stocks_file):
+- stocks_file (string, required): path to the stock list JSON, resolved relative to the
+  config file's directory (if relative) or used as-is (if absolute)
+- llm_provider (string, default "ollama")
+- deep_think_llm (string)
+- quick_think_llm (string)
+- report_dir (string, default "./reports")
+- show_summary (bool, default false)
+- use_dates_from_json (bool, default false)
+- portfolio (bool, default false)
+- style (string, "aggressive" | "conservative")
+- depot_id (string)
+- memory_id (string)
+
+Precedence (highest to lowest):
+1. CLI flag (if provided on command line)
+2. Config file (if the positional argument is a config object)
+3. TRADINGAGENTS_* environment variable
+4. DEFAULT_CONFIG
+
+Optional arguments (CLI-only):
     --llm-provider PROVIDER  LLM provider to use (default: ollama). Supported providers:
                             openai, anthropic, google, mistral, ollama, etc.
     --deep-think-llm MODEL  Model name for deep thinking tasks (required if --llm-provider is not ollama).
@@ -58,7 +96,7 @@ The script produces the same quality output as the CLI application:
 - Generates comprehensive reports with --report-dir
 - Displays formatted summaries with --show-summary
 
-Portfolio mode (--portfolio): without it, behavior is unchanged (per-ticker
+Portfolio mode (--portfolio or config file): without it, behavior is unchanged (per-ticker
 reports only). With it, the stock-list JSON is treated as the investment
 universe: the full pipeline still runs for every ticker, but afterwards the
 final 5-tier rating from each run is mapped to a style-table signal
@@ -132,31 +170,178 @@ def display_summary(final_state, ticker):
     print(f"FINAL DECISION: {final_state.get('final_trade_decision', 'N/A')}")
     print(f"{'='*60}\n")
 
+def _load_config_file(config_path: str) -> dict:
+    """Load and parse a run config file.
+
+    Args:
+        config_path: Path to the config JSON file (should be an object/dict)
+
+    Returns:
+        The parsed config dict
+
+    Raises:
+        SystemExit on any validation error
+    """
+    try:
+        with open(config_path) as f:
+            config_data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file '{config_path}' not found")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON format in config file '{config_path}'")
+        sys.exit(1)
+
+    # Validate it's an object (dict), not an array
+    if not isinstance(config_data, dict):
+        print("Error: JSON should contain an object (run config) or array (stock list)")
+        sys.exit(1)
+
+    # Check for required stocks_file key
+    if "stocks_file" not in config_data:
+        print("Error: Config file missing required key 'stocks_file'")
+        sys.exit(1)
+
+    # Recognized keys (argparse dest names + stocks_file)
+    recognized_keys = {
+        "stocks_file", "llm_provider", "deep_think_llm", "quick_think_llm",
+        "report_dir", "show_summary", "use_dates_from_json", "portfolio",
+        "style", "depot_id", "memory_id"
+    }
+
+    # Check for unrecognized keys
+    unrecognized = set(config_data.keys()) - recognized_keys
+    if unrecognized:
+        sorted_keys = sorted(recognized_keys)
+        print(f"Error: Unrecognized config key(s): {', '.join(sorted(unrecognized))}")
+        print(f"Recognized keys: {', '.join(sorted_keys)}")
+        sys.exit(1)
+
+    return config_data
+
+
+def _resolve_stocks_file_path(stocks_file: str, config_path: str | None) -> str:
+    """Resolve a stocks_file path, handling relative paths.
+
+    If stocks_file is relative and config_path is provided, resolve relative to
+    the config file's directory. Otherwise, use as-is.
+
+    Args:
+        stocks_file: The stocks_file path from config
+        config_path: The path to the config file (None if from CLI)
+
+    Returns:
+        The resolved stocks_file path
+    """
+    stocks_path = Path(stocks_file)
+    if not stocks_path.is_absolute() and config_path:
+        # Resolve relative to the config file's directory
+        config_dir = Path(config_path).parent
+        stocks_path = config_dir / stocks_file
+    return str(stocks_path)
+
+
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file')
-    parser.add_argument('json_file', help='Path to JSON file containing stock list')
-    parser.add_argument('--llm-provider', dest='llm_provider', default='ollama',
+    parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file or run config file')
+    parser.add_argument('json_file', help='Path to JSON file (stock list array or run config object)')
+    parser.add_argument('--llm-provider', dest='llm_provider', default=None,
                         help='LLM provider to use (default: ollama). Examples: openai, anthropic, mistral, google, etc.')
-    parser.add_argument('--deep-think-llm', dest='deep_think_llm',
+    parser.add_argument('--deep-think-llm', dest='deep_think_llm', default=None,
                         help='Model name for deep thinking tasks (required unless --llm-provider is ollama).')
-    parser.add_argument('--quick-think-llm', dest='quick_think_llm',
+    parser.add_argument('--quick-think-llm', dest='quick_think_llm', default=None,
                         help='Model name for quick thinking tasks (required unless --llm-provider is ollama).')
-    parser.add_argument('--report-dir', help='Directory to save analysis reports', default='./reports')
-    parser.add_argument('--show-summary', action='store_true', help='Display formatted analysis summary')
-    parser.add_argument('--use-dates-from-json', action='store_true',
+    parser.add_argument('--report-dir', dest='report_dir', default=None,
+                        help='Directory to save analysis reports (default: ./reports)')
+    parser.add_argument('--show-summary', dest='show_summary', action='store_true', default=None,
+                        help='Display formatted analysis summary')
+    parser.add_argument('--use-dates-from-json', dest='use_dates_from_json', action='store_true', default=None,
                          help='Use date field from JSON file for each ticker (default: off, use today\'s date).')
-    parser.add_argument('--portfolio', action='store_true',
+    parser.add_argument('--portfolio', dest='portfolio', action='store_true', default=None,
                          help='Opt-in portfolio mode: after running the full pipeline for every '
                               'ticker, compute a style-table allocation and execute rebalancing '
                               'trades in a simulated depot. The stock-list JSON is the universe.')
-    parser.add_argument('--style', choices=['aggressive', 'conservative'],
+    parser.add_argument('--style', dest='style', choices=['aggressive', 'conservative'], default=None,
                          help='Portfolio style (required with --portfolio).')
-    parser.add_argument('--depot-id', help='Named simulated depot to get-or-create and trade in '
-                                            '(required with --portfolio).')
-    parser.add_argument('--memory-id', help='Named memory ID to isolate SQLite decision history '
-                                             '(default: off, uses runs/memory/memory.db).')
+    parser.add_argument('--depot-id', dest='depot_id', default=None,
+                        help='Named simulated depot to get-or-create and trade in '
+                             '(required with --portfolio).')
+    parser.add_argument('--memory-id', dest='memory_id', default=None,
+                        help='Named memory ID to isolate SQLite decision history '
+                             '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
+
+    # Determine if json_file is a config file or stock list
+    config_data = None
+    config_path = None
+    try:
+        with open(args.json_file) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: File '{args.json_file}' not found")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON format in '{args.json_file}'")
+        sys.exit(1)
+
+    # Disambiguate: array → stock list, object → config file
+    if isinstance(data, dict):
+        # It's a config file
+        config_data = _load_config_file(args.json_file)
+        config_path = args.json_file
+    elif isinstance(data, list):
+        # It's a stock list (legacy)
+        stocks = data
+    else:
+        print("Error: JSON should contain either an array (stock list) or an object (run config)")
+        sys.exit(1)
+
+    # If config file was loaded, extract stocks_file and merge config into args
+    if config_data:
+        stocks_file = config_data.get("stocks_file")
+        stocks_file = _resolve_stocks_file_path(stocks_file, config_path)
+
+        # Load the stock list from the resolved path
+        try:
+            with open(stocks_file) as f:
+                stocks = json.load(f)
+        except FileNotFoundError:
+            print(f"Error: stocks_file '{stocks_file}' (from config) not found")
+            sys.exit(1)
+        except json.JSONDecodeError:
+            print(f"Error: Invalid JSON format in stocks_file '{stocks_file}' (from config)")
+            sys.exit(1)
+
+        if not isinstance(stocks, list):
+            print(f"Error: stocks_file '{stocks_file}' should contain an array of stock objects")
+            sys.exit(1)
+
+        # Merge config file values into args, respecting precedence: CLI > config > defaults
+        # For each key, use: CLI value (if provided) > config value > existing arg default (None)
+        for key in ["llm_provider", "deep_think_llm", "quick_think_llm", "report_dir",
+                    "show_summary", "use_dates_from_json", "portfolio", "style", "depot_id", "memory_id"]:
+            cli_value = getattr(args, key)
+            config_value = config_data.get(key)
+
+            # CLI flag wins if explicitly provided (not None)
+            if cli_value is not None:
+                # Keep the CLI value
+                pass
+            elif config_value is not None:
+                # Use config value
+                setattr(args, key, config_value)
+
+    # Apply defaults for any remaining None values
+    if args.llm_provider is None:
+        args.llm_provider = 'ollama'
+    if args.report_dir is None:
+        args.report_dir = './reports'
+    if args.show_summary is None:
+        args.show_summary = False
+    if args.use_dates_from_json is None:
+        args.use_dates_from_json = False
+    if args.portfolio is None:
+        args.portfolio = False
 
     # Validate provider and model requirements
     if args.llm_provider.lower() != 'ollama' and (not args.deep_think_llm or not args.quick_think_llm):
@@ -164,6 +349,11 @@ def main():
 
     if args.portfolio and (not args.style or not args.depot_id):
         print("Error: --portfolio requires both --style and --depot-id")
+        sys.exit(1)
+
+    # Validate style is one of the allowed values (from config file, it's not enforced by argparse)
+    if args.style and args.style not in ['aggressive', 'conservative']:
+        print(f"Error: --style must be 'aggressive' or 'conservative', got '{args.style}'")
         sys.exit(1)
 
     # Validate memory_id if provided (issue #114)
@@ -179,22 +369,6 @@ def main():
     api_key_env = get_api_key_env(args.llm_provider)
     if api_key_env is not None and api_key_env not in os.environ:
         print(f"Error: LLM provider '{args.llm_provider}' requires environment variable '{api_key_env}' to be set")
-        sys.exit(1)
-
-    # Read stock list from JSON file
-    try:
-        with open(args.json_file) as f:
-            stocks = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: File '{args.json_file}' not found")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Invalid JSON format in '{args.json_file}'")
-        sys.exit(1)
-
-    # Validate stock list format
-    if not isinstance(stocks, list):
-        print("Error: JSON should contain an array of stock objects")
         sys.exit(1)
 
     # Determine the date to use for all tickers
