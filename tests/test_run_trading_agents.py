@@ -1076,6 +1076,171 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
         self.assertIn('type', output_str.lower())
         self.assertIn('max_debate_rounds', output_str)
 
+    def test_config_file_nested_config_block_bool_rejected_for_int_default(self):
+        """A JSON bool is rejected for an int-default key, despite bool being an int subclass.
+
+        max_debate_rounds defaults to int 1. A naive isinstance(value, type(reference))
+        type check would wrongly accept True/False here since bool is a subclass of int
+        in Python; this must be rejected instead.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "max_debate_rounds": True,
+            },
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('type', output_str.lower())
+        self.assertIn('max_debate_rounds', output_str)
+
+    def test_config_file_nested_config_block_int_rejected_for_bool_default(self):
+        """A JSON int is rejected for a bool-default key, despite bool being an int subclass.
+
+        swing_trader_enabled defaults to bool False. isinstance(1, int) is True, so a naive
+        type check keyed off isinstance(reference, int) would wrongly accept 1/0 here; this
+        must be rejected instead.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "swing_trader_enabled": 1,
+            },
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('type', output_str.lower())
+        self.assertIn('swing_trader_enabled', output_str)
+
+    def test_config_file_nested_config_block_bool_accepted_for_bool_default(self):
+        """An actual JSON bool is accepted for a bool-default key (sanity check)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "swing_trader_enabled": True,
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertIs(config["swing_trader_enabled"], True)
+
+    def test_config_file_nested_config_block_int_accepted_for_float_default(self):
+        """A JSON int is accepted for a float-default key.
+
+        swing_trader_min_risk_reward defaults to float 1.5 (unlike temperature, whose own
+        DEFAULT_CONFIG default is None — see the none_default_key test below — this key has
+        a genuine float default, so it actually exercises the type-widening rule). This is
+        the one explicit type-widening the issue requires: JSON has no separate whole-number-
+        float literal, so an int must be accepted where DEFAULT_CONFIG's default is a float.
+        """
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "swing_trader_min_risk_reward": 2,
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["swing_trader_min_risk_reward"], 2)
+
+    def test_config_file_nested_config_block_none_default_key_accepts_any_type(self):
+        """A config-block key whose DEFAULT_CONFIG default is None skips the type check.
+
+        benchmark_ticker defaults to None, so there is no type to check the supplied value
+        against; the value is accepted and passed through untouched regardless of its JSON
+        type (matching the TRADINGAGENTS_* env var path's behavior for these same keys,
+        which has nothing to coerce against either). This is a deliberate design choice,
+        not an oversight — see _validate_config_block's docstring.
+        """
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                # benchmark_ticker is normally a string, but its DEFAULT_CONFIG
+                # default is None, so an int must still be accepted here.
+                "benchmark_ticker": 42,
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["benchmark_ticker"], 42)
+
     def test_config_file_top_level_key_beats_nested_config_block(self):
         """Top-level key (tier 2) beats config block key (tier 3) when both present."""
         import run_trading_agents

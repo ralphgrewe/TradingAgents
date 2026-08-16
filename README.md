@@ -181,7 +181,18 @@ flags or env vars, use the nested `"config"` object. Any `DEFAULT_CONFIG` key is
 
 All config keys are optional except `stocks_file`. Values in the `"config"` block must match the type
 of the corresponding `DEFAULT_CONFIG` default (bool for booleans, int/float for numbers, string for strings,
-object for nested dicts). Unrecognized keys in the `"config"` block will cause an error at run start.
+object for nested dicts). This is a type *check*, not a coercion (unlike the `TRADINGAGENTS_*` env var
+path, JSON values already carry real types). Unrecognized keys in the `"config"` block will cause an
+error at run start, as will a type mismatch — with three deliberate exceptions:
+- an `int` is accepted where the default is a `float` (e.g. `"swing_trader_min_risk_reward": 2` for
+  its `1.5` default);
+- `bool` is never treated as interchangeable with `int`/`float` in either direction, even though `bool`
+  is a subclass of `int` in Python — `"max_debate_rounds": true` (bool for an int default) and
+  `"swing_trader_enabled": 1` (int for a bool default) are both rejected;
+- keys whose own `DEFAULT_CONFIG` default is `None` (e.g. `temperature`, `memory_id`, `backend_url`,
+  `benchmark_ticker`, `simulation_server_command`/`_args`, `memory_mcp_url`, `memory_log_max_entries`,
+  and the provider "thinking" knobs) have no type to check against, so any JSON type is accepted and
+  passed through as-is.
 
 ### Stock list format
 

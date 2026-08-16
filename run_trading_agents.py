@@ -61,8 +61,15 @@ Recognized top-level config keys (exactly the argparse dest names in snake_case,
 - config (object, optional): a nested object containing DEFAULT_CONFIG keys and values (issue #117).
   Any key from DEFAULT_CONFIG (including nested keys like data_vendors.news_data) can be set here.
   Nested dict values deep-merge one level only (e.g., setting data_vendors.news_data keeps
-  other data_vendors entries intact). Type of values must match the DEFAULT_CONFIG default's type.
-  Top-level keys (above) take precedence if set in both places.
+  other data_vendors entries intact). Type of values must be checked (not coerced — JSON already
+  carries types) against the DEFAULT_CONFIG default's type, with three deliberate exceptions: an
+  int is accepted where the default is a float (e.g. swing_trader_min_risk_reward: 2 for its 1.5
+  default); bool is never interchangeable with int/float in either direction despite bool being an
+  int subclass in Python (max_debate_rounds: true and swing_trader_enabled: 1 are both rejected);
+  and keys whose own default is None (temperature, memory_id, backend_url, benchmark_ticker, ...)
+  skip the type check entirely since there is no type to check against. See
+  _validate_config_block/_type_is_compatible for the implementation. Top-level keys (above) take
+  precedence if set in both places.
 
 Precedence (highest to lowest):
 1. CLI flag (if provided on command line)
@@ -173,12 +180,77 @@ _CONFIG_FILE_FLAG_KEYS = (
 _CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", "config", *_CONFIG_FILE_FLAG_KEYS})
 
 
+def _nested_key_exists(d: dict, keys: list[str]) -> bool:
+    """Check whether a dot-notation key path exists in a nested dict.
+
+    Unlike ``_get_nested(...) is not None``, this checks *presence* via dict
+    membership at each level, so a nested key whose value is legitimately
+    ``None`` (e.g. a hypothetical ``"some_dict.some_none_key"``) is still
+    reported as existing rather than as missing.
+    """
+    current = d
+    for k in keys:
+        if not isinstance(current, dict) or k not in current:
+            return False
+        current = current[k]
+    return True
+
+
+def _type_is_compatible(value, reference) -> bool:
+    """Check if a JSON value's type is compatible with a DEFAULT_CONFIG default.
+
+    This is a type *check*, not a coercion — unlike the TRADINGAGENTS_* env
+    var path (which coerces from strings because env vars have no native
+    JSON types), a run config file's JSON values already carry real types,
+    so a mismatch is a user error to report, not a value to massage.
+
+    Exact type match is required, with exactly one explicit widening: an
+    ``int`` value is accepted where the reference default is a ``float``
+    (JSON has no separate literal for a whole-number float, e.g. ``1`` for a
+    ``0.7`` default).
+
+    ``bool`` is deliberately excluded from that widening, and from any
+    other int/float overlap, even though ``bool`` is a subclass of ``int``
+    in Python. A naive ``isinstance(value, type(reference))`` would get
+    this wrong in both directions:
+      - accepting ``True``/``False`` for an int default (e.g.
+        ``{"max_debate_rounds": true}`` must be REJECTED, not silently
+        treated as ``1``);
+      - accepting ``1``/``0`` for a bool default (e.g.
+        ``{"swing_trader_enabled": 1}`` must be REJECTED, not silently
+        treated as ``True``).
+    Checking ``type(value) is type(reference)`` whenever either side is a
+    bool keeps both directions rejected while still accepting an actual
+    bool value against a bool default.
+    """
+    if isinstance(value, bool) or isinstance(reference, bool):
+        return type(value) is type(reference)
+    if isinstance(reference, float) and isinstance(value, int):
+        return True
+    return type(value) is type(reference)
+
+
 def _validate_config_block(config_block: dict, config_path: str) -> None:
     """Validate a 'config' block inside a run config file.
 
     The config block contains DEFAULT_CONFIG keys and their values. This
     function validates that all keys are recognized DEFAULT_CONFIG keys and
     that all values have compatible types with the DEFAULT_CONFIG defaults.
+
+    Deliberate design choice for DEFAULT_CONFIG keys whose own default is
+    ``None`` (e.g. ``temperature``, ``memory_id``, ``backend_url``,
+    ``benchmark_ticker``, ``simulation_server_command``,
+    ``simulation_server_args``, ``memory_mcp_url``,
+    ``memory_log_max_entries``, and the provider "thinking" knobs): there is
+    no concrete type to check the supplied value against, so any JSON type
+    is accepted for those keys and passed through untouched — the same
+    "nothing to coerce against" situation the TRADINGAGENTS_* env var path
+    already has for these keys (see ``_coerce`` in
+    ``tradingagents/default_config.py``, which falls through to returning
+    the raw value unchanged when the reference isn't bool/int/float/list).
+    Downstream code that actually uses the value is responsible for
+    rejecting a nonsensical type at the point of use, same as it already is
+    for the env-var path.
 
     Args:
         config_block: The parsed "config" dict (must be a dict or None).
@@ -194,33 +266,15 @@ def _validate_config_block(config_block: dict, config_path: str) -> None:
         print(f"Error: 'config' block in '{config_path}' must be a JSON object (dict), not {type(config_block).__name__}")
         sys.exit(1)
 
-    # Helper to recursively check if a key exists in DEFAULT_CONFIG (supporting dot notation)
-    def _key_exists_in_default_config(key_path: str) -> bool:
-        """Check if a dot-notation key path exists in DEFAULT_CONFIG."""
-        from tradingagents.default_config import _get_nested
-        if "." in key_path:
-            keys = key_path.split(".")
-            return _get_nested(DEFAULT_CONFIG, keys) is not None
-        return key_path in DEFAULT_CONFIG
-
-    # Helper to check type compatibility
-    def _type_is_compatible(value, reference) -> bool:
-        """Check if a JSON value's type is compatible with the reference type."""
-        # None is always compatible
-        if value is None:
-            return True
-        # For int/float compatibility: accept int where float is expected
-        if isinstance(reference, float) and isinstance(value, int):
-            return True
-        # Otherwise, types must match exactly
-        return type(value) == type(reference)
-
-    # Validate each key and type
     from tradingagents.default_config import _get_nested
 
     for key, value in config_block.items():
-        # Check if key exists in DEFAULT_CONFIG
-        if not _key_exists_in_default_config(key):
+        # Check if key exists in DEFAULT_CONFIG (dot notation addresses a
+        # nested key path; a plain key is checked via dict membership so a
+        # legitimately-None-valued top-level key like "memory_id" or
+        # "temperature" still counts as recognized).
+        key_exists = _nested_key_exists(DEFAULT_CONFIG, key.split(".")) if "." in key else key in DEFAULT_CONFIG
+        if not key_exists:
             print(f"Error: Unrecognized config block key: '{key}'")
             sorted_keys = sorted(DEFAULT_CONFIG.keys())
             print(f"Recognized config keys: {', '.join(sorted_keys[:10])}... (and more)")
@@ -228,16 +282,16 @@ def _validate_config_block(config_block: dict, config_path: str) -> None:
 
         # Get the default value to check type compatibility
         if "." in key:
-            keys = key.split(".")
-            default_value = _get_nested(DEFAULT_CONFIG, keys)
+            default_value = _get_nested(DEFAULT_CONFIG, key.split("."))
         else:
             default_value = DEFAULT_CONFIG.get(key)
 
-        # Type check: JSON type must match DEFAULT_CONFIG type
+        # Type check: JSON type must match DEFAULT_CONFIG type. Skipped
+        # entirely when the default itself is None (see docstring) or when
+        # both sides are dicts (one-level deep merge, not deep-validated —
+        # matches set_config's own one-level-deep limitation).
         if default_value is not None:
             if isinstance(default_value, dict) and isinstance(value, dict):
-                # For dict values, we don't deeply validate nested keys —
-                # they'll be validated by set_config's one-level merge
                 pass
             elif not _type_is_compatible(value, default_value):
                 print(f"Error: Config block key '{key}' has type {type(value).__name__}, "
