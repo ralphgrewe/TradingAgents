@@ -218,6 +218,32 @@ def test_knowledge_base_vendor_default_preserved_when_env_unset(monkeypatch):
     config_module._config = None
 
 
+def test_selected_analysts_default(monkeypatch):
+    """selected_analysts defaults to all four analysts."""
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["selected_analysts"] == ["market", "social", "news", "fundamentals"]
+
+
+def test_selected_analysts_override_comma_separated(monkeypatch):
+    """TRADINGAGENTS_SELECTED_ANALYSTS parses comma-separated list."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_SELECTED_ANALYSTS="market,news")
+    assert dc.DEFAULT_CONFIG["selected_analysts"] == ["market", "news"]
+
+
+def test_selected_analysts_override_space_separated(monkeypatch):
+    """TRADINGAGENTS_SELECTED_ANALYSTS parses space-separated list."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_SELECTED_ANALYSTS="market news")
+    assert dc.DEFAULT_CONFIG["selected_analysts"] == ["market", "news"]
+
+
+def test_selected_analysts_override_mixed_separators(monkeypatch):
+    """TRADINGAGENTS_SELECTED_ANALYSTS handles mixed separators."""
+    dc = _reload_with_env(
+        monkeypatch, TRADINGAGENTS_SELECTED_ANALYSTS="market, news, fundamentals"
+    )
+    assert dc.DEFAULT_CONFIG["selected_analysts"] == ["market", "news", "fundamentals"]
+
+
 class TestGetSetNestedHelpers:
     """Direct unit coverage for _get_nested / _set_nested (#107 finding 1)."""
 

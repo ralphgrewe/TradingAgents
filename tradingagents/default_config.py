@@ -38,6 +38,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_KNOWLEDGE_INGEST_DIR":   "knowledge_ingest_dir",
     "TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS": "knowledge_base_tool_max_rounds",
     "TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE": "data_vendors.knowledge_base",
+    "TRADINGAGENTS_SELECTED_ANALYSTS": "selected_analysts",
 }
 
 
@@ -244,4 +245,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Precedence: --memory-id flag > TRADINGAGENTS_MEMORY_ID env var >
     # TRADINGAGENTS_MEMORY_DB_PATH env var > default.
     "memory_id": None,
+    # List of analyst types to include in the pipeline (issue #118).
+    # Options: "market", "social", "news", "fundamentals", "perplexity_news".
+    # Validated before run start: must be non-empty and all entries must be
+    # one of the known analyst types.
+    "selected_analysts": ["market", "social", "news", "fundamentals"],
 })

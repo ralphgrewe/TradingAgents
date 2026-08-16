@@ -625,10 +625,11 @@ def main():
     # client's JSON-RPC store_decision call.
     run_date = datetime.date.today().isoformat() if not args.use_dates_from_json else None
 
-    # Initialize Trading Agents with explicit analyst selection (same as CLI)
-    # These are the same analysts that CLI uses by default
-    selected_analysts = ["market", "social", "news", "fundamentals"]
-    ta = TradingAgentsGraph(selected_analysts, debug=True, config=config)
+    # Initialize Trading Agents. selected_analysts is resolved from config
+    # (which may have been set by TRADINGAGENTS_SELECTED_ANALYSTS env var or
+    # the run config file's "config" block). Passing None lets
+    # TradingAgentsGraph use the configured value.
+    ta = TradingAgentsGraph(selected_analysts=None, debug=True, config=config)
 
     # Initialize list to collect structured data for consolidated summary
     all_structured_data = []
