@@ -39,6 +39,7 @@ class GraphSetup:
         conditional_logic: ConditionalLogic,
         analyst_concurrency_limit: int = 1,
         research_stage: str = "none",
+        risk_stage: str = "debate",
         swing_trader_enabled: bool = False,
     ):
         """Initialize with required components."""
@@ -48,6 +49,7 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
         self.analyst_concurrency_limit = analyst_concurrency_limit
         self.research_stage = research_stage
+        self.risk_stage = risk_stage
         self.swing_trader_enabled = swing_trader_enabled
 
     def setup_graph(
@@ -92,10 +94,15 @@ class GraphSetup:
         researcher_node = create_researcher(self.quick_thinking_llm, self.deep_thinking_llm)
         trader_node = create_trader(self.quick_thinking_llm)
 
-        # Create risk analysis nodes
-        aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
+        # Create risk analysis nodes (only needed when risk_stage == "debate";
+        # "none" bypasses the Aggressive/Conservative/Neutral debate entirely, #119).
+        aggressive_analyst = None
+        neutral_analyst = None
+        conservative_analyst = None
+        if self.risk_stage == "debate":
+            aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
+            neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
+            conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
         portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
 
         # Create swing trader node (if enabled)
@@ -121,9 +128,10 @@ class GraphSetup:
         elif self.research_stage == "researcher":
             workflow.add_node("Researcher", researcher_node)
         workflow.add_node("Trader", trader_node)
-        workflow.add_node("Aggressive Analyst", aggressive_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
-        workflow.add_node("Conservative Analyst", conservative_analyst)
+        if self.risk_stage == "debate":
+            workflow.add_node("Aggressive Analyst", aggressive_analyst)
+            workflow.add_node("Neutral Analyst", neutral_analyst)
+            workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
         if self.swing_trader_enabled:
             workflow.add_node("Swing Trader", swing_trader_node)
@@ -195,31 +203,40 @@ class GraphSetup:
         elif self.research_stage == "researcher":
             workflow.add_edge("Researcher", "Trader")
 
-        workflow.add_edge("Trader", "Aggressive Analyst")
-        workflow.add_conditional_edges(
-            "Aggressive Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Conservative Analyst": "Conservative Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Conservative Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Neutral Analyst": "Neutral Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Neutral Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Aggressive Analyst": "Aggressive Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
+        # Risk stage: "debate" (default) runs the Aggressive/Conservative/Neutral
+        # round-robin before the Portfolio Manager; "none" bypasses it entirely and
+        # routes the Trader's plan straight to the Portfolio Manager (#119, mirrors
+        # the research_stage bypass pattern from #79). should_continue_risk_analysis
+        # (conditional_logic.py) is unused in "none" mode since no risk-debater node
+        # is ever wired into the graph.
+        if self.risk_stage == "debate":
+            workflow.add_edge("Trader", "Aggressive Analyst")
+            workflow.add_conditional_edges(
+                "Aggressive Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Conservative Analyst": "Conservative Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Conservative Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Neutral Analyst": "Neutral Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Neutral Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Aggressive Analyst": "Aggressive Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
+        else:
+            workflow.add_edge("Trader", "Portfolio Manager")
 
         # Portfolio Manager routes to Swing Trader (if enabled) or END
         if self.swing_trader_enabled:

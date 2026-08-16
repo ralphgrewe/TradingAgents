@@ -67,6 +67,16 @@ def create_portfolio_manager(llm):
         if research_trader_line:
             research_trader_line += "\n"
 
+        # Format risk-debate history section: omit entirely if empty (risk_stage="none",
+        # issue #119) rather than interpolating an empty string, mirroring how
+        # research_trader_line above omits the investment-plan section for
+        # research_stage="none" (#79).
+        risk_debate_history_section = (
+            f"**Risk Analysts Debate History:**\n{history}\n"
+            if is_present_text(history)
+            else ""
+        )
+
         # Determine if wiki tool should be available
         config = get_config()
         knowledge_base_enabled = config.get("knowledge_base_enabled", True)
@@ -96,9 +106,7 @@ regime-specific approaches (e.g., "Should I use mean reversion in this regime?" 
 
 **Context:**
 {research_trader_line}{lessons_line}{reports_line}
-**Risk Analysts Debate History:**
-{history}
-
+{risk_debate_history_section}
 ---
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{wiki_availability_note}{get_language_instruction()}"""

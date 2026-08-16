@@ -42,6 +42,17 @@ analyst reports and live web search evidence. Two alternative modes are availabl
 - **`research_stage=none`**: Skipping the research stage entirely, sending
   analyst reports directly to the trader. Set via `TRADINGAGENTS_RESEARCH_STAGE=none`.
 
+### Risk stage
+
+By default, the system uses `risk_stage=debate`, where Aggressive, Conservative, and Neutral
+risk analysts debate (`max_risk_discuss_rounds` rounds) before the Portfolio Manager decides.
+One alternative mode is available:
+
+- **`risk_stage=debate`** (default): today's Aggressive → Conservative → Neutral risk-debate
+  stage runs before the Portfolio Manager.
+- **`risk_stage=none`**: Skips the risk-debate stage entirely, routing the Trader's plan
+  straight to the Portfolio Manager. Set via `TRADINGAGENTS_RISK_STAGE=none`.
+
 ### Swing Trader (optional)
 
 The swing trader is an optional stage that makes regime-gated short-term (3–15 trading day) swing

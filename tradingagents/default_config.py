@@ -25,6 +25,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MEMORY_MCP_TIMEOUT":   "memory_mcp_timeout",
     "TRADINGAGENTS_MEMORY_ID":            "memory_id",
     "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
+    "TRADINGAGENTS_RISK_STAGE":           "risk_stage",
     "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
@@ -147,6 +148,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # "none" bypasses research and sends analyst outputs directly to the trader;
     # "debate" keeps Bull/Bear/Research Manager debate
     "research_stage": "researcher",
+    # Risk stage mode (issue #119, mirrors research_stage/#79): "debate" (default) keeps
+    # the Aggressive/Conservative/Neutral risk-debate stage before the Portfolio Manager;
+    # "none" bypasses it entirely and routes the Trader's plan straight to the Portfolio
+    # Manager. Validated at TradingAgentsGraph construction time (must be "debate"/"none").
+    "risk_stage": "debate",
     # Research web search settings
     "research_web_search": True,           # Enable/disable web search for live runs
     "research_search_queries_max": 4,      # Maximum number of search queries

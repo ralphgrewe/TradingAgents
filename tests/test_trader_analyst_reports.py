@@ -543,6 +543,58 @@ class TestPortfolioManagerPromptAssembly:
             assert "investment plan: **Bullish outlook from research team**" in prompt
             assert "Trader's transaction proposal: **BUY 100 shares at $195**" in prompt
 
+    def test_pm_includes_risk_debate_history_when_present(self):
+        """Portfolio manager prompt should include the risk-debate history section
+        when risk_debate_state has a non-empty history (risk_stage='debate', #119)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state()
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            assert "**Risk Analysts Debate History:**" in prompt
+            assert "Aggressive analyst: High growth potential." in prompt
+
+    def test_pm_omits_risk_debate_history_when_empty(self):
+        """Portfolio manager prompt should omit the risk-debate history section
+        entirely -- not interpolate an empty string -- when risk_debate_state
+        has no history (risk_stage='none', issue #119, mirrors the
+        research_stage='none' investment-plan omission from #79)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        empty_risk_state = {
+            "history": "",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state(risk_debate_state=empty_risk_state)
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            assert "**Risk Analysts Debate History:**" not in prompt
+
     def test_pm_uses_crypto_fundamentals_label_for_crypto_asset_type(self):
         """PM prompt should use the crypto-aware fundamentals label when
         asset_type is crypto, matching bull_researcher.py's pattern (issue #77

@@ -71,6 +71,10 @@ class TradingAgentsGraph:
         self._validate_selected_analysts(selected_analysts)
         self.selected_analysts = selected_analysts
 
+        # Validate risk_stage before proceeding (issue #119, mirrors the
+        # selected_analysts validation above).
+        self._validate_risk_stage(self.config.get("risk_stage", "debate"))
+
         self.callbacks = callbacks or []
 
         # Update the interface's config
@@ -120,6 +124,7 @@ class TradingAgentsGraph:
             self.conditional_logic,
             analyst_concurrency_limit=self.config.get("analyst_concurrency_limit", 1),
             research_stage=self.config.get("research_stage", "none"),
+            risk_stage=self.config.get("risk_stage", "debate"),
             swing_trader_enabled=self.config.get("swing_trader_enabled", False),
         )
 
@@ -173,6 +178,27 @@ class TradingAgentsGraph:
                 raise ValueError("selected_analysts must be a non-empty list") from exc
             valid_analysts = ", ".join(sorted(ANALYST_NODE_SPECS.keys()))
             raise ValueError(f"{exc}. Valid options are: {valid_analysts}") from exc
+
+    def _validate_risk_stage(self, risk_stage) -> None:
+        """Validate the risk_stage config value before graph setup.
+
+        Mirrors the research_stage bypass added in #79 (issue #119): the only
+        supported values are "debate" (today's Aggressive/Conservative/Neutral
+        risk-debate stage, default) and "none" (bypass it entirely, routing the
+        Trader's plan straight to the Portfolio Manager). Unlike research_stage
+        (which silently treats any unrecognized value as "none" in
+        GraphSetup.setup_graph), risk_stage is validated explicitly so a typo'd
+        config value fails fast with a clear error instead of silently
+        disabling the risk-debate stage.
+
+        Raises ValueError if risk_stage is not "debate" or "none".
+        """
+        valid_values = {"debate", "none"}
+        if risk_stage not in valid_values:
+            raise ValueError(
+                f"Invalid risk_stage {risk_stage!r}. Valid options are: "
+                f"{', '.join(sorted(valid_values))}"
+            )
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -669,13 +695,23 @@ class TradingAgentsGraph:
         if final_state.get("researcher_evidence"):
             log_dict["researcher_evidence"] = final_state["researcher_evidence"]
 
-        log_dict["risk_debate_state"] = {
-            "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
-            "conservative_history": final_state["risk_debate_state"]["conservative_history"],
-            "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-            "history": final_state["risk_debate_state"]["history"],
-            "judge_decision": final_state["risk_debate_state"]["judge_decision"],
-        }
+        # Include risk_debate_state's history breakdown only in "debate" mode.
+        # Gated on risk_stage, not dict truthiness, for the same reason as
+        # investment_debate_state above: the state dict is always seeded
+        # (non-empty) regardless of mode, so histories stay empty strings by
+        # design in "none" mode (#119, mirrors #79) rather than being a
+        # failure. The Portfolio Manager's decision itself is never lost --
+        # it's already captured unconditionally in final_trade_decision above
+        # (risk_debate_state["judge_decision"] is set to the same value
+        # regardless of risk_stage).
+        if self.config.get("risk_stage", "debate") == "debate":
+            log_dict["risk_debate_state"] = {
+                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
+                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
+                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
+                "history": final_state["risk_debate_state"]["history"],
+                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
+            }
 
         # Include swing trader decision when enabled (#93).
         if self.config.get("swing_trader_enabled"):
