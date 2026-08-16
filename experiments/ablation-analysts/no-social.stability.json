@@ -5,6 +5,7 @@
     "memory_id": "no-social-stability",
     "config": {
         "selected_analysts": ["market", "news", "fundamentals"],
-        "memory_log_path": "~/.tradingagents/memory/no-social-stability/trading_memory.md"
+        "memory_log_path": "~/.tradingagents/memory/no-social-stability/trading_memory.md",
+        "results_dir": "runs/results/no-social-stability"
     }
 }

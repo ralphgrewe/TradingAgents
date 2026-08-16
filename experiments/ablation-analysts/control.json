@@ -6,6 +6,7 @@
     "depot_id": "control-depot",
     "memory_id": "control",
     "config": {
-        "memory_log_path": "~/.tradingagents/memory/control/trading_memory.md"
+        "memory_log_path": "~/.tradingagents/memory/control/trading_memory.md",
+        "results_dir": "runs/results/control"
     }
 }

@@ -68,6 +68,12 @@ class TestArmConfigsLoadAndValidate:
             assert "config" in config, f"{arm_name}: missing 'config' block"
             assert "memory_log_path" in config["config"], \
                 f"{arm_name}: config block missing 'memory_log_path'"
+            # results_dir isolation (issue #121): full-state logs (KPI 4 input) are
+            # written under config.results_dir, a separate DEFAULT_CONFIG key from
+            # report_dir — every arm must set its own or full-state logs from
+            # different arms collide in the shared default results_dir.
+            assert "results_dir" in config["config"], \
+                f"{arm_name}: config block missing 'results_dir'"
 
     def test_all_arm_configs_validate_without_errors(self):
         """All arm configs should validate through run_trading_agents's validators."""
@@ -147,6 +153,25 @@ class TestArmIsolationValues:
             # Memory log path should include the memory_id
             assert memory_id in memory_log_path, \
                 f"{arm_name}: memory_log_path should include memory_id '{memory_id}'"
+
+            # results_dir should be isolated per arm (issue #121 — see
+            # test_all_arm_configs_have_required_fields for why this matters).
+            results_dir = config.get("config", {}).get("results_dir")
+            expected_results_dir = f"runs/results/{arm_name}"
+            assert results_dir == expected_results_dir, \
+                f"{arm_name}: results_dir should be '{expected_results_dir}', got '{results_dir}'"
+
+    def test_results_dirs_are_unique_across_all_arms(self):
+        """Every arm's results_dir must be unique so full-state logs never collide."""
+        results_dirs = set()
+        for arm_name, _, _ in ARM_DEFINITIONS:
+            config_file = ARMS_DIR / f"{arm_name}.json"
+            with open(config_file) as f:
+                config = json.load(f)
+            results_dirs.add(config.get("config", {}).get("results_dir"))
+
+        assert len(results_dirs) == len(ARM_DEFINITIONS), \
+            f"Expected {len(ARM_DEFINITIONS)} unique results_dirs, got {len(results_dirs)}"
 
 
 class TestArmAblationSettings:

@@ -7,6 +7,7 @@
     "memory_id": "no-news",
     "config": {
         "selected_analysts": ["market", "social", "fundamentals"],
-        "memory_log_path": "~/.tradingagents/memory/no-news/trading_memory.md"
+        "memory_log_path": "~/.tradingagents/memory/no-news/trading_memory.md",
+        "results_dir": "runs/results/no-news"
     }
 }

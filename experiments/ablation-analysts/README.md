@@ -31,6 +31,12 @@ Each arm config file specifies:
 - **`memory_id`** — Isolated SQLite decision history (runs/memory/<id>/memory.db)
 - **`report_dir`** — Isolated report output per arm
 - **`config.memory_log_path`** — Isolated markdown memory log per arm
+- **`config.results_dir`** — Isolated full-state-log tree per arm (`runs/results/<arm>`).
+  Added alongside #121's KPI report script: `results_dir` is a separate `DEFAULT_CONFIG` key
+  from `report_dir` (`tradingagents/graph/trading_graph.py`'s `_log_state` writes
+  `full_states_log_<date>.json` under `results_dir`, not `report_dir`) and defaults to the
+  shared `~/.tradingagents/logs` if left unset — every arm setting its own `results_dir` is
+  what actually isolates the per-arm full-state-log tree KPI 4 reads.
 - **`config.selected_analysts`** (arms 2–5 only) — The ablated analyst list
 - **`config.risk_stage`** (no-risk arm only) — Set to "none" to bypass risk debate
 
@@ -90,19 +96,39 @@ Run the stability block with:
 Each arm runs with isolated:
 - **Decision history** — SQLite DB at `runs/memory/<memory_id>/memory.db`
 - **Simulated depot** — Portfolio mode trades against a named depot
-- **Report output** — Full-state logs in a separate directory tree
+- **Report output** — Per-ticker reports under `report_dir`
+- **Full-state logs** — `full_states_log_<date>.json` under `config.results_dir`
+  (`runs/results/<arm>`) — a *separate* tree from `report_dir` (see "Run Configuration" above)
 - **Markdown memory log** — Historical decisions and reflections
 
 This isolation prevents cross-arm contamination in decision history, portfolio state, and performance metrics.
 
 ## KPI Report
 
-After all arms complete, the KPI report script (issue #121) will:
-1. Compare decision agreement/flip rate vs. control per ticker-day
-2. Analyze 10-trading-day forward returns (from the memory DB resolution path)
-3. Report depot performance per arm (equity, drawdown, daily path)
-4. Measure token cost per run per arm
-5. Assess repeat-run rating variance (stability block only)
+After arms have run (and, for KPI 2, after enough trading days have elapsed for
+`resolve_pending` to fill in forward returns), generate the KPI report with:
+
+```bash
+./venv/bin/python scripts/ablation_report.py
+```
+
+`scripts/ablation_report.py` (issue #121) reads each arm's artifacts directly off disk
+(no live MCP server required) and writes a markdown report (default:
+`experiments/ablation-analysts/ablation_report.md`, override with `--out`):
+1. Compares decision agreement/flip rate vs. control per ticker-day (exact and ±1 tier)
+2. Pairs 10-trading-day forward returns on disagreement ticker-days only, separating
+   resolved rows from pending ones
+3. Reports depot performance per arm (final equity, max drawdown, daily equity path)
+4. Measures token cost per run per arm (char/4 proxy over the full-state logs)
+5. Assesses repeat-run rating variance per ticker from the stability-block memory DBs
+
+Missing/partial artifacts (an arm that hasn't run yet, unresolved forward returns, a
+missing depot DB) are reported as explicit gaps in the report rather than raising. See the
+script's module docstring for the exact artifact access paths and the KPI 3 equity-curve
+approximation it uses (no live price feed is available offline).
+
+The keep/merge/drop call for each ablated agent is human judgment made on top of this
+report — the script deliberately encodes no decision rule.
 
 ## References
 
@@ -110,3 +136,5 @@ After all arms complete, the KPI report script (issue #121) will:
 - **Issue #115** — Run-config file support
 - **Issue #118** — Configurable `selected_analysts`
 - **Issue #119** — Configurable `risk_stage` (bypass risk debate)
+- **Issue #120** — Ablation arm run-config files + driver script
+- **Issue #121** — KPI report script

@@ -311,6 +311,37 @@ class TestStabilityConfigsIsolation:
                 f"'{expected_memory_id}'"
             )
 
+            # results_dir isolation (issue #121) — same rationale as the main arms'
+            # test_arm_isolation_values_are_consistent in test_ablation_arms_config.py.
+            expected_results_dir = f"runs/results/{expected_memory_id}"
+            assert config.get("config", {}).get("results_dir") == expected_results_dir, (
+                f"{arm_name}.stability: results_dir should be '{expected_results_dir}', "
+                f"got '{config.get('config', {}).get('results_dir')}'"
+            )
+
+    def test_stability_results_dirs_differ_from_main_arms_and_each_other(self):
+        """Every stability results_dir must be unique and distinct from every main-arm results_dir."""
+        main_results_dirs = set()
+        for arm_name, _, _ in STABILITY_ARM_DEFINITIONS:
+            main_config_file = ARMS_DIR / f"{arm_name}.json"
+            with open(main_config_file) as f:
+                main_config = json.load(f)
+                main_results_dirs.add(main_config.get("config", {}).get("results_dir"))
+
+        stability_results_dirs = set()
+        for arm_name, _, _ in STABILITY_ARM_DEFINITIONS:
+            path = self._get_config(arm_name).get("config", {}).get("results_dir")
+            assert path is not None, f"{arm_name}.stability: missing config.results_dir"
+            assert path not in main_results_dirs, (
+                f"{arm_name}.stability: results_dir '{path}' must not collide with a "
+                f"main-arm results_dir"
+            )
+            stability_results_dirs.add(path)
+
+        assert len(stability_results_dirs) == len(STABILITY_ARM_DEFINITIONS), (
+            "Stability results_dir values must be unique across all six stability arms"
+        )
+
 
 class TestStabilityConfigsDiscoveredByDriver:
     """Test that scripts/run_ablation.py's discovery logic picks up the real deliverables."""

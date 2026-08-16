@@ -5,6 +5,7 @@
     "memory_id": "no-risk-stability",
     "config": {
         "risk_stage": "none",
-        "memory_log_path": "~/.tradingagents/memory/no-risk-stability/trading_memory.md"
+        "memory_log_path": "~/.tradingagents/memory/no-risk-stability/trading_memory.md",
+        "results_dir": "runs/results/no-risk-stability"
     }
 }
