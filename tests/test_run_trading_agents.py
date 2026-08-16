@@ -1018,6 +1018,105 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 self.assertIn("technical_indicators", config["data_vendors"])
                 self.assertIn("knowledge_base", config["data_vendors"])
 
+    def test_config_block_does_not_mutate_global_default_config(self):
+        """Applying a 'config' block must leave the process-global DEFAULT_CONFIG untouched.
+
+        Regression test: ``DEFAULT_CONFIG.copy()`` is a *shallow* copy, so
+        ``config["data_vendors"]`` IS ``DEFAULT_CONFIG["data_vendors"]`` and
+        the one-level deep merge's ``config[key].update(value)`` used to
+        rewrite the global's own nested dict in place — permanently
+        corrupting DEFAULT_CONFIG for every later consumer in the process
+        (e.g. ``initialize_config()`` in tradingagents/dataflows/config.py,
+        which deepcopy()s it). The fix is to deepcopy up front, matching
+        ``initialize_config``'s precondition for the same merge.
+        """
+        import copy as copy_module
+
+        import run_trading_agents
+
+        default_config = run_trading_agents.DEFAULT_CONFIG
+        before = copy_module.deepcopy(default_config)
+        nested_ids_before = {
+            key: id(value) for key, value in default_config.items() if isinstance(value, dict)
+        }
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "data_vendors": {"news_data": "alpha_vantage"},
+                "tool_vendors": {"get_stock_data": "alpha_vantage"},
+                "research_stage": "debate",
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+            config = mock_graph.call_args[1]['config']
+
+        # The run's own config really did receive the overrides ...
+        self.assertEqual(config["data_vendors"]["news_data"], "alpha_vantage")
+        self.assertEqual(config["tool_vendors"]["get_stock_data"], "alpha_vantage")
+        self.assertEqual(config["research_stage"], "debate")
+
+        # ... while the global DEFAULT_CONFIG is unchanged, value-wise ...
+        self.assertEqual(
+            default_config["data_vendors"]["news_data"],
+            before["data_vendors"]["news_data"],
+        )
+        self.assertEqual(default_config["tool_vendors"], before["tool_vendors"])
+        self.assertEqual(default_config["research_stage"], before["research_stage"])
+        self.assertEqual(default_config, before)
+
+        # ... and the run config shares no nested dict object with it, so a
+        # later in-place merge can't reach the global either.
+        self.assertIsNot(config["data_vendors"], default_config["data_vendors"])
+        self.assertIsNot(config["tool_vendors"], default_config["tool_vendors"])
+        self.assertEqual(
+            {key: id(value) for key, value in default_config.items() if isinstance(value, dict)},
+            nested_ids_before,
+        )
+
+    def test_config_block_dot_notation_key_rejected(self):
+        """Dot-notation keys are rejected, pointing at the nested-object form."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "data_vendors.news_data": "alpha_vantage",
+            },
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('data_vendors.news_data', output_str)
+        self.assertIn('dot notation', output_str)
+        # The error names the supported replacement spelling.
+        self.assertIn('"data_vendors": {"news_data": ...}', output_str)
+
     def test_config_file_nested_config_block_invalid_key(self):
         """Config block with unrecognized key exits with clear error."""
         import io

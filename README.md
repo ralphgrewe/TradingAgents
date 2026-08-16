@@ -194,6 +194,12 @@ error at run start, as will a type mismatch — with three deliberate exceptions
   and the provider "thinking" knobs) have no type to check against, so any JSON type is accepted and
   passed through as-is.
 
+Nested keys use the nested-object form shown above. Dot-notation keys such as
+`"data_vendors.news_data": "alpha_vantage"` are **rejected** with an error naming the nested-object
+replacement — dot notation is the `TRADINGAGENTS_*` env-var table's convention for naming a target
+key, not a run-config-file one, and every nested dict in `DEFAULT_CONFIG` is one level deep, so the
+nested-object form already reaches every settable key.
+
 ### Stock list format
 
 **Default behavior (today's date mode):** by default, every ticker is run against today's date:

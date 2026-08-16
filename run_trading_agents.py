@@ -59,9 +59,12 @@ Recognized top-level config keys (exactly the argparse dest names in snake_case,
 - depot_id (string)
 - memory_id (string)
 - config (object, optional): a nested object containing DEFAULT_CONFIG keys and values (issue #117).
-  Any key from DEFAULT_CONFIG (including nested keys like data_vendors.news_data) can be set here.
-  Nested dict values deep-merge one level only (e.g., setting data_vendors.news_data keeps
-  other data_vendors entries intact). Type of values must be checked (not coerced — JSON already
+  Any top-level key from DEFAULT_CONFIG can be set here. Nested keys are addressed with the
+  nested-object form — {"data_vendors": {"news_data": "alpha_vantage"}} — which deep-merges one
+  level only, leaving the other data_vendors entries intact. Dot-notation keys
+  ("data_vendors.news_data") are rejected with an error naming the nested-object form; dot
+  notation is the _ENV_OVERRIDES convention for env vars, not a config-file one, and would be a
+  second spelling with different merge semantics. Type of values must be checked (not coerced — JSON already
   carries types) against the DEFAULT_CONFIG default's type, with three deliberate exceptions: an
   int is accepted where the default is a float (e.g. swing_trader_min_risk_reward: 2 for its 1.5
   default); bool is never interchangeable with int/float in either direction despite bool being an
@@ -83,7 +86,7 @@ entry (those in _ENV_OVERRIDES: llm_provider, deep_think_llm,
 quick_think_llm, memory_id, research_stage, swing_trader_enabled, etc.).
 When neither the CLI flag nor a top-level config key sets one of these, the
 nested "config" block is consulted. If neither that nor any TRADINGAGENTS_*
-env var is set, the script leaves it unset so DEFAULT_CONFIG.copy()'s own
+env var is set, the script leaves it unset so the DEFAULT_CONFIG copy's own
 value — already resolved against its TRADINGAGENTS_* env var at import time
 — takes effect untouched, rather than a hardcoded literal silently
 overwriting it. Top-level keys (tier 2) take precedence over the nested
@@ -152,6 +155,7 @@ import datetime
 import json
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -178,22 +182,6 @@ _CONFIG_FILE_FLAG_KEYS = (
     "depot_id", "memory_id",
 )
 _CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", "config", *_CONFIG_FILE_FLAG_KEYS})
-
-
-def _nested_key_exists(d: dict, keys: list[str]) -> bool:
-    """Check whether a dot-notation key path exists in a nested dict.
-
-    Unlike ``_get_nested(...) is not None``, this checks *presence* via dict
-    membership at each level, so a nested key whose value is legitimately
-    ``None`` (e.g. a hypothetical ``"some_dict.some_none_key"``) is still
-    reported as existing rather than as missing.
-    """
-    current = d
-    for k in keys:
-        if not isinstance(current, dict) or k not in current:
-            return False
-        current = current[k]
-    return True
 
 
 def _type_is_compatible(value, reference) -> bool:
@@ -237,6 +225,20 @@ def _validate_config_block(config_block: dict, config_path: str) -> None:
     function validates that all keys are recognized DEFAULT_CONFIG keys and
     that all values have compatible types with the DEFAULT_CONFIG defaults.
 
+    Keys are *top-level* DEFAULT_CONFIG keys only. Dot-notation paths (e.g.
+    ``"data_vendors.news_data"``) are deliberately REJECTED with an error
+    pointing at the nested-object form, rather than supported as a second
+    syntax: dot notation is the ``_ENV_OVERRIDES`` table's convention for
+    naming an env var's target, not a run-config-file convention. Supporting
+    it here would mean two spellings of the same setting with *different*
+    semantics — the nested-object form deep-merges one level (keeping sibling
+    ``data_vendors`` entries), while a dotted path assigns a leaf and, via
+    ``_set_nested``, would happily fabricate intermediate dicts for arbitrary
+    depths that DEFAULT_CONFIG doesn't have and this issue explicitly puts out
+    of scope. Since every nested dict in DEFAULT_CONFIG is exactly one level
+    deep, the nested-object form already reaches every settable key, so dot
+    notation would add no capability — only ambiguity.
+
     Deliberate design choice for DEFAULT_CONFIG keys whose own default is
     ``None`` (e.g. ``temperature``, ``memory_id``, ``backend_url``,
     ``benchmark_ticker``, ``simulation_server_command``,
@@ -266,25 +268,26 @@ def _validate_config_block(config_block: dict, config_path: str) -> None:
         print(f"Error: 'config' block in '{config_path}' must be a JSON object (dict), not {type(config_block).__name__}")
         sys.exit(1)
 
-    from tradingagents.default_config import _get_nested
-
     for key, value in config_block.items():
-        # Check if key exists in DEFAULT_CONFIG (dot notation addresses a
-        # nested key path; a plain key is checked via dict membership so a
-        # legitimately-None-valued top-level key like "memory_id" or
-        # "temperature" still counts as recognized).
-        key_exists = _nested_key_exists(DEFAULT_CONFIG, key.split(".")) if "." in key else key in DEFAULT_CONFIG
-        if not key_exists:
+        # Reject dot-notation paths outright (see docstring): there is exactly
+        # one supported spelling for a nested key, the nested-object form.
+        if "." in key:
+            head, _, tail = key.partition(".")
+            print(f"Error: Config block key '{key}' uses dot notation, which is not supported.")
+            print(f"       Use the nested-object form instead: "
+                  f'"{head}": {{"{tail}": ...}}')
+            sys.exit(1)
+
+        # Membership (not `.get(key) is not None`) so a legitimately
+        # None-valued key like "memory_id" or "temperature" still counts as
+        # recognized.
+        if key not in DEFAULT_CONFIG:
             print(f"Error: Unrecognized config block key: '{key}'")
             sorted_keys = sorted(DEFAULT_CONFIG.keys())
             print(f"Recognized config keys: {', '.join(sorted_keys[:10])}... (and more)")
             sys.exit(1)
 
-        # Get the default value to check type compatibility
-        if "." in key:
-            default_value = _get_nested(DEFAULT_CONFIG, key.split("."))
-        else:
-            default_value = DEFAULT_CONFIG.get(key)
+        default_value = DEFAULT_CONFIG.get(key)
 
         # Type check: JSON type must match DEFAULT_CONFIG type. Skipped
         # entirely when the default itself is None (see docstring) or when
@@ -533,18 +536,28 @@ def main():
     # fully resolved effective provider (config["llm_provider"]) rather than
     # the raw args.llm_provider — which is None whenever neither the
     # --llm-provider flag nor the config file set it, deliberately, so that
-    # DEFAULT_CONFIG.copy()'s own env-override-aware value (honoring
+    # the DEFAULT_CONFIG copy's own env-override-aware value (honoring
     # TRADINGAGENTS_LLM_PROVIDER) is used instead of being silently
     # overwritten by a hardcoded 'ollama' literal here.
-    config = DEFAULT_CONFIG.copy()
+    # deepcopy, NOT DEFAULT_CONFIG.copy(): a shallow copy shares every nested
+    # dict (data_vendors, tool_vendors, benchmark_map, ...) with the
+    # process-global DEFAULT_CONFIG, so the one-level deep merge below would
+    # `.update()` the global's own dict in place and permanently corrupt
+    # DEFAULT_CONFIG for everything else in the process. This mirrors
+    # initialize_config() in tradingagents/dataflows/config.py, which
+    # deepcopy()s DEFAULT_CONFIG *before* set_config()'s identical
+    # update-in-place merge runs — that copy is the precondition that makes
+    # merging in place safe, not an incidental detail.
+    config = deepcopy(DEFAULT_CONFIG)
 
     # Apply config file's nested "config" block (issue #117) to DEFAULT_CONFIG
     # BEFORE the CLI-flag layer overwrites it. This maintains the precedence:
     # CLI flag > config file > TRADINGAGENTS_* env var > DEFAULT_CONFIG.
     # One-level deep merge for dict values, matching set_config semantics
-    # (tradingagents/dataflows/config.py).
+    # (tradingagents/dataflows/config.py) — including its deepcopy of the
+    # incoming values, so the run config never aliases the parsed JSON either.
     if config_data and "config" in config_data:
-        config_block = config_data["config"]
+        config_block = deepcopy(config_data["config"])
         for key, value in config_block.items():
             if isinstance(value, dict) and isinstance(config.get(key), dict):
                 # One-level deep merge for dict values
@@ -556,7 +569,7 @@ def main():
     if args.llm_provider:
         config["llm_provider"] = args.llm_provider
 
-    # Set model names: only override the DEFAULT_CONFIG.copy() values when the
+    # Set model names: only override the copied DEFAULT_CONFIG values when the
     # corresponding CLI flag / config-file key was actually provided, so the
     # ollama defaults stay sourced from DEFAULT_CONFIG (single source of
     # truth) instead of being duplicated here.
