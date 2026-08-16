@@ -35,10 +35,17 @@ Run config file format (top-level JSON object, new feature):
         "portfolio": true,
         "style": "aggressive",
         "depot_id": "mistral-depot",
-        "memory_id": "mistral-aggressive"
+        "memory_id": "mistral-aggressive",
+        "config": {
+            "research_stage": "debate",
+            "max_debate_rounds": 2,
+            "swing_trader_enabled": true,
+            "temperature": 0.3,
+            "data_vendors": {"news_data": "alpha_vantage"}
+        }
     }
 
-Recognized config keys (exactly the argparse dest names in snake_case, plus stocks_file):
+Recognized top-level config keys (exactly the argparse dest names in snake_case, plus stocks_file):
 - stocks_file (string, required): path to the stock list JSON, resolved relative to the
   config file's directory (if relative) or used as-is (if absolute)
 - llm_provider (string, default "ollama")
@@ -51,27 +58,35 @@ Recognized config keys (exactly the argparse dest names in snake_case, plus stoc
 - style (string, "aggressive" | "conservative")
 - depot_id (string)
 - memory_id (string)
+- config (object, optional): a nested object containing DEFAULT_CONFIG keys and values (issue #117).
+  Any key from DEFAULT_CONFIG (including nested keys like data_vendors.news_data) can be set here.
+  Nested dict values deep-merge one level only (e.g., setting data_vendors.news_data keeps
+  other data_vendors entries intact). Type of values must match the DEFAULT_CONFIG default's type.
+  Top-level keys (above) take precedence if set in both places.
 
 Precedence (highest to lowest):
 1. CLI flag (if provided on command line)
-2. Config file (if the positional argument is a config object)
-3. TRADINGAGENTS_* environment variable
-4. DEFAULT_CONFIG
+2. Top-level config file key (if the positional argument is a config object)
+3. Config file's nested "config" block (issue #117)
+4. TRADINGAGENTS_* environment variable
+5. DEFAULT_CONFIG
 
-The full four-tier chain only applies to the keys that are backed by a
-DEFAULT_CONFIG entry: llm_provider, deep_think_llm, quick_think_llm, and
-memory_id (see tradingagents/default_config.py's _ENV_OVERRIDES table for
-the env var each one honors). When neither the CLI flag nor the config file
-sets one of these, the script leaves it unset so DEFAULT_CONFIG.copy()'s own
+The full five-tier chain applies to keys that are backed by a DEFAULT_CONFIG
+entry (those in _ENV_OVERRIDES: llm_provider, deep_think_llm,
+quick_think_llm, memory_id, research_stage, swing_trader_enabled, etc.).
+When neither the CLI flag nor a top-level config key sets one of these, the
+nested "config" block is consulted. If neither that nor any TRADINGAGENTS_*
+env var is set, the script leaves it unset so DEFAULT_CONFIG.copy()'s own
 value — already resolved against its TRADINGAGENTS_* env var at import time
 — takes effect untouched, rather than a hardcoded literal silently
-overwriting it.
+overwriting it. Top-level keys (tier 2) take precedence over the nested
+"config" block (tier 3) for any key that appears in both places.
 
 The remaining recognized keys (report_dir, show_summary, use_dates_from_json,
 portfolio, style, depot_id) are script-only settings with no DEFAULT_CONFIG
-entry or TRADINGAGENTS_* env var of their own; for those, "default" in tier 4
+entry or TRADINGAGENTS_* env var of their own; for those, "default" in tier 5
 above is just this script's built-in literal (e.g. report_dir → "./reports"),
-so effectively only tiers 1, 2, and 4 apply.
+so effectively only tiers 1, 2, and 5 apply.
 
 The set of recognized config-file keys and the CLI/config-file merge live in
 one place in the source (_CONFIG_FILE_FLAG_KEYS in run_trading_agents.py) so
@@ -155,7 +170,79 @@ _CONFIG_FILE_FLAG_KEYS = (
     "show_summary", "use_dates_from_json", "portfolio", "style",
     "depot_id", "memory_id",
 )
-_CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", *_CONFIG_FILE_FLAG_KEYS})
+_CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", "config", *_CONFIG_FILE_FLAG_KEYS})
+
+
+def _validate_config_block(config_block: dict, config_path: str) -> None:
+    """Validate a 'config' block inside a run config file.
+
+    The config block contains DEFAULT_CONFIG keys and their values. This
+    function validates that all keys are recognized DEFAULT_CONFIG keys and
+    that all values have compatible types with the DEFAULT_CONFIG defaults.
+
+    Args:
+        config_block: The parsed "config" dict (must be a dict or None).
+        config_path: Path to the config file, used only in error messages.
+
+    Raises:
+        SystemExit on any validation error.
+    """
+    if config_block is None:
+        return
+
+    if not isinstance(config_block, dict):
+        print(f"Error: 'config' block in '{config_path}' must be a JSON object (dict), not {type(config_block).__name__}")
+        sys.exit(1)
+
+    # Helper to recursively check if a key exists in DEFAULT_CONFIG (supporting dot notation)
+    def _key_exists_in_default_config(key_path: str) -> bool:
+        """Check if a dot-notation key path exists in DEFAULT_CONFIG."""
+        from tradingagents.default_config import _get_nested
+        if "." in key_path:
+            keys = key_path.split(".")
+            return _get_nested(DEFAULT_CONFIG, keys) is not None
+        return key_path in DEFAULT_CONFIG
+
+    # Helper to check type compatibility
+    def _type_is_compatible(value, reference) -> bool:
+        """Check if a JSON value's type is compatible with the reference type."""
+        # None is always compatible
+        if value is None:
+            return True
+        # For int/float compatibility: accept int where float is expected
+        if isinstance(reference, float) and isinstance(value, int):
+            return True
+        # Otherwise, types must match exactly
+        return type(value) == type(reference)
+
+    # Validate each key and type
+    from tradingagents.default_config import _get_nested
+
+    for key, value in config_block.items():
+        # Check if key exists in DEFAULT_CONFIG
+        if not _key_exists_in_default_config(key):
+            print(f"Error: Unrecognized config block key: '{key}'")
+            sorted_keys = sorted(DEFAULT_CONFIG.keys())
+            print(f"Recognized config keys: {', '.join(sorted_keys[:10])}... (and more)")
+            sys.exit(1)
+
+        # Get the default value to check type compatibility
+        if "." in key:
+            keys = key.split(".")
+            default_value = _get_nested(DEFAULT_CONFIG, keys)
+        else:
+            default_value = DEFAULT_CONFIG.get(key)
+
+        # Type check: JSON type must match DEFAULT_CONFIG type
+        if default_value is not None:
+            if isinstance(default_value, dict) and isinstance(value, dict):
+                # For dict values, we don't deeply validate nested keys —
+                # they'll be validated by set_config's one-level merge
+                pass
+            elif not _type_is_compatible(value, default_value):
+                print(f"Error: Config block key '{key}' has type {type(value).__name__}, "
+                      f"expected {type(default_value).__name__}")
+                sys.exit(1)
 
 
 def display_summary(final_state, ticker):
@@ -233,6 +320,10 @@ def _validate_config_file(config_data: dict, config_path: str) -> None:
         print(f"Error: Unrecognized config key(s): {', '.join(sorted(unrecognized))}")
         print(f"Recognized keys: {', '.join(sorted_keys)}")
         sys.exit(1)
+
+    # If 'config' block is present, validate it
+    if "config" in config_data:
+        _validate_config_block(config_data["config"], config_path)
 
 
 def _resolve_stocks_file_path(stocks_file: str, config_path: str | None) -> str:
@@ -392,6 +483,22 @@ def main():
     # TRADINGAGENTS_LLM_PROVIDER) is used instead of being silently
     # overwritten by a hardcoded 'ollama' literal here.
     config = DEFAULT_CONFIG.copy()
+
+    # Apply config file's nested "config" block (issue #117) to DEFAULT_CONFIG
+    # BEFORE the CLI-flag layer overwrites it. This maintains the precedence:
+    # CLI flag > config file > TRADINGAGENTS_* env var > DEFAULT_CONFIG.
+    # One-level deep merge for dict values, matching set_config semantics
+    # (tradingagents/dataflows/config.py).
+    if config_data and "config" in config_data:
+        config_block = config_data["config"]
+        for key, value in config_block.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                # One-level deep merge for dict values
+                config[key].update(value)
+            else:
+                config[key] = value
+
+    # CLI flags override config file settings
     if args.llm_provider:
         config["llm_provider"] = args.llm_provider
 

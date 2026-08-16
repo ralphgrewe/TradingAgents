@@ -138,18 +138,50 @@ use the same defaults as CLI flags.
 - `depot_id`: named depot (required with portfolio)
 - `memory_id`: isolate decision history (optional)
 
-**Precedence:** CLI flags override config file, which override environment variables, which override defaults.
-This full four-tier chain applies to `llm_provider`, `deep_think_llm`, `quick_think_llm`, and
-`memory_id` (each backed by a `DEFAULT_CONFIG`/`TRADINGAGENTS_*` entry — see
-`tradingagents/default_config.py`). The remaining keys (`report_dir`, `show_summary`,
-`use_dates_from_json`, `portfolio`, `style`, `depot_id`) are script-only settings with no env var
-of their own, so only the CLI-flag/config-file/built-in-default tiers apply to them.
+**Config precedence:** CLI flags override top-level config keys, which override the nested `"config"` block,
+which override environment variables, which override defaults. This full five-tier chain applies to any
+`DEFAULT_CONFIG` key (those in `tradingagents/default_config.py` with a corresponding `TRADINGAGENTS_*`
+env var: `research_stage`, `max_debate_rounds`, `temperature`, `swing_trader_enabled`, etc., plus
+`llm_provider`, `deep_think_llm`, `quick_think_llm`, and `memory_id`). The remaining keys
+(`report_dir`, `show_summary`, `use_dates_from_json`, `portfolio`, `style`, `depot_id`) are script-only
+with no env var of their own, so only the CLI-flag/top-level-config/built-in-default tiers apply to them.
+
+If a key appears in both a top-level field and in the nested `"config"` block, the top-level value wins.
+For nested dict keys (like `data_vendors`), the `"config"` block does a one-level deep merge: setting
+`"config": {"data_vendors": {"news_data": "alpha_vantage"}}` keeps the other `data_vendors` entries intact.
 
 This allows tweaking a saved config ad hoc without editing the file:
 
 ```bash
 ./venv/bin/python run_trading_agents.py config.json --show-summary  # Override config if needed
 ```
+
+#### Nested "config" block for DEFAULT_CONFIG keys
+
+To set runtime parameters (like research strategy, temperature, or swing trader settings) without CLI
+flags or env vars, use the nested `"config"` object. Any `DEFAULT_CONFIG` key is settable:
+
+```json
+{
+  "stocks_file": "stocks.json",
+  "llm_provider": "mistral",
+  "deep_think_llm": "mistral-large",
+  "quick_think_llm": "mistral-small",
+  "config": {
+    "research_stage": "debate",
+    "max_debate_rounds": 2,
+    "swing_trader_enabled": true,
+    "temperature": 0.3,
+    "data_vendors": {
+      "news_data": "alpha_vantage"
+    }
+  }
+}
+```
+
+All config keys are optional except `stocks_file`. Values in the `"config"` block must match the type
+of the corresponding `DEFAULT_CONFIG` default (bool for booleans, int/float for numbers, string for strings,
+object for nested dicts). Unrecognized keys in the `"config"` block will cause an error at run start.
 
 ### Stock list format
 

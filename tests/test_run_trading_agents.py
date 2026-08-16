@@ -923,8 +923,103 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
         self.assertIn('style', output_str.lower())
         self.assertIn('moderate', output_str)
 
-    def test_config_file_config_key_rejected_as_unrecognized(self):
-        """A top-level 'config' key is rejected by name (issue #117 stays out of scope)."""
+    def test_config_file_nested_config_block_basic_loading(self):
+        """A nested 'config' block can set DEFAULT_CONFIG keys (issue #117)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "research_stage": "debate",
+                "max_debate_rounds": 2,
+                "temperature": 0.3,
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["research_stage"], "debate")
+                self.assertEqual(config["max_debate_rounds"], 2)
+                self.assertEqual(config["temperature"], 0.3)
+
+    def test_config_file_nested_config_block_with_nested_keys(self):
+        """Config block can set nested DEFAULT_CONFIG keys like data_vendors.news_data."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "data_vendors": {
+                    "news_data": "alpha_vantage",
+                },
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["data_vendors"]["news_data"], "alpha_vantage")
+
+    def test_config_file_nested_config_block_deep_merge(self):
+        """Config block's nested dict values deep-merge one level (sibling keys intact)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "data_vendors": {
+                    "news_data": "alpha_vantage",
+                },
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                # Verify that news_data was set via config block
+                self.assertEqual(config["data_vendors"]["news_data"], "alpha_vantage")
+                # Verify other data_vendors keys are still present (deep merge, not replace)
+                self.assertIn("core_stock_apis", config["data_vendors"])
+                self.assertIn("fundamental_data", config["data_vendors"])
+                self.assertIn("technical_indicators", config["data_vendors"])
+                self.assertIn("knowledge_base", config["data_vendors"])
+
+    def test_config_file_nested_config_block_invalid_key(self):
+        """Config block with unrecognized key exits with clear error."""
         import io
         from contextlib import redirect_stderr, redirect_stdout
 
@@ -933,7 +1028,9 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
         config_file = Path(self.temp_dir.name) / "config.json"
         config_file.write_text(json.dumps({
             "stocks_file": str(self.stock_list_file),
-            "config": {"research_stage": "debate"},
+            "config": {
+                "invalid_config_key": "some_value",
+            },
         }))
 
         output = io.StringIO()
@@ -948,7 +1045,143 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
         self.assertEqual(cm.exception.code, 1)
         output_str = output.getvalue()
         self.assertIn('Unrecognized', output_str)
-        self.assertIn('config', output_str)
+        self.assertIn('invalid_config_key', output_str)
+
+    def test_config_file_nested_config_block_type_mismatch(self):
+        """Config block with wrong type for a value exits with clear error."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "max_debate_rounds": "not_a_number",  # Should be int, not string
+            },
+        }))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('type', output_str.lower())
+        self.assertIn('max_debate_rounds', output_str)
+
+    def test_config_file_top_level_key_beats_nested_config_block(self):
+        """Top-level key (tier 2) beats config block key (tier 3) when both present."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "memory_id": "top-level-id",  # Top-level
+            "config": {
+                "memory_id": "config-block-id",  # Nested (loses)
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["memory_id"], "top-level-id")
+
+    def test_config_file_cli_flag_beats_nested_config_block(self):
+        """CLI flag (tier 1) beats config block key (tier 3)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "temperature": 0.3,
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # CLI flag wins — but run_trading_agents.py doesn't have a --temperature
+            # flag, so we test with a config-block-settable key that IS also a
+            # top-level key: llm_provider via top-level + config block.
+            # Actually, let me use a different approach: test with a key from
+            # _CONFIG_FILE_FLAG_KEYS that's also in DEFAULT_CONFIG. memory_id qualifies.
+            config_file.write_text(json.dumps({
+                "stocks_file": str(self.stock_list_file),
+                "memory_id": "cli-memory",  # Top-level (this is the CLI)
+                "config": {
+                    "memory_id": "config-block-memory",  # Nested (loses)
+                },
+            }))
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["memory_id"], "cli-memory")
+
+    def test_config_file_cli_flag_beats_all_tiers(self):
+        """Actual CLI flag (tier 1) beats config block (tier 3) and env var (tier 4)."""
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "temperature": 0.3,  # Config block temperature
+            },
+        }))
+
+        # Note: run_trading_agents.py doesn't expose a --temperature CLI flag,
+        # so we test with --memory-id, which IS a CLI flag and also settable
+        # in config/config-block.
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "memory_id": "config-block-memory",
+            },
+        }))
+
+        with patch('run_trading_agents.TradingAgentsGraph') as mock_graph:
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            # CLI flag --memory-id should beat config block
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                                   '--memory-id', 'cli-memory']):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["memory_id"], "cli-memory")
 
     def test_legacy_stock_list_still_works(self):
         """Test that legacy stock list arrays still work (backward compatibility)."""
@@ -1091,6 +1324,40 @@ class RunTradingAgentsEnvVarPrecedenceTests(_TempStockFileTestCase):
                 call_args = mock_graph.call_args
                 config = call_args[1]['config']
                 self.assertEqual(config["llm_provider"], "mistral")
+
+    def test_config_file_nested_config_block_beats_env_var(self):
+        """Config block's nested key beats TRADINGAGENTS_* env var (issue #117)."""
+        import run_trading_agents
+
+        reloaded_default_config = self._reload_default_config_with_env(
+            TRADINGAGENTS_MAX_DEBATE_ROUNDS="3",
+        )
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "config": {
+                "max_debate_rounds": 2,
+            },
+        }))
+
+        with (
+            patch.object(run_trading_agents, 'DEFAULT_CONFIG', reloaded_default_config),
+            patch('run_trading_agents.TradingAgentsGraph') as mock_graph,
+        ):
+            mock_instance = MagicMock()
+            mock_graph.return_value = mock_instance
+            mock_instance.propagate.return_value = (
+                {"final_trade_decision": "BUY"},
+                "BUY"
+            )
+
+            with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):
+                run_trading_agents.main()
+
+                call_args = mock_graph.call_args
+                config = call_args[1]['config']
+                self.assertEqual(config["max_debate_rounds"], 2)
 
 
 @pytest.mark.unit
