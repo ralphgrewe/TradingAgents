@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -77,6 +78,8 @@ from typing import Any
 
 DEFAULT_DB_PATH = Path("runs") / "memory" / "memory.db"
 _ENV_VAR = "TRADINGAGENTS_MEMORY_DB_PATH"
+_MEMORY_ID_ENV_VAR = "TRADINGAGENTS_MEMORY_ID"
+_MEMORY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -97,6 +100,58 @@ CREATE TABLE IF NOT EXISTS decisions (
     UNIQUE (agent, ticker, decision_date)
 );
 """
+
+
+def resolve_memory_id_to_db_path(memory_id: str | None = None) -> Path:
+    """Resolve a memory ID to its corresponding DB path.
+
+    A memory ID is a named identifier that maps to a separate SQLite database
+    file for isolation across multiple runs (e.g., different models or configurations).
+    This allows different model/config combinations to maintain independent decision
+    histories for the same stock list.
+
+    Precedence: ``memory_id`` argument > ``TRADINGAGENTS_MEMORY_ID`` env var >
+    ``TRADINGAGENTS_MEMORY_DB_PATH`` env var > built-in default
+    (``runs/memory/memory.db``).
+
+    If a ``memory_id`` is provided (not None/empty), it is validated against
+    the pattern ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` and the path becomes
+    ``runs/memory/<id>/memory.db``.
+
+    Args:
+        memory_id: Named memory ID to use. If None/empty, falls back to the
+            env var or explicit TRADINGAGENTS_MEMORY_DB_PATH, or the default.
+
+    Returns:
+        Path to the resolved database file.
+
+    Raises:
+        ValueError: If the memory_id contains invalid characters or is invalid.
+    """
+    # Check if memory_id is provided and valid
+    if memory_id is None or memory_id == "":
+        # Fall back to env var or explicit path
+        env_id = os.environ.get(_MEMORY_ID_ENV_VAR)
+        if env_id and env_id != "":
+            memory_id = env_id
+        else:
+            # Use explicit db_path if set, or default
+            return resolve_db_path()
+
+    # Validate the memory_id. ".." is checked explicitly (in addition to the
+    # pattern) because the pattern alone would accept it anywhere except as
+    # the leading character (e.g. "foo..bar") — the issue requires rejecting
+    # any occurrence of ".." outright, not just a leading one.
+    if not _MEMORY_ID_PATTERN.match(memory_id) or ".." in memory_id:
+        raise ValueError(
+            f"Invalid memory_id {memory_id!r}. Must match pattern ^[A-Za-z0-9][A-Za-z0-9._-]*$ "
+            f"(starts with alphanumeric, contains alphanumeric/underscore/dash/dot). "
+            f"No empty strings, slashes, backslashes, or '..' allowed."
+        )
+
+    # Derive path from memory_id: runs/memory/<id>/memory.db
+    parent = DEFAULT_DB_PATH.parent  # runs/memory
+    return parent / memory_id / "memory.db"
 
 
 def resolve_db_path(db_path: str | Path | None = None) -> Path:

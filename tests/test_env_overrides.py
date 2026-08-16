@@ -116,6 +116,18 @@ def test_memory_mcp_timeout_override(monkeypatch):
     assert isinstance(dc.DEFAULT_CONFIG["memory_mcp_timeout"], float)
 
 
+def test_memory_id_override(monkeypatch):
+    """TRADINGAGENTS_MEMORY_ID overrides the None default (issue #114)."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MEMORY_ID="gpt5")
+    assert dc.DEFAULT_CONFIG["memory_id"] == "gpt5"
+
+
+def test_memory_id_default_is_none(monkeypatch):
+    """TRADINGAGENTS_MEMORY_ID defaults to None when not set."""
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["memory_id"] is None
+
+
 def test_invalid_int_raises(monkeypatch):
     """Garbage int values should surface a ValueError at import, not silently misconfigure."""
     monkeypatch.setenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "not-a-number")

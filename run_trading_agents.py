@@ -31,6 +31,10 @@ Optional arguments:
     --portfolio               Opt-in portfolio mode (see below). Requires --style and --depot-id.
     --style {aggressive,conservative}  Portfolio style-table to use.
     --depot-id DEPOT_ID       Named simulated depot to get-or-create and rebalance.
+    --memory-id MEMORY_ID     Named memory ID to isolate SQLite decision history for this run
+                              (default: off, uses runs/memory/memory.db). Each ID creates a
+                              separate DB at runs/memory/<id>/memory.db, allowing different
+                              models or configurations to maintain independent histories.
 
 Date handling:
 - Default behavior (no --use-dates-from-json flag): runs every ticker against today's date
@@ -150,6 +154,8 @@ def main():
                          help='Portfolio style (required with --portfolio).')
     parser.add_argument('--depot-id', help='Named simulated depot to get-or-create and trade in '
                                             '(required with --portfolio).')
+    parser.add_argument('--memory-id', help='Named memory ID to isolate SQLite decision history '
+                                             '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
 
     # Validate provider and model requirements
@@ -159,6 +165,15 @@ def main():
     if args.portfolio and (not args.style or not args.depot_id):
         print("Error: --portfolio requires both --style and --depot-id")
         sys.exit(1)
+
+    # Validate memory_id if provided (issue #114)
+    if args.memory_id:
+        from tradingagents.memory.store import resolve_memory_id_to_db_path
+        try:
+            resolve_memory_id_to_db_path(args.memory_id)
+        except ValueError as e:
+            print(f"Error: Invalid --memory-id: {e}")
+            sys.exit(1)
 
     # Check API key environment variable for the provider before processing tickers
     api_key_env = get_api_key_env(args.llm_provider)
@@ -221,6 +236,10 @@ def main():
 
     if args.quick_think_llm:
         config["quick_think_llm"] = args.quick_think_llm
+
+    # Set memory_id if provided (issue #114)
+    if args.memory_id:
+        config["memory_id"] = args.memory_id
 
     # Respect configured debate/risk rounds (do not override with hardcoded values)
 

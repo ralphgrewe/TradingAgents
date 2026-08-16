@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Added
+
+- **Named memory IDs.** `--memory-id MEMORY_ID` (`run_trading_agents.py`) and
+  `TRADINGAGENTS_MEMORY_ID` isolate the SQLite decision-memory store per run —
+  each ID gets its own DB at `runs/memory/<id>/memory.db` instead of the
+  shared `runs/memory/memory.db`, so decisions from different models or
+  configurations no longer contaminate each other's history. Precedence:
+  `--memory-id` > `TRADINGAGENTS_MEMORY_ID` > `TRADINGAGENTS_MEMORY_DB_PATH` >
+  default. With neither flag nor env var set, behavior is unchanged. (#114)
+
 ## [0.2.5] — 2026-05-11
 
 ### Added

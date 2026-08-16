@@ -169,6 +169,25 @@ Three independent, still-coexisting memory systems:
   write-only/idempotent (`INSERT OR IGNORE`); `resolve.py` fills in `forward_return`/`lesson`
   once enough trading days have elapsed (`numpy.busday_count`-based, no holiday calendar);
   `query.py` is the read/formatting path for prompt injection.
+
+  **Named memory IDs** (issue #114): a run can be isolated into its own decision history via
+  `--memory-id MEMORY_ID` (`run_trading_agents.py`) or the `memory_id` config key
+  (`TRADINGAGENTS_MEMORY_ID` env var) — each ID resolves to its own DB file at
+  `runs/memory/<id>/memory.db` rather than the shared `runs/memory/memory.db`, so decisions
+  from different models/configurations run against the same stock list don't contaminate each
+  other's history. `tradingagents/memory/store.resolve_memory_id_to_db_path` implements the
+  resolution: `memory_id` argument > `TRADINGAGENTS_MEMORY_ID` env var >
+  `TRADINGAGENTS_MEMORY_DB_PATH` env var > default `runs/memory/memory.db`, and validates the ID
+  against `^[A-Za-z0-9][A-Za-z0-9._-]*$` (rejecting `/`, `\`, `..` anywhere in the string, and
+  empty strings) since it becomes a directory name. The ID → path derivation happens
+  client-side in `TradingAgentsGraph.propagate`, which resolves it once and passes the resulting
+  `db_path` into the `MemoryMCPClient` constructor as a default applied across all five tool
+  calls — the memory MCP server itself stays stateless and keeps receiving an explicit
+  `db_path` per call, unchanged. With no `--memory-id`/`TRADINGAGENTS_MEMORY_ID` set, the
+  resolved path is identical to pre-#114 behavior. `cli/main.py` and the `analyze_stock` MCP
+  tool don't get a `--memory-id` flag, but can still select a memory via
+  `TRADINGAGENTS_MEMORY_ID`. The legacy markdown decision log is explicitly out of scope and
+  stays global/unnamespaced.
   
   **Access path**: `trading_graph.py` and `skills/memory-review/find_patterns.py` reach the
   SQLite core over the networked memory MCP server (via `MemoryMCPClient`), not by opening

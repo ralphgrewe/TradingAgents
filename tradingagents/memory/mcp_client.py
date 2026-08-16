@@ -252,6 +252,7 @@ class MemoryMCPClient:
         url: str | None = None,
         transport: str | None = None,
         timeout: float | None = None,
+        db_path: str | None = None,
     ):
         """Initialize the client.
 
@@ -265,10 +266,15 @@ class MemoryMCPClient:
                 each individual tool call. Defaults to the
                 ``memory_mcp_timeout`` config key
                 (``TRADINGAGENTS_MEMORY_MCP_TIMEOUT``), then 30s.
+            db_path: Default database path to use for tool calls that don't
+                specify their own db_path (issue #114). Useful for isolating
+                memory across multiple runs. Per-call db_path arguments always
+                override this default.
         """
         self.url = url
         self.transport = transport
         self.timeout = timeout
+        self.db_path = db_path
         self._session: ClientSession | None = None
         # See module docstring "Event-loop lifecycle" — one loop plus one
         # persistent lifecycle Task (which owns the AsyncExitStack
@@ -669,6 +675,10 @@ class MemoryMCPClient:
             MemoryMCPToolError: If the tool call fails.
             MemoryMCPConnectionError: If not connected.
         """
+        # Apply default db_path if not specified
+        if db_path is None:
+            db_path = self.db_path
+
         result = self._call_tool_sync(
             "memory_store_decision",
             {
@@ -710,6 +720,10 @@ class MemoryMCPClient:
             MemoryMCPToolError: If the tool call fails.
             MemoryMCPConnectionError: If not connected.
         """
+        # Apply default db_path if not specified
+        if db_path is None:
+            db_path = self.db_path
+
         result = self._call_tool_sync(
             "memory_resolve_pending",
             {"agent": agent, "ticker": ticker, "db_path": db_path},
@@ -746,6 +760,10 @@ class MemoryMCPClient:
             MemoryMCPToolError: If the tool call fails.
             MemoryMCPConnectionError: If not connected.
         """
+        # Apply default db_path if not specified
+        if db_path is None:
+            db_path = self.db_path
+
         result = self._call_tool_sync(
             "memory_get_past_context",
             {
@@ -787,6 +805,10 @@ class MemoryMCPClient:
             MemoryMCPToolError: If the tool call fails.
             MemoryMCPConnectionError: If not connected.
         """
+        # Apply default db_path if not specified
+        if db_path is None:
+            db_path = self.db_path
+
         result = self._call_tool_sync(
             "memory_get_statistics",
             {"agent": agent, "ticker": ticker, "since": since, "db_path": db_path},
@@ -833,6 +855,10 @@ class MemoryMCPClient:
             MemoryMCPToolError: If the tool call fails.
             MemoryMCPConnectionError: If not connected.
         """
+        # Apply default db_path if not specified
+        if db_path is None:
+            db_path = self.db_path
+
         result = self._call_tool_sync(
             "memory_get_decisions",
             {

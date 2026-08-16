@@ -23,6 +23,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MEMORY_MCP_URL":       "memory_mcp_url",
     "TRADINGAGENTS_MEMORY_MCP_TRANSPORT": "memory_mcp_transport",
     "TRADINGAGENTS_MEMORY_MCP_TIMEOUT":   "memory_mcp_timeout",
+    "TRADINGAGENTS_MEMORY_ID":            "memory_id",
     "TRADINGAGENTS_RESEARCH_STAGE":       "research_stage",
     "TRADINGAGENTS_RESEARCH_WEB_SEARCH":  "research_web_search",
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
@@ -236,4 +237,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # with an error the MCP client never routes back to the waiting caller
     # hangs the whole run indefinitely — issue #108.
     "memory_mcp_timeout": 30.0,
+    # Named memory ID for isolating SQLite decision history per run (issue #114).
+    # When set, decisions are stored in runs/memory/<id>/memory.db instead of the
+    # default runs/memory/memory.db. This allows different models or configurations
+    # to maintain independent decision histories for the same stock list.
+    # Precedence: --memory-id flag > TRADINGAGENTS_MEMORY_ID env var >
+    # TRADINGAGENTS_MEMORY_DB_PATH env var > default.
+    "memory_id": None,
 })

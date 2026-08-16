@@ -9,6 +9,7 @@ from tradingagents.memory.store import (
     DEFAULT_DB_PATH,
     get_connection,
     resolve_db_path,
+    resolve_memory_id_to_db_path,
     store_decision,
 )
 
@@ -346,3 +347,126 @@ def test_store_decision_mixed_horizons_in_same_batch(tmp_path):
     assert rows["AAPL"]["horizon_days"] == 3
     assert rows["MSFT"]["horizon_days"] is None  # still NULL for backward compat
     assert rows["GOOGL"]["horizon_days"] == 15
+
+
+# ---------------------------------------------------------------------------
+# Memory ID resolution (issue #114)
+# ---------------------------------------------------------------------------
+
+def test_resolve_memory_id_to_db_path_none_uses_default():
+    """No memory_id -> returns the default path."""
+    result = resolve_memory_id_to_db_path(None)
+    assert result == DEFAULT_DB_PATH
+
+
+def test_resolve_memory_id_to_db_path_empty_string_uses_default():
+    """Empty string memory_id -> returns the default path."""
+    result = resolve_memory_id_to_db_path("")
+    assert result == DEFAULT_DB_PATH
+
+
+def test_resolve_memory_id_to_db_path_valid_id():
+    """Valid memory_id creates path runs/memory/<id>/memory.db."""
+    result = resolve_memory_id_to_db_path("gpt5")
+    assert result == DEFAULT_DB_PATH.parent / "gpt5" / "memory.db"
+
+
+def test_resolve_memory_id_to_db_path_valid_id_with_numbers():
+    """Memory ID with numbers is valid."""
+    result = resolve_memory_id_to_db_path("model1v2")
+    assert result == DEFAULT_DB_PATH.parent / "model1v2" / "memory.db"
+
+
+def test_resolve_memory_id_to_db_path_valid_id_with_hyphens_underscores_dots():
+    """Memory ID with valid special characters."""
+    result = resolve_memory_id_to_db_path("my-model_v2.0")
+    assert result == DEFAULT_DB_PATH.parent / "my-model_v2.0" / "memory.db"
+
+
+def test_resolve_memory_id_to_db_path_from_env_var(monkeypatch):
+    """TRADINGAGENTS_MEMORY_ID env var is used when no arg given."""
+    monkeypatch.setenv("TRADINGAGENTS_MEMORY_ID", "ollama-qwen")
+    result = resolve_memory_id_to_db_path(None)
+    assert result == DEFAULT_DB_PATH.parent / "ollama-qwen" / "memory.db"
+
+
+def test_resolve_memory_id_to_db_path_arg_overrides_env(monkeypatch):
+    """Memory_id argument wins over env var."""
+    monkeypatch.setenv("TRADINGAGENTS_MEMORY_ID", "from-env")
+    result = resolve_memory_id_to_db_path("from-arg")
+    assert result == DEFAULT_DB_PATH.parent / "from-arg" / "memory.db"
+
+
+def test_resolve_memory_id_to_db_path_empty_env_var_falls_back():
+    """Empty env var is treated as unset, falls back to default."""
+    import os
+    old_val = os.environ.get("TRADINGAGENTS_MEMORY_ID")
+    try:
+        os.environ["TRADINGAGENTS_MEMORY_ID"] = ""
+        result = resolve_memory_id_to_db_path(None)
+        assert result == DEFAULT_DB_PATH
+    finally:
+        if old_val is not None:
+            os.environ["TRADINGAGENTS_MEMORY_ID"] = old_val
+        else:
+            os.environ.pop("TRADINGAGENTS_MEMORY_ID", None)
+
+
+def test_resolve_memory_id_to_db_path_rejects_leading_underscore():
+    """Memory ID starting with special char is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("_invalid")
+
+
+def test_resolve_memory_id_to_db_path_rejects_leading_hyphen():
+    """Memory ID starting with hyphen is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("-invalid")
+
+
+def test_resolve_memory_id_to_db_path_rejects_leading_dot():
+    """Memory ID starting with dot is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path(".invalid")
+
+
+def test_resolve_memory_id_to_db_path_rejects_slash():
+    """Memory ID containing / is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("dir/file")
+
+
+def test_resolve_memory_id_to_db_path_rejects_backslash():
+    """Memory ID containing \\ is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("dir\\file")
+
+
+def test_resolve_memory_id_to_db_path_rejects_parent_dir():
+    """Memory ID containing .. is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("../escaped")
+
+
+def test_resolve_memory_id_to_db_path_rejects_embedded_parent_dir():
+    """Memory ID containing .. anywhere (not just leading) is rejected.
+
+    The pattern alone (^[A-Za-z0-9][A-Za-z0-9._-]*$) would accept "foo..bar"
+    since "." is an allowed character, but the issue requires rejecting any
+    occurrence of ".." outright.
+    """
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("foo..bar")
+
+
+def test_resolve_memory_id_to_db_path_rejects_space():
+    """Memory ID containing space is rejected."""
+    with pytest.raises(ValueError, match="Invalid memory_id"):
+        resolve_memory_id_to_db_path("my model")
+
+
+def test_resolve_memory_id_to_db_path_rejects_special_chars():
+    """Memory ID with disallowed special chars is rejected."""
+    for invalid in ["model@1", "model#1", "model$1", "model%1", "model&1"]:
+        with pytest.raises(ValueError, match="Invalid memory_id"):
+            resolve_memory_id_to_db_path(invalid)

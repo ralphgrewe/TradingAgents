@@ -1208,3 +1208,142 @@ class TestStructuredContentParsing:
         assert result[0]["decision_date"] == "2026-01-01"
         assert result[1]["decision_date"] == "2026-01-02"
         assert result[2]["decision_date"] == "2026-01-03"
+
+
+class TestDBPathDefault:
+    """Tests for MemoryMCPClient's db_path default (issue #114)."""
+
+    @pytest.fixture
+    def connected_client(self, mock_client_session):
+        """Client with mocked connection for tool call testing."""
+        client = MemoryMCPClient(url="http://example.com/mcp", transport="streamable-http")
+        client._session = mock_client_session
+        client._loop = asyncio.new_event_loop()
+        yield client
+        client._loop.close()
+
+    def test_client_init_stores_db_path(self):
+        """Client __init__ accepts and stores db_path argument."""
+        client = MemoryMCPClient(db_path="/custom/path/memory.db")
+        assert client.db_path == "/custom/path/memory.db"
+
+    def test_client_init_db_path_defaults_to_none(self):
+        """Without explicit db_path, client stores None (no default)."""
+        client = MemoryMCPClient()
+        assert client.db_path is None
+
+    def test_store_decision_applies_default_db_path(
+        self, connected_client, mock_call_tool_result
+    ):
+        """store_decision uses client's db_path when not specified."""
+        content = MagicMock()
+        content.text = json.dumps(True)
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/custom/memory.db"
+
+        connected_client.store_decision(
+            "trader", "AAPL", "2026-07-01", "BUY",
+            confidence=0.7, key_drivers=None, thesis=None,
+            # db_path not specified — should use client default
+        )
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/custom/memory.db"
+
+    def test_store_decision_explicit_db_path_overrides_default(
+        self, connected_client, mock_call_tool_result
+    ):
+        """store_decision's db_path arg overrides client default."""
+        content = MagicMock()
+        content.text = json.dumps(True)
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/default/memory.db"
+
+        connected_client.store_decision(
+            "trader", "AAPL", "2026-07-01", "BUY",
+            confidence=0.7, key_drivers=None, thesis=None,
+            db_path="/explicit/memory.db",  # overrides client default
+        )
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/explicit/memory.db"
+
+    def test_resolve_pending_applies_default_db_path(
+        self, connected_client, mock_call_tool_result
+    ):
+        """resolve_pending uses client's db_path when not specified."""
+        content = MagicMock()
+        content.text = json.dumps([])
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/custom/memory.db"
+
+        connected_client.resolve_pending(ticker="AAPL")
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/custom/memory.db"
+
+    def test_get_past_context_applies_default_db_path(
+        self, connected_client, mock_call_tool_result
+    ):
+        """get_past_context uses client's db_path when not specified."""
+        content = MagicMock()
+        content.text = json.dumps("No past context")
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/custom/memory.db"
+
+        connected_client.get_past_context("trader", "AAPL")
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/custom/memory.db"
+
+    def test_get_statistics_applies_default_db_path(
+        self, connected_client, mock_call_tool_result
+    ):
+        """get_statistics uses client's db_path when not specified."""
+        content = MagicMock()
+        content.text = json.dumps({"filters": {}})
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/custom/memory.db"
+
+        connected_client.get_statistics(agent="trader")
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/custom/memory.db"
+
+    def test_get_decisions_applies_default_db_path(
+        self, connected_client, mock_call_tool_result
+    ):
+        """get_decisions uses client's db_path when not specified."""
+        content = MagicMock()
+        content.text = json.dumps([])
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = "/custom/memory.db"
+
+        connected_client.get_decisions("trader", "AAPL")
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] == "/custom/memory.db"
+
+    def test_no_default_db_path_passes_none_to_tool(
+        self, connected_client, mock_call_tool_result
+    ):
+        """When client has no default, None is passed to the tool."""
+        content = MagicMock()
+        content.text = json.dumps(True)
+        mock_call_tool_result.content = [content]
+        connected_client._session.call_tool = AsyncMock(return_value=mock_call_tool_result)
+        connected_client.db_path = None
+
+        connected_client.store_decision(
+            "trader", "AAPL", "2026-07-01", "BUY",
+            confidence=0.7, key_drivers=None, thesis=None,
+        )
+
+        call_args = connected_client._session.call_tool.call_args
+        assert call_args[0][1]["db_path"] is None

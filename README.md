@@ -133,6 +133,28 @@ OPENAI_API_KEY=... ./venv/bin/python run_trading_agents.py stocks.json \
 See the docstring at the top of `run_trading_agents.py` for the full flag reference (portfolio
 mode, report directory, etc.).
 
+### Isolating decision memory per model/configuration (optional)
+
+By default, every run shares one SQLite decision-memory store at `runs/memory/memory.db`. If
+you run the same stock list under different models or configurations, their decisions land in
+the same DB and contaminate each other's history (each run injects past context from that DB
+into the agent prompts). `--memory-id` gives each configuration its own isolated history:
+
+```bash
+./venv/bin/python run_trading_agents.py stocks.json --memory-id gpt5
+./venv/bin/python run_trading_agents.py stocks.json --memory-id ollama-qwen
+```
+
+This writes to `runs/memory/gpt5/memory.db` and `runs/memory/ollama-qwen/memory.db`
+respectively, instead of the shared default. `TRADINGAGENTS_MEMORY_ID` sets the same thing via
+environment variable (useful for `cli/main.py` and the MCP server's `analyze_stock` tool, which
+don't have a `--memory-id` flag). Precedence when both a flag/config value and env vars are
+present: `--memory-id` > `TRADINGAGENTS_MEMORY_ID` > `TRADINGAGENTS_MEMORY_DB_PATH` > default.
+Memory IDs must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (no `/`, `\`, `..`, or empty string) since
+they become a directory name; an invalid ID exits with an error before the run starts. With no
+`--memory-id` and no `TRADINGAGENTS_MEMORY_ID` set, behavior is unchanged from before this
+option existed.
+
 ## Starting the memory MCP server
 
 `mcp_server.py` exposes the pipeline and the shared decision-memory store as MCP tools

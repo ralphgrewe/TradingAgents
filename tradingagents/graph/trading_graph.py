@@ -329,7 +329,17 @@ class TradingAgentsGraph:
         # or a failing tool call (MemoryMCPToolError) both propagate and fail
         # the run rather than being logged and swallowed — a deliberate
         # behavior change from the prior in-process warn-and-continue pattern.
-        with MemoryMCPClient() as memory_client:
+        # Resolve the memory ID to a DB path (issue #114) — if set, creates
+        # an isolated decision history for this run.
+        from tradingagents.memory.store import resolve_memory_id_to_db_path
+
+        memory_id = self.config.get("memory_id")
+        try:
+            resolved_db_path = resolve_memory_id_to_db_path(memory_id)
+        except ValueError as e:
+            raise ValueError(f"Invalid memory_id configuration: {e}") from e
+
+        with MemoryMCPClient(db_path=str(resolved_db_path)) as memory_client:
             self._memory_client = memory_client
 
             # Resolve any pending decisions in the SQLite memory core.
