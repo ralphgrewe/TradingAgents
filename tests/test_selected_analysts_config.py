@@ -135,7 +135,7 @@ class TestValidation:
         config = dc.DEFAULT_CONFIG.copy()
         config["selected_analysts"] = ["market", "invalid_analyst", "news"]
 
-        with pytest.raises(ValueError, match="unknown analyst: 'invalid_analyst'"):
+        with pytest.raises(ValueError, match="unknown analyst key: invalid_analyst"):
             TradingAgentsGraph(selected_analysts=None, config=config)
 
         _reload_with_env(monkeypatch)

@@ -145,24 +145,34 @@ class TradingAgentsGraph:
     def _validate_selected_analysts(self, selected_analysts) -> None:
         """Validate that selected_analysts is valid before graph setup.
 
+        Delegates the actual emptiness/membership checks to
+        ``build_analyst_execution_plan`` — the same function
+        ``self.graph_setup.setup_graph`` calls moments later — so the set of
+        known analyst keys (``ANALYST_NODE_SPECS``) and the "non-empty list"
+        invariant are enforced in exactly one place instead of being
+        duplicated (and risking drift) here. This method only adds the
+        type check (rejecting non-list/tuple inputs, e.g. a bare string,
+        which ``build_analyst_execution_plan`` would otherwise iterate
+        character-by-character) and re-raises with the constructor's error
+        framing.
+
         Raises ValueError with clear error messages if:
+        - selected_analysts is not a list/tuple
         - The list is empty
         - Any entry is not a known analyst type
         """
-        from .analyst_execution import ANALYST_NODE_SPECS
-
-        if not selected_analysts:
-            raise ValueError("selected_analysts must be a non-empty list")
+        from .analyst_execution import ANALYST_NODE_SPECS, build_analyst_execution_plan
 
         if not isinstance(selected_analysts, (list, tuple)):
             raise ValueError(f"selected_analysts must be a list, got {type(selected_analysts).__name__}")
 
-        valid_analysts = set(ANALYST_NODE_SPECS.keys())
-        for analyst in selected_analysts:
-            if analyst not in valid_analysts:
-                raise ValueError(
-                    f"unknown analyst: '{analyst}'. Valid options are: {', '.join(sorted(valid_analysts))}"
-                )
+        try:
+            build_analyst_execution_plan(selected_analysts)
+        except ValueError as exc:
+            if not selected_analysts:
+                raise ValueError("selected_analysts must be a non-empty list") from exc
+            valid_analysts = ", ".join(sorted(ANALYST_NODE_SPECS.keys()))
+            raise ValueError(f"{exc}. Valid options are: {valid_analysts}") from exc
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
