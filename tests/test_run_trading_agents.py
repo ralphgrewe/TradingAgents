@@ -1909,6 +1909,107 @@ class RunTradingAgentsTickersAndStocksFileTests(_TempStockFileTestCase):
         output_str = output.getvalue()
         self.assertIn('Cannot combine multiple stocks sources', output_str)
 
+    def test_flags_given_but_no_stocks_source_fails(self):
+        """Flags given (e.g. --llm-provider) but no stocks source → exit 1, not help/exit 0.
+
+        Regression test for issue #125 design-review bug #1: the no-args
+        guard previously only checked the three stocks-source args
+        (json_file/stocks_file/tickers), so any invocation with zero stocks
+        sources but other flags given incorrectly took the help/exit-0
+        path instead of falling through to the "no active stocks source"
+        exit-1 branch.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--llm-provider', 'mistral',
+                              '--deep-think-llm', 'mistral-large',
+                              '--quick-think-llm', 'mistral-small']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('No stocks source provided', output_str)
+        self.assertIn('positional JSON file', output_str)
+        self.assertIn('--stocks-file', output_str)
+        self.assertIn('--tickers', output_str)
+        # Must NOT be the help/exit-0 path.
+        self.assertNotIn('usage:', output_str.lower())
+
+    def test_tickers_empty_string_fails(self):
+        """`--tickers ""` (empty value) → exit 1, not the no-args help/exit-0 path.
+
+        Regression test for issue #125 design-review bug #2: truthiness
+        checks (`not args.tickers`) treated an explicitly-given empty
+        string the same as "flag omitted", so `--tickers ""` fell through
+        to the no-args guard and silently printed help/exit(0) instead of
+        exiting 1 with a clear error.
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', '--tickers', '']),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('Error', output_str)
+        self.assertIn('empty', output_str.lower())
+        # Must NOT be the help/exit-0 path.
+        self.assertNotIn('usage:', output_str.lower())
+
+    def test_config_file_plus_stocks_file_rejected(self):
+        """Test that config file + --stocks-file is rejected via #124 mixing check.
+
+        AC4 requires both --stocks-file and --tickers to participate in the
+        #124 config-file-mixing check; only the --tickers variant existed
+        previously (test_config_file_plus_tickers_rejected).
+        """
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        import run_trading_agents
+
+        config_file = Path(self.temp_dir.name) / "config.json"
+        config_file.write_text(json.dumps({
+            "stocks_file": str(self.stock_list_file),
+            "llm_provider": "ollama",
+        }))
+
+        other_stocks_file = Path(self.temp_dir.name) / "other_stocks.json"
+        other_stocks_file.write_text(json.dumps([{"ticker": "AAPL"}]))
+
+        output = io.StringIO()
+        with (
+            patch('sys.argv', ['run_trading_agents.py', str(config_file),
+                              '--stocks-file', str(other_stocks_file)]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_trading_agents.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        output_str = output.getvalue()
+        self.assertIn('exclusive', output_str.lower())
+        self.assertIn('--stocks-file', output_str)
+
 
 @pytest.mark.unit
 class RunTradingAgentsEnvVarPrecedenceTests(_TempStockFileTestCase):

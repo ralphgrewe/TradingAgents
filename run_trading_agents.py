@@ -209,6 +209,20 @@ _CONFIG_FILE_FLAG_KEYS = (
 )
 _CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", "config", *_CONFIG_FILE_FLAG_KEYS})
 
+# Single source of truth (issue #125): the two CLI-only flags that select a
+# stocks source (positional JSON, --stocks-file, --tickers are mutually
+# exclusive). Kept separate from _CONFIG_FILE_FLAG_KEYS on purpose:
+# `stocks_file`/`tickers` DO participate in the #124 config-file-vs-CLI
+# mutual-exclusion check (a config file cannot be combined with either), but
+# they must NOT be merged into args the way _CONFIG_FILE_FLAG_KEYS entries
+# are in the config-file-mode merge loop below — a config file gets its
+# stock list from its own `stocks_file` key (see _resolve_stocks_file_path),
+# not from a CLI flag. Every call site that needs to know about these two
+# flags (the #124 mixing check, the "was anything explicitly given" no-args
+# guard, and the stocks-source mutual-exclusivity check) reads from this one
+# tuple so the flag names can't drift out of sync between them.
+_STOCKS_SOURCE_FLAG_KEYS = ("stocks_file", "tickers")
+
 
 def _type_is_compatible(value, reference) -> bool:
     """Check if a JSON value's type is compatible with a DEFAULT_CONFIG default.
@@ -430,6 +444,44 @@ def _resolve_stocks_file_path(stocks_file: str, config_path: str | None) -> str:
     return str(stocks_path)
 
 
+def _load_json_stock_list(path: str, *, context: str = "") -> list:
+    """Load and validate a stock-list JSON array from `path`.
+
+    Shared by --stocks-file and a run config file's own `stocks_file` key so
+    the "missing file" / "malformed JSON" / "not an array" wording and
+    behavior can't drift apart between the two call sites (issue #125
+    design review flagged the previous near-verbatim copy-paste).
+
+    Args:
+        path: filesystem path to open (already resolved relative to cwd or
+            the config file's directory, as appropriate — this function
+            does no path resolution of its own).
+        context: appended to error messages to disambiguate the config-file
+            case, e.g. " (from config)". The CLI --stocks-file case passes
+            the default "".
+
+    Returns:
+        The parsed JSON value, guaranteed to be a list.
+
+    Exits the process with code 1 (does not return) on any load or
+    validation failure.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: stocks_file '{path}'{context} not found")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON format in stocks_file '{path}'{context}")
+        sys.exit(1)
+
+    if not isinstance(data, list):
+        print(f"Error: stocks_file '{path}'{context} should contain an array of stock objects")
+        sys.exit(1)
+    return data
+
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run Trading Agents for stocks from JSON file or run config file')
@@ -468,8 +520,23 @@ def main():
                              '(default: off, uses runs/memory/memory.db).')
     args = parser.parse_args()
 
-    # No arguments case: print help to stdout and exit 0 (issue #124)
-    if not args.json_file and not args.stocks_file and not args.tickers:
+    # No arguments case: print help to stdout and exit 0 (issue #124). This
+    # must fire ONLY when literally nothing was given — no positional AND no
+    # flag of any kind explicitly set. Checking `is None` (not truthiness)
+    # for every recognized flag distinguishes "flag omitted" from "flag
+    # given with an empty/falsy value" (e.g. `--tickers ""`), and checking
+    # every flag (not just the three stocks-source ones) is what makes this
+    # genuinely the "zero arguments" case rather than "zero stocks sources"
+    # — a run given `--llm-provider mistral` alone but no stocks source is a
+    # user error (see the "no active stocks source" check below), not a
+    # request for help (issue #125 design review; previously the guard only
+    # checked the three stocks-source args, so e.g. `--llm-provider mistral`
+    # with no ticker source incorrectly printed help and exited 0 instead of
+    # falling through to the exit-1 branch).
+    if args.json_file is None and all(
+        getattr(args, key) is None
+        for key in (*_CONFIG_FILE_FLAG_KEYS, *_STOCKS_SOURCE_FLAG_KEYS)
+    ):
         parser.print_help()
         sys.exit(0)
 
@@ -503,11 +570,13 @@ def main():
                 flag_name for flag_name in _CONFIG_FILE_FLAG_KEYS
                 if getattr(args, flag_name) is not None
             ]
-            # --stocks-file and --tickers are stocks sources, not config-file flags
-            if args.stocks_file is not None:
-                explicitly_given_flags.append('stocks_file')
-            if args.tickers is not None:
-                explicitly_given_flags.append('tickers')
+            # --stocks-file and --tickers are stocks sources, not config-file
+            # flags — read from the shared _STOCKS_SOURCE_FLAG_KEYS tuple
+            # (issue #125 AC4) rather than naming them again here.
+            explicitly_given_flags.extend(
+                flag_name for flag_name in _STOCKS_SOURCE_FLAG_KEYS
+                if getattr(args, flag_name) is not None
+            )
 
             if explicitly_given_flags:
                 # Format the flag names back to CLI spelling (e.g., "llm_provider" → "--llm-provider")
@@ -549,33 +618,32 @@ def main():
             print("Error: No stocks source provided. Use one of: positional JSON file, --stocks-file, or --tickers")
             sys.exit(1)
 
-    if not is_config_file and args.stocks_file:
+    # `is not None` (not truthiness) is deliberate here: it distinguishes
+    # "flag omitted" from "flag given with an empty/falsy value" (e.g.
+    # `--tickers ""`, or in principle `--stocks-file ""`), so the empty case
+    # falls through to this branch's own validation/error handling instead
+    # of silently being treated as if the flag were never given (issue #125
+    # design review bug #2).
+    if not is_config_file and args.stocks_file is not None:
         # Load from --stocks-file (resolved relative to cwd, not config dir)
-        try:
-            with open(args.stocks_file) as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            print(f"Error: File '{args.stocks_file}' not found")
-            sys.exit(1)
-        except json.JSONDecodeError:
-            print(f"Error: Invalid JSON format in '{args.stocks_file}'")
-            sys.exit(1)
-
-        if not isinstance(data, list):
-            print(f"Error: stocks_file '{args.stocks_file}' should contain an array of stock objects")
-            sys.exit(1)
-        stocks = data
-    elif not is_config_file and args.tickers:
-        # Parse comma-separated tickers and convert to stock list
+        stocks = _load_json_stock_list(args.stocks_file)
+    elif not is_config_file and args.tickers is not None:
+        # Parse comma-separated tickers and convert to stock list. An empty
+        # string (`--tickers ""`) splits to `['']`, whose single entry is
+        # empty after stripping, so it correctly falls into the "empty
+        # entry" error below rather than silently producing a zero-ticker
+        # run.
         ticker_strings = args.tickers.split(',')
         tickers_list = []
         for ticker_str in ticker_strings:
             ticker = ticker_str.strip()
             if not ticker:  # Empty after stripping
-                print("Error: --tickers contains an empty entry (e.g., 'AAPL,,MSFT' or trailing comma)")
+                print("Error: --tickers contains an empty entry (e.g., 'AAPL,,MSFT', a trailing comma, or an empty value)")
                 sys.exit(1)
             tickers_list.append(ticker)
 
+        # Unreachable in practice (an empty ticker_strings entry is always
+        # caught by the loop above), kept as a defensive fallback.
         if not tickers_list:
             print("Error: --tickers must contain at least one ticker")
             sys.exit(1)
@@ -587,21 +655,7 @@ def main():
     if config_data:
         stocks_file = config_data.get("stocks_file")
         stocks_file = _resolve_stocks_file_path(stocks_file, config_path)
-
-        # Load the stock list from the resolved path
-        try:
-            with open(stocks_file) as f:
-                stocks = json.load(f)
-        except FileNotFoundError:
-            print(f"Error: stocks_file '{stocks_file}' (from config) not found")
-            sys.exit(1)
-        except json.JSONDecodeError:
-            print(f"Error: Invalid JSON format in stocks_file '{stocks_file}' (from config)")
-            sys.exit(1)
-
-        if not isinstance(stocks, list):
-            print(f"Error: stocks_file '{stocks_file}' should contain an array of stock objects")
-            sys.exit(1)
+        stocks = _load_json_stock_list(stocks_file, context=" (from config)")
 
         # Merge config file values into args, respecting precedence: CLI > config > defaults
         # For each key, use: CLI value (if provided) > config value > existing arg default (None)
@@ -719,8 +773,11 @@ def main():
         print(f"Error: LLM provider '{effective_provider}' requires environment variable '{api_key_env}' to be set")
         sys.exit(1)
 
-    # Validate --tickers + --use-dates-from-json (mutually incompatible)
-    if args.tickers and args.use_dates_from_json:
+    # Validate --tickers + --use-dates-from-json (mutually incompatible).
+    # By this point args.tickers, if given at all, has already been
+    # validated non-empty above, but `is not None` is used for consistency
+    # with the "was this flag given" checks earlier in main().
+    if args.tickers is not None and args.use_dates_from_json:
         print("Error: --tickers cannot be combined with --use-dates-from-json")
         print("       --tickers always runs each ticker against today's date.")
         print("       If you need per-ticker dates, use --stocks-file instead.")
