@@ -86,6 +86,18 @@ class FredConfigTests(unittest.TestCase):
         # Routing relies on this subclassing for "vendor unavailable" handling.
         self.assertTrue(issubclass(fred.FredNotConfiguredError, ValueError))
 
+    def test_get_macro_data_propagates_not_configured(self):
+        # Regression (issue #131): get_macro_data catches ValueError around the
+        # shared _fetch_series_meta helper to report an unknown series. Because
+        # FredNotConfiguredError *is* a ValueError, a missing key must be
+        # re-raised there rather than swallowed into a bare string — only then
+        # does route_to_vendor's VendorNotConfiguredError handling produce the
+        # standard DATA_UNAVAILABLE sentinel. Calls the real function, not a
+        # VENDOR_METHODS stub.
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                self.assertRaises(fred.FredNotConfiguredError):
+            fred.get_macro_data("unemployment", "2025-09-30", 365)
+
 
 @pytest.mark.unit
 class FredFormattingTests(unittest.TestCase):
@@ -201,6 +213,16 @@ class FredRoutingTests(unittest.TestCase):
             {"get_macro_indicators": {"fred": _unconfigured}},
             clear=False,
         ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
+        self.assertIn("DATA_UNAVAILABLE", out)
+
+    def test_real_vendor_method_degrades_gracefully_without_key(self):
+        # Same as above but end-to-end through the *real* fred.get_macro_data
+        # (no VENDOR_METHODS stub): with FRED_API_KEY unset the exception must
+        # travel all the way to route_to_vendor's sentinel. Guards issue #131's
+        # "get_macro_indicators keeps working unchanged" acceptance criterion.
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        with mock.patch.dict("os.environ", {}, clear=True):
             out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
         self.assertIn("DATA_UNAVAILABLE", out)
 

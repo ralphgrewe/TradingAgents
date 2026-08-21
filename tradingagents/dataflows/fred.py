@@ -216,7 +216,15 @@ def get_macro_data(
 
     try:
         info = _fetch_series_meta(series_id)
+    except VendorNotConfiguredError:
+        # A missing FRED_API_KEY is a *vendor* problem, not a bad argument: let
+        # it propagate to route_to_vendor, whose except VendorNotConfiguredError
+        # emits the standard "DATA_UNAVAILABLE: ..." sentinel every optional
+        # category shares. Catching it here (it is a ValueError subclass) would
+        # silently swap that sentinel for a bare message.
+        raise
     except ValueError as e:
+        # Genuine "series not found": actionable guidance, not a crash.
         return str(e)
     title = info.get("title", series_id)
     units = info.get("units_short") or info.get("units", "")
