@@ -89,7 +89,7 @@ def format_analyst_reports_section(
         )
 
     if news_report and isinstance(news_report, str):
-        reports_to_include.append(f"Latest world affairs news (JSON envelope): {news_report}")
+        reports_to_include.append(f"Latest company news (JSON envelope): {news_report}")
 
     if fundamentals_report and isinstance(fundamentals_report, str):
         label = fundamentals_report_label(asset_type)

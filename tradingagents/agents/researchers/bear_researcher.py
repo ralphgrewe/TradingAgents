@@ -36,7 +36,7 @@ Resources available:
 
 Market research report (JSON envelope): {market_research_report}
 Social media sentiment report (JSON envelope): {sentiment_report}
-Latest world affairs news (JSON envelope): {news_report}
+Latest company news (JSON envelope): {news_report}
 {fundamentals_label} (JSON envelope): {fundamentals_report}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}

@@ -25,7 +25,7 @@ Your task is to create a compelling case for the trader's decision by questionin
 
 Market Research Report (JSON envelope): {market_research_report}
 Social Media Sentiment Report (JSON envelope): {sentiment_report}
-Latest World Affairs Report (JSON envelope): {news_report}
+Latest Company News Report (JSON envelope): {news_report}
 Company Fundamentals Report (JSON envelope): {fundamentals_report}
 Here is the current conversation history: {history} Here are the last arguments from the conservative analyst: {current_conservative_response} Here are the last arguments from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 

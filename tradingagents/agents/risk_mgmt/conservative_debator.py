@@ -25,7 +25,7 @@ Your task is to actively counter the arguments of the Aggressive and Neutral Ana
 
 Market Research Report (JSON envelope): {market_research_report}
 Social Media Sentiment Report (JSON envelope): {sentiment_report}
-Latest World Affairs Report (JSON envelope): {news_report}
+Latest Company News Report (JSON envelope): {news_report}
 Company Fundamentals Report (JSON envelope): {fundamentals_report}
 Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 

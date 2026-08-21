@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-08-21 21:59:22",
+  "stocks": [
+    {
+      "ticker": "AAPL",
+      "date": "2026-08-21",
+      "data": {
+        "ticker": "AAPL",
+        "rating": "N/A",
+        "executive_summary": "N/A",
+        "investment_thesis": "N/A",
+        "price_target": null,
+        "time_horizon": null,
+        "action": "N/A",
+        "reasoning": "N/A",
+        "entry_price": null,
+        "stop_loss": null,
+        "position_sizing": null
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "date": "2026-08-21",
+      "data": {
+        "ticker": "MSFT",
+        "rating": "N/A",
+        "executive_summary": "N/A",
+        "investment_thesis": "N/A",
+        "price_target": null,
+        "time_horizon": null,
+        "action": "N/A",
+        "reasoning": "N/A",
+        "entry_price": null,
+        "stop_loss": null,
+        "position_sizing": null
+      }
+    }
+  ],
+  "summary": {
+    "total_stocks_analyzed": 2,
+    "stocks": [
+      {
+        "ticker": "AAPL",
+        "date": "2026-08-21",
+        "rating": "N/A",
+        "action": "N/A",
+        "entry_price": null,
+        "stop_loss": null
+      },
+      {
+        "ticker": "MSFT",
+        "date": "2026-08-21",
+        "rating": "N/A",
+        "action": "N/A",
+        "entry_price": null,
+        "stop_loss": null
+      }
+    ]
+  }
+}

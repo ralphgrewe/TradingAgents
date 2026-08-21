@@ -1,0 +1,10 @@
+{
+    "stocks_file": "stocks.json",
+    "llm_provider": "ollama",
+    "deep_think_llm": "ministral-3:8b",
+    "quick_think_llm": "ministral-3:3b",
+    "portfolio": true,
+    "style": "aggressive",
+    "depot_id": "SAMPLE_02",
+    "memory_id": "SAMPLE_02"
+}

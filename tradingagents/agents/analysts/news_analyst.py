@@ -8,7 +8,6 @@ from tradingagents.agents.analysts.news_computation import (
     derive_signal_and_confidence,
 )
 from tradingagents.agents.utils.agent_utils import (
-    get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
     get_news,
@@ -22,10 +21,9 @@ def create_news_analyst(llm):
         instrument_context = get_instrument_context_from_state(state)
 
         # Step 1: Fetch news using existing tools via agent-with-tools loop
-        # The agent will call get_news and get_global_news as needed and aggregate results
+        # The agent will call get_news to fetch ticker-specific news
         tools = [
             get_news,
-            get_global_news,
         ]
 
         # Step 2: LLM fetches news and scores articles internally, outputting structured JSON
@@ -37,7 +35,7 @@ def create_news_analyst(llm):
         system_message = f"""You are a financial news analyst for {ticker} on {current_date}.
 
 Your task:
-1. Fetch recent news articles using the available tools (get_news for ticker-specific, get_global_news for macroeconomic)
+1. Fetch recent news articles about {ticker} using the available tool (get_news)
 2. For each article, internally score:
    - **Fundamentals impact**: POSITIVE/NEUTRAL/NEGATIVE with confidence 0.0-1.0
    - **Market sentiment**: POSITIVE/NEUTRAL/NEGATIVE with confidence 0.0-1.0

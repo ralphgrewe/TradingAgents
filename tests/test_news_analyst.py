@@ -362,3 +362,34 @@ class TestNewsAnalystJsonEnvelope:
         envelope = json.loads(result["news_report"])
         # Mean = 0.4, which is NOT > 0.4, so should be LOW
         assert envelope["confidence"] == "LOW"
+
+    def test_news_analyst_binds_exactly_one_tool(self):
+        """News analyst should bind exactly one tool (get_news for ticker-specific news).
+
+        This test ensures that the news analyst no longer uses get_global_news,
+        per issue #130.
+        """
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = json.dumps(_make_sample_news_output())
+        mock_llm = MagicMock(return_value=mock_response)
+        llm.bind_tools.return_value = mock_llm
+
+        with patch(
+            "tradingagents.agents.analysts.news_analyst.get_instrument_context_from_state",
+            return_value="Test context",
+        ):
+            node = create_news_analyst(llm)
+            node(_make_state())
+
+        # Verify bind_tools was called exactly once
+        assert llm.bind_tools.call_count == 1
+
+        # Verify that bind_tools was called with a list containing exactly one tool
+        call_args = llm.bind_tools.call_args
+        tools_list = call_args[0][0]  # First positional argument
+        assert len(tools_list) == 1, f"Expected 1 tool, got {len(tools_list)}: {[t.name for t in tools_list]}"
+
+        # Verify the single tool is get_news
+        tool = tools_list[0]
+        assert tool.name == "get_news", f"Expected 'get_news' tool, got '{tool.name}'"

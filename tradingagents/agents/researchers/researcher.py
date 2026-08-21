@@ -346,7 +346,7 @@ Each query should be specific and focused. Avoid vague or overlapping searches.{
 Analyst Reports:
 {f"- Market research report (JSON envelope): {market_report}" if market_report else ""}
 {f"- Social media sentiment report (JSON envelope): {sentiment_report}" if sentiment_report else ""}
-{f"- Latest world affairs news (JSON envelope): {news_report}" if news_report else ""}
+{f"- Latest company news (JSON envelope): {news_report}" if news_report else ""}
 {f"- Fundamentals report (JSON envelope): {fundamentals_report}" if fundamentals_report else ""}
 
 ---

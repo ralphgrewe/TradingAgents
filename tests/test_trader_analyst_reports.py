@@ -124,7 +124,7 @@ class TestTraderAnalystReportsSection:
 
         assert "Market research report (JSON envelope):" in result
         assert "Social media sentiment report (JSON envelope):" in result
-        assert "Latest world affairs news (JSON envelope):" in result
+        assert "Latest company news (JSON envelope):" in result
         assert "Company fundamentals report (JSON envelope):" in result
 
     def test_reading_instructions_present_when_reports_exist(self):
@@ -152,7 +152,7 @@ class TestTraderAnalystReportsSection:
         result = trader_format(market, sentiment, news, fundamentals)
 
         assert "Market research report (JSON envelope):" in result
-        assert "Latest world affairs news (JSON envelope):" in result
+        assert "Latest company news (JSON envelope):" in result
         # These should NOT be in the output
         assert "Social media sentiment report (JSON envelope):" not in result
         assert "Company fundamentals report (JSON envelope):" not in result
@@ -199,7 +199,7 @@ class TestTraderAnalystReportsSection:
         assert "Market research report (JSON envelope):" in result
         # Non-string reports should be ignored
         assert "Social media sentiment report (JSON envelope):" not in result
-        assert "Latest world affairs news (JSON envelope):" not in result
+        assert "Latest company news (JSON envelope):" not in result
 
 
 @pytest.mark.unit
@@ -217,7 +217,7 @@ class TestPortfolioManagerAnalystReportsSection:
 
         assert "Market research report (JSON envelope):" in result
         assert "Social media sentiment report (JSON envelope):" in result
-        assert "Latest world affairs news (JSON envelope):" in result
+        assert "Latest company news (JSON envelope):" in result
         assert "Company fundamentals report (JSON envelope):" in result
 
     def test_reading_instructions_present(self):
@@ -240,7 +240,7 @@ class TestPortfolioManagerAnalystReportsSection:
         result = pm_format(None, sentiment, news, None)
 
         assert "Social media sentiment report (JSON envelope):" in result
-        assert "Latest world affairs news (JSON envelope):" in result
+        assert "Latest company news (JSON envelope):" in result
         assert "Market research report (JSON envelope):" not in result
         assert "Company fundamentals report (JSON envelope):" not in result
 
@@ -324,7 +324,7 @@ class TestTraderPromptAssembly:
             # Verify all four reports are in the prompt
             assert "Market research report (JSON envelope):" in user_message
             assert "Social media sentiment report (JSON envelope):" in user_message
-            assert "Latest world affairs news (JSON envelope):" in user_message
+            assert "Latest company news (JSON envelope):" in user_message
             assert "Company fundamentals report (JSON envelope):" in user_message
 
     def test_trader_includes_reading_instructions(self):
@@ -367,7 +367,7 @@ class TestTraderPromptAssembly:
 
             # Only market and news should be in the prompt
             assert "Market research report (JSON envelope):" in user_message
-            assert "Latest world affairs news (JSON envelope):" in user_message
+            assert "Latest company news (JSON envelope):" in user_message
             # These should not be present
             assert "Social media sentiment report (JSON envelope):" not in user_message
             assert "Company fundamentals report (JSON envelope):" not in user_message
@@ -478,7 +478,7 @@ class TestPortfolioManagerPromptAssembly:
             # Verify all four reports are in the prompt
             assert "Market research report (JSON envelope):" in prompt
             assert "Social media sentiment report (JSON envelope):" in prompt
-            assert "Latest world affairs news (JSON envelope):" in prompt
+            assert "Latest company news (JSON envelope):" in prompt
             assert "Company fundamentals report (JSON envelope):" in prompt
 
     def test_pm_includes_reading_instructions(self):
@@ -521,7 +521,7 @@ class TestPortfolioManagerPromptAssembly:
             assert "Market research report (JSON envelope):" in prompt
             assert "Social media sentiment report (JSON envelope):" in prompt
             # These should not be present
-            assert "Latest world affairs news (JSON envelope):" not in prompt
+            assert "Latest company news (JSON envelope):" not in prompt
             assert "Company fundamentals report (JSON envelope):" not in prompt
 
     def test_pm_includes_investment_plan_and_trader_plan(self):
