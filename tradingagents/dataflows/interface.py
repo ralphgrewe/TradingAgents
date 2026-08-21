@@ -18,6 +18,7 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .macro_pack import get_macro_pack as get_fred_macro_pack
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .tavily_search import get_web_search_results
 from .wiki_search import search_wiki as search_wiki_bm25
@@ -71,6 +72,7 @@ TOOLS_CATEGORIES = {
         "description": "Macroeconomic indicators (rates, inflation, labor, growth)",
         "tools": [
             "get_macro_indicators",
+            "get_macro_pack",
         ]
     },
     "prediction_markets": {
@@ -161,6 +163,9 @@ VENDOR_METHODS = {
     # macro_data
     "get_macro_indicators": {
         "fred": get_fred_macro_data,
+    },
+    "get_macro_pack": {
+        "fred": get_fred_macro_pack,
     },
     # prediction_markets
     "get_prediction_markets": {

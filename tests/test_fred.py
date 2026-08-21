@@ -172,6 +172,21 @@ class FredRoutingTests(unittest.TestCase):
             out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
         self.assertEqual(out, "MACRO_OK")
 
+    def test_macro_pack_category_routes_to_fred(self):
+        # get_macro_pack (issue #131) shares the macro_data category and
+        # routing chain with get_macro_indicators.
+        self.assertEqual(
+            interface.get_category_for_method("get_macro_pack"), "macro_data"
+        )
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_macro_pack": {"fred": lambda *a, **k: {"curr_date": a[0]}}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor("get_macro_pack", "2026-06-01")
+        self.assertEqual(out, {"curr_date": "2026-06-01"})
+
     def test_not_configured_degrades_gracefully(self):
         # macro_data is optional: with only fred and no key, the router degrades
         # to a sentinel instead of aborting the run — a missing optional key must

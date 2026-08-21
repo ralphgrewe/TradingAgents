@@ -133,6 +133,55 @@ def _request(path: str, params: dict) -> dict:
     return response.json()
 
 
+def _fetch_series_meta(series_id: str) -> dict:
+    """Fetch a FRED series' metadata (title/units/frequency/seasonal adjustment).
+
+    Raises ``ValueError`` with an actionable message when ``series_id`` is not
+    a series FRED knows about (an empty ``seriess`` list in the response).
+    Shared by ``get_macro_data`` (prose report) and ``macro_pack`` (structured
+    indicator pack) so both see the same "unknown series" behavior.
+    """
+    meta = _request("series", {"series_id": series_id}).get("seriess") or []
+    if not meta:
+        raise ValueError(
+            f"FRED series '{series_id}' not found. Pass a known alias "
+            f"(e.g. 'cpi', 'unemployment') or a valid FRED series ID."
+        )
+    return meta[0]
+
+
+def _fetch_observations(
+    series_id: str, curr_date: str, look_back_days: int
+) -> list[tuple[str, str]]:
+    """Fetch raw ``(date, value)`` pairs for ``series_id`` in the trailing window.
+
+    Point-in-time safe: ``observation_end`` is pinned to ``curr_date``, so FRED
+    never returns an observation dated after it — a past ``curr_date`` never
+    leaks future data (no ALFRED/``realtime_*`` vintage handling; see the
+    module docstring). FRED's "." missing-value marker is filtered out here so
+    every caller sees only real observations. Shared by ``get_macro_data`` and
+    ``macro_pack``.
+    """
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    start_date = (end_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+
+    observations = _request(
+        "series/observations",
+        {
+            "series_id": series_id,
+            "observation_start": start_date,
+            "observation_end": curr_date,
+            "sort_order": "asc",
+        },
+    ).get("observations", [])
+
+    return [
+        (o["date"], o["value"])
+        for o in observations
+        if o.get("value") not in (".", None, "")
+    ]
+
+
 def get_macro_data(
     indicator: str,
     curr_date: str,
@@ -165,34 +214,16 @@ def get_macro_data(
     except ValueError as e:
         return f"FRED: {e}"
 
-    meta = _request("series", {"series_id": series_id}).get("seriess") or []
-    if not meta:
-        return (
-            f"FRED series '{series_id}' not found. Pass a known alias "
-            f"(e.g. 'cpi', 'unemployment') or a valid FRED series ID."
-        )
-    info = meta[0]
+    try:
+        info = _fetch_series_meta(series_id)
+    except ValueError as e:
+        return str(e)
     title = info.get("title", series_id)
     units = info.get("units_short") or info.get("units", "")
     frequency = info.get("frequency", "")
     seasonal = info.get("seasonal_adjustment_short", "")
 
-    observations = _request(
-        "series/observations",
-        {
-            "series_id": series_id,
-            "observation_start": start_date,
-            "observation_end": curr_date,
-            "sort_order": "asc",
-        },
-    ).get("observations", [])
-
-    # FRED encodes a missing observation as ".".
-    points = [
-        (o["date"], o["value"])
-        for o in observations
-        if o.get("value") not in (".", None, "")
-    ]
+    points = _fetch_observations(series_id, curr_date, look_back_days)
 
     header = (
         f"## FRED: {title} ({series_id})\n"

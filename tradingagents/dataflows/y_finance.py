@@ -69,6 +69,52 @@ def get_YFin_data_online(
 
     return header + csv_string
 
+def get_price_history_points(
+    symbol: Annotated[str, "ticker symbol or instrument symbol (e.g. 'GC=F' for gold)"],
+    curr_date: Annotated[str, "End date in yyyy-mm-dd format; the as-of date"],
+    look_back_days: Annotated[int, "Trailing window length in days"],
+) -> list[tuple[str, float]]:
+    """Fetch raw ``(date, close)`` points for ``symbol`` up to and including
+    ``curr_date``, for callers that need numeric values rather than a
+    formatted report (e.g. ``macro_pack``'s derived-feature computation).
+
+    Point-in-time safe: mirrors ``get_YFin_data_online``'s handling of
+    yfinance's exclusive ``end`` — the request window is extended one day past
+    ``curr_date`` so that day's row is included, while any date after
+    ``curr_date`` is still excluded, so a past ``curr_date`` never leaks
+    future data.
+
+    Raises ``NoMarketDataError`` when the vendor returns no rows (unknown or
+    delisted symbol).
+    """
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    start_dt = end_dt - relativedelta(days=look_back_days)
+
+    canonical = normalize_symbol(symbol)
+    ticker = yf.Ticker(canonical)
+
+    end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
+    data = yf_retry(
+        lambda: ticker.history(start=start_dt.strftime("%Y-%m-%d"), end=end_inclusive)
+    )
+
+    if data.empty:
+        raise NoMarketDataError(
+            symbol, canonical, f"no rows between {start_dt.date()} and {curr_date}"
+        )
+
+    if data.index.tz is not None:
+        data.index = data.index.tz_localize(None)
+
+    points = [
+        (idx.strftime("%Y-%m-%d"), float(row["Close"]))
+        for idx, row in data.iterrows()
+        if idx <= end_dt
+    ]
+    points.sort(key=lambda p: p[0])
+    return points
+
+
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the company"],
     indicator: Annotated[str, "technical indicator to get the analysis and report of"],

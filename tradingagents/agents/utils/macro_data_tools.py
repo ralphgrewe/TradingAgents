@@ -1,3 +1,4 @@
+import json
 from typing import Annotated
 
 from langchain_core.tools import tool
@@ -34,3 +35,36 @@ def get_macro_indicators(
         str: A formatted markdown report of the macro series
     """
     return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+
+
+@tool
+def get_macro_pack(
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the as-of snapshot date"],
+) -> str:
+    """
+    Retrieve the full deterministic macro indicator pack for curr_date: every
+    series in the macro indicator universe (policy rates, Treasury yields,
+    inflation, growth, labor, dollar index, VIX, consumer sentiment, gold, and
+    an explicit "unavailable" slot for CoT), each with Python-computed derived
+    features already attached (latest value, prior value, delta, direction,
+    trailing z-score) rather than raw series requiring further arithmetic.
+    One call replaces the ~15 individual get_macro_indicators calls it would
+    otherwise take to build the same picture. A series that fails to fetch
+    (including a missing FRED_API_KEY) is marked unavailable in its own entry
+    rather than failing the whole pack. Uses the configured macro_data vendor.
+
+    Args:
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: A JSON-formatted indicator pack (or a plain-text
+            "DATA_UNAVAILABLE"/error message when the whole pack could not be
+            built).
+    """
+    pack = route_to_vendor("get_macro_pack", curr_date)
+    if isinstance(pack, str):
+        # An error/degradation sentinel from the routing layer (e.g. the
+        # optional-category DATA_UNAVAILABLE message) — already a plain
+        # message, pass it through unchanged rather than re-wrapping it.
+        return pack
+    return json.dumps(pack, indent=2, sort_keys=True)
