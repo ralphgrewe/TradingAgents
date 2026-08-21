@@ -40,6 +40,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_KNOWLEDGE_BASE_TOOL_MAX_ROUNDS": "knowledge_base_tool_max_rounds",
     "TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE": "data_vendors.knowledge_base",
     "TRADINGAGENTS_SELECTED_ANALYSTS": "selected_analysts",
+    "TRADINGAGENTS_MACRO_NEWS_CATEGORY_CAP": "macro_news_category_cap",
 }
 
 
@@ -189,6 +190,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "ECB Bank of England BOJ central bank policy",
         "oil commodities supply chain energy",
     ],
+    # Per-category article cap for get_macro_news (issue #133): bounds prompt
+    # size after dedup + category tagging + recency ordering, applied per
+    # taxonomy category (monetary_policy, inflation_prices, labor_market,
+    # growth_output, markets_volatility, geopolitical_trade, uncategorized).
+    "macro_news_category_cap": 3,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {

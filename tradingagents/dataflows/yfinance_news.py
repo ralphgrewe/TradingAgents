@@ -131,6 +131,72 @@ def get_news_yfinance(
         return f"Error fetching news for {ticker}: {str(e)}"
 
 
+def get_global_news_articles_yfinance(
+    curr_date: str,
+    look_back_days: int | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Retrieve global/macro news as structured articles (yfinance vendor).
+
+    Same underlying search-query loop as ``get_global_news_yfinance`` (issue
+    #133's macro news pack reuses the existing global-news vendor path, per
+    the decision comment on issue #133) but returns structured data instead
+    of a pre-formatted string, so a downstream deterministic prep layer
+    (dedup / category-tag / cap) can operate on it in Python.
+
+    Args:
+        curr_date: Current date in yyyy-mm-dd format.
+        look_back_days: Days to look back; ``None`` uses
+            ``global_news_lookback_days`` from config.
+        limit: Max articles to fetch; ``None`` uses
+            ``global_news_article_limit`` from config.
+
+    Returns:
+        ``{"vendor": "yfinance", "articles": [article, ...]}`` where each
+        article has ``title``, ``summary``, ``publisher``, ``link``, and
+        ``pub_date`` (a ``datetime`` or ``None``). Articles are deduplicated
+        by title and filtered to the ``[curr_date - look_back_days,
+        curr_date]`` window (look-ahead safe, same as ``_in_news_window``).
+    """
+    config = get_config()
+    if look_back_days is None:
+        look_back_days = config["global_news_lookback_days"]
+    if limit is None:
+        limit = config["global_news_article_limit"]
+    search_queries = config["global_news_queries"]
+
+    all_news: list[dict] = []
+    seen_titles: set[str] = set()
+
+    for query in search_queries:
+        search = yf_retry(lambda q=query: yf.Search(
+            query=q,
+            news_count=limit,
+            enable_fuzzy_query=True,
+        ))
+
+        if search.news:
+            for article in search.news:
+                data = _extract_article_data(article)
+                title = data["title"]
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_news.append(data)
+
+        if len(all_news) >= limit:
+            break
+
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    start_dt = curr_dt - relativedelta(days=look_back_days)
+
+    articles = [
+        data for data in all_news[:limit]
+        if _in_news_window(data["pub_date"], start_dt, curr_dt)
+    ]
+
+    return {"vendor": "yfinance", "articles": articles}
+
+
 def get_global_news_yfinance(
     curr_date: str,
     look_back_days: int | None = None,

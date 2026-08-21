@@ -11,6 +11,7 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
 )
+from .alpha_vantage_news import get_global_news_articles as get_alpha_vantage_global_news_articles
 from .config import get_config
 from .errors import (
     NoMarketDataError,
@@ -32,7 +33,11 @@ from .y_finance import (
     get_stock_stats_indicators_window,
     get_YFin_data_online,
 )
-from .yfinance_news import get_global_news_yfinance, get_news_yfinance
+from .yfinance_news import (
+    get_global_news_articles_yfinance,
+    get_global_news_yfinance,
+    get_news_yfinance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +70,7 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_news",
             "get_global_news",
+            "get_macro_news",
             "get_insider_transactions",
         ]
     },
@@ -155,6 +161,14 @@ VENDOR_METHODS = {
     "get_global_news": {
         "yfinance": get_global_news_yfinance,
         "alpha_vantage": get_alpha_vantage_global_news,
+    },
+    # get_macro_news (issue #133): same underlying global-news vendor path as
+    # get_global_news above, but the vendor-level function returns structured
+    # articles (plus which vendor served the request) instead of a
+    # pre-formatted string, so macro_news_pack.py can dedup/tag/cap in Python.
+    "get_macro_news": {
+        "yfinance": get_global_news_articles_yfinance,
+        "alpha_vantage": get_alpha_vantage_global_news_articles,
     },
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
