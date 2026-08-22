@@ -89,6 +89,51 @@ class AnalystExecutionPlanTests(unittest.TestCase):
         self.assertEqual(spec.agent_node, "Sentiment Analyst")
         self.assertEqual(spec.report_key, "sentiment_report")
 
+    def test_macro_news_has_no_tool_node(self):
+        # macro_news (#134) fetches the deterministic macro news pack (#133)
+        # once in Python before the LLM ever runs — no tool round trip, same
+        # reasoning as market/news/fundamentals/macro_fundamentals (#37).
+        plan = build_analyst_execution_plan(["macro_news"])
+        spec = plan.specs[0]
+        self.assertEqual(spec.key, "macro_news")
+        self.assertEqual(spec.agent_node, "Macro News Analyst")
+        self.assertEqual(spec.clear_node, "Msg Clear Macro News")
+        self.assertIsNone(spec.tool_node)
+        self.assertEqual(spec.report_key, "macro_news_report")
+
+    def test_macro_news_selectable_alongside_default_four(self):
+        plan = build_analyst_execution_plan(
+            ["market", "social", "news", "fundamentals", "macro_news"]
+        )
+        self.assertEqual(
+            [spec.key for spec in plan.specs],
+            ["market", "social", "news", "fundamentals", "macro_news"],
+        )
+
+    def test_both_macro_analysts_selectable_together(self):
+        # Both macro_fundamentals (#132) and macro_news (#134) can be selected
+        # together and run in either order.
+        plan = build_analyst_execution_plan(
+            ["macro_fundamentals", "macro_news"]
+        )
+        self.assertEqual(
+            [spec.key for spec in plan.specs],
+            ["macro_fundamentals", "macro_news"],
+        )
+
+        # Reverse order
+        plan = build_analyst_execution_plan(
+            ["macro_news", "macro_fundamentals"]
+        )
+        self.assertEqual(
+            [spec.key for spec in plan.specs],
+            ["macro_news", "macro_fundamentals"],
+        )
+
+    def test_misspelled_macro_news_key_rejected(self):
+        with self.assertRaises(ValueError):
+            build_analyst_execution_plan(["macro_newss"])  # extra 's'
+
 
 class AnalystWallTimeTrackerTests(unittest.TestCase):
     def test_records_wall_time_when_analyst_completes(self):

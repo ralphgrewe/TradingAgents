@@ -218,6 +218,79 @@ class TestMacroFundamentalsSelectable:
         _reload_with_env(monkeypatch)
 
 
+class TestMacroNewsSelectable:
+    """Test macro_news is a valid, opt-in selected_analysts entry (#134)."""
+
+    def test_macro_news_not_in_default(self, monkeypatch):
+        """selected_analysts default is unchanged: macro_news is opt-in
+        (decision 2 in #126), not part of the default four."""
+        dc = _reload_with_env(monkeypatch)
+        assert "macro_news" not in dc.DEFAULT_CONFIG["selected_analysts"]
+
+    def test_macro_news_accepted_alone(self, monkeypatch):
+        """selected_analysts=['macro_news'] builds without validation error."""
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+
+        try:
+            ta = TradingAgentsGraph(selected_analysts=["macro_news"], config=config)
+            assert ta.selected_analysts == ["macro_news"]
+        except Exception as e:
+            # Graph setup may fail due to missing LLM clients, but validation
+            # itself must have passed (no "unknown analyst" error).
+            assert "unknown analyst" not in str(e).lower()
+
+        _reload_with_env(monkeypatch)
+
+    def test_macro_news_accepted_alongside_default_four(self, monkeypatch):
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+        selection = ["market", "social", "news", "fundamentals", "macro_news"]
+
+        try:
+            ta = TradingAgentsGraph(selected_analysts=selection, config=config)
+            assert ta.selected_analysts == selection
+        except Exception as e:
+            assert "unknown analyst" not in str(e).lower()
+
+        _reload_with_env(monkeypatch)
+
+    def test_both_macro_analysts_together(self, monkeypatch):
+        """Both macro_fundamentals and macro_news can be selected together."""
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+        selection = ["macro_fundamentals", "macro_news"]
+
+        try:
+            ta = TradingAgentsGraph(selected_analysts=selection, config=config)
+            assert ta.selected_analysts == selection
+        except Exception as e:
+            assert "unknown analyst" not in str(e).lower()
+
+        _reload_with_env(monkeypatch)
+
+    def test_misspelled_macro_news_rejected(self, monkeypatch):
+        """A misspelled key still fails validation before the run starts."""
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+        config["selected_analysts"] = ["macro_newss"]  # extra 's'
+
+        with pytest.raises(ValueError, match="unknown analyst key: macro_newss"):
+            TradingAgentsGraph(selected_analysts=None, config=config)
+
+        _reload_with_env(monkeypatch)
+
+    def test_default_unchanged_when_macro_news_available(self, monkeypatch):
+        """Default selected_analysts remains the original four even though
+        macro_news is now available (decision 2 in #126)."""
+        dc = _reload_with_env(monkeypatch)
+        # Verify macro_news is a known analyst (in ANALYST_NODE_SPECS)
+        from tradingagents.graph.analyst_execution import ANALYST_NODE_SPECS
+        assert "macro_news" in ANALYST_NODE_SPECS
+        # But it's not in the default
+        assert dc.DEFAULT_CONFIG["selected_analysts"] == ["market", "social", "news", "fundamentals"]
+
+
 class TestConfigFileValidation:
     """Test run config file's 'config' block with selected_analysts."""
 

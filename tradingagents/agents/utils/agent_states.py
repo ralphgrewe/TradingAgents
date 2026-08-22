@@ -62,6 +62,9 @@ class AgentState(MessagesState):
     macro_report: Annotated[
         str, "Report from the Macro Fundamentals Analyst (deterministic indicator pack + LLM regime read)"
     ]
+    macro_news_report: Annotated[
+        str, "Report from the Macro News Analyst (sentiment analysis of macro news pack)"
+    ]
 
     # researcher team discussion step
     investment_debate_state: Annotated[

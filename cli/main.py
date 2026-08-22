@@ -73,6 +73,8 @@ class MessageBuffer:
         "social": "Sentiment Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
+        "macro_fundamentals": "Macro Fundamentals Analyst",
+        "macro_news": "Macro News Analyst",
     }
 
     # Report section mapping: section -> (analyst_key for filtering, finalizing_agent)
@@ -84,6 +86,7 @@ class MessageBuffer:
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
         "macro_report": ("macro_fundamentals", "Macro Fundamentals Analyst"),
+        "macro_news_report": ("macro_news", "Macro News Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "swing_trade_decision": (None, "Swing Trader"),
@@ -194,6 +197,7 @@ class MessageBuffer:
                 "news_report": "News Analysis",
                 "fundamentals_report": "Fundamentals Analysis",
                 "macro_report": "Macro Fundamentals Analysis",
+                "macro_news_report": "Macro News Analysis",
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
                 "swing_trade_decision": "Swing Trader Decision",
@@ -211,7 +215,7 @@ class MessageBuffer:
 
         # Analyst Team Reports - use .get() to handle missing sections
         analyst_sections = [
-            "market_report", "sentiment_report", "news_report", "fundamentals_report", "macro_report",
+            "market_report", "sentiment_report", "news_report", "fundamentals_report", "macro_report", "macro_news_report",
         ]
         if any(self.report_sections.get(section) for section in analyst_sections):
             report_parts.append("## Analyst Team Reports")
@@ -234,6 +238,10 @@ class MessageBuffer:
             if self.report_sections.get("macro_report"):
                 report_parts.append(
                     f"### Macro Fundamentals Analysis\n{format_report_markdown(self.report_sections['macro_report'])}"
+                )
+            if self.report_sections.get("macro_news_report"):
+                report_parts.append(
+                    f"### Macro News Analysis\n{format_report_markdown(self.report_sections['macro_news_report'])}"
                 )
 
         # Research Team Reports
@@ -797,6 +805,8 @@ def display_complete_report(final_state):
         analysts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
     if final_state.get("macro_report"):
         analysts.append(("Macro Fundamentals Analyst", final_state["macro_report"]))
+    if final_state.get("macro_news_report"):
+        analysts.append(("Macro News Analyst", final_state["macro_news_report"]))
     if analysts:
         console.print(Panel("[bold]I. Analyst Team Reports[/bold]", border_style="cyan"))
         for title, content in analysts:
@@ -857,6 +867,8 @@ ANALYST_AGENT_NAMES = {
     "social": "Sentiment Analyst",
     "news": "News Analyst",
     "fundamentals": "Fundamentals Analyst",
+    "macro_fundamentals": "Macro Fundamentals Analyst",
+    "macro_news": "Macro News Analyst",
 }
 ANALYST_REPORT_MAP = {
     "market": "market_report",
@@ -864,6 +876,7 @@ ANALYST_REPORT_MAP = {
     "news": "news_report",
     "fundamentals": "fundamentals_report",
     "macro_fundamentals": "macro_report",
+    "macro_news": "macro_news_report",
 }
 
 

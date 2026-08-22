@@ -471,6 +471,13 @@ class TradingAgentsGraph:
                 agent="macro_fundamentals", ticker=company_name
             )
 
+        # Fetch macro news past context via MCP, only when selected (#134).
+        macro_news_past_context = ""
+        if "macro_news" in self.selected_analysts:
+            macro_news_past_context = self._memory_client.get_past_context(
+                agent="macro_news", ticker=company_name
+            )
+
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,
@@ -478,6 +485,7 @@ class TradingAgentsGraph:
             past_context=past_context,
             swing_past_context=swing_past_context,
             macro_past_context=macro_past_context,
+            macro_news_past_context=macro_news_past_context,
         )
         args = self.propagator.get_graph_args()
 
@@ -641,6 +649,43 @@ class TradingAgentsGraph:
                 confidence=macro_confidence,
                 key_drivers=macro_drivers,
                 thesis=macro_thesis[:500] if macro_thesis else "",  # truncate for DB
+            )
+
+        # Store macro news decision, only when selected (#134). Mirrors the
+        # macro_fundamentals pattern above.
+        if "macro_news" in self.selected_analysts:
+            macro_news_raw = final_state.get("macro_news_report", "")
+            macro_news_signal = None
+            macro_news_confidence = None
+            macro_news_drivers = None
+            macro_news_thesis = ""
+            try:
+                macro_news_envelope = json.loads(macro_news_raw) if macro_news_raw else {}
+                macro_news_signal = macro_news_envelope.get("signal")
+                macro_news_details = macro_news_envelope.get("details") or {}
+                conservative = macro_news_details.get("conservative") or {}
+                risky = macro_news_details.get("risky") or {}
+                cons_conf = conservative.get("confidence")
+                risky_conf = risky.get("confidence")
+                if cons_conf is not None and risky_conf is not None:
+                    macro_news_confidence = (float(cons_conf) + float(risky_conf)) / 2.0
+                macro_news_drivers = macro_news_details.get("category_sentiments")
+                macro_news_thesis = macro_news_envelope.get("summary") or ""
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            if not macro_news_signal:
+                # Fallback: envelope unparseable/empty — mirrors trader/PM's
+                # free-text fallback via parse_rating.
+                macro_news_signal = parse_rating(macro_news_raw)
+
+            self._memory_client.store_decision(
+                agent="macro_news",
+                ticker=company_name,
+                date=trade_date,
+                signal=macro_news_signal,
+                confidence=macro_news_confidence,
+                key_drivers=macro_news_drivers,
+                thesis=macro_news_thesis[:500] if macro_news_thesis else "",  # truncate for DB
             )
 
         # Store swing trader decision when enabled (#93).

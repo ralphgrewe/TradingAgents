@@ -23,6 +23,7 @@ class Propagator:
         past_context: str = "",
         swing_past_context: str = "",
         macro_past_context: str = "",
+        macro_news_past_context: str = "",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph."""
         return {
@@ -61,6 +62,8 @@ class Propagator:
             "sentiment_report": "",
             "news_report": "",
             "macro_report": "",
+            "macro_news_report": "",
+            "macro_news_past_context": macro_news_past_context,
             "investment_plan": "",
             "researcher_evidence": "",
             "trader_investment_plan": "",

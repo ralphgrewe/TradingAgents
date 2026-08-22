@@ -70,6 +70,18 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         tool_node=None,
         report_key="macro_report",
     ),
+    "macro_news": AnalystNodeSpec(
+        # New in issue #134 (part of #126): macro news sentiment analysis.
+        # The deterministic macro news pack (#133) is fetched once in Python
+        # before the LLM ever runs (per-category articles, deduplicated,
+        # category-tagged, recency-ordered, capped), so there is no tool
+        # round trip for the LLM to make.
+        key="macro_news",
+        agent_node="Macro News Analyst",
+        clear_node="Msg Clear Macro News",
+        tool_node=None,
+        report_key="macro_news_report",
+    ),
 }
 
 
