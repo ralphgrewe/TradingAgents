@@ -47,13 +47,16 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        # Format analyst reports section with all four envelopes
+        # Format analyst reports section with all four core envelopes plus optional macro reports
         market_report = state.get("market_report")
         sentiment_report = state.get("sentiment_report")
         news_report = state.get("news_report")
         fundamentals_report = state.get("fundamentals_report")
+        macro_report = state.get("macro_report")
+        macro_news_report = state.get("macro_news_report")
         analyst_reports_section = format_analyst_reports_section(
-            market_report, sentiment_report, news_report, fundamentals_report, asset_type=asset_type
+            market_report, sentiment_report, news_report, fundamentals_report,
+            asset_type=asset_type, macro_report=macro_report, macro_news_report=macro_news_report
         )
         reports_line = f"{analyst_reports_section}\n\n" if analyst_reports_section else ""
 

@@ -68,12 +68,18 @@ def format_analyst_reports_section(
     news_report: Any,
     fundamentals_report: Any,
     asset_type: str = "stock",
+    macro_report: Any = None,
+    macro_news_report: Any = None,
 ) -> str:
-    """Format the four analyst reports with reading instructions for JSON envelopes.
+    """Format the analyst reports with reading instructions for JSON envelopes.
 
-    Shared by the trader and portfolio manager prompts (issue #77) — both need
-    to inject all four analyst envelopes with the same JSON-reading-instructions
-    framing the researchers use (:data:`ANALYST_REPORTS_READING_INSTRUCTIONS`).
+    Shared by the trader and portfolio manager prompts (issue #77, #135) — both need
+    to inject analyst envelopes with the same JSON-reading-instructions framing the
+    researchers use (:data:`ANALYST_REPORTS_READING_INSTRUCTIONS`).
+
+    Includes the four core reports (market, sentiment, news, fundamentals) and
+    optionally two macro reports (macro fundamentals, macro news) when present.
+
     Returns an empty string if all reports are missing/empty so callers can
     omit the section entirely; individual missing/non-string reports are
     silently dropped rather than interpolated as empty text.
@@ -94,6 +100,12 @@ def format_analyst_reports_section(
     if fundamentals_report and isinstance(fundamentals_report, str):
         label = fundamentals_report_label(asset_type)
         reports_to_include.append(f"{label} (JSON envelope): {fundamentals_report}")
+
+    if macro_report and isinstance(macro_report, str):
+        reports_to_include.append(f"Macro fundamentals report (JSON envelope): {macro_report}")
+
+    if macro_news_report and isinstance(macro_news_report, str):
+        reports_to_include.append(f"Macro news report (JSON envelope): {macro_news_report}")
 
     if not reports_to_include:
         return ""

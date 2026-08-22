@@ -109,6 +109,42 @@ def _make_sample_fundamentals_report():
     })
 
 
+def _make_sample_macro_report():
+    """Create a sample macro fundamentals analyst JSON envelope."""
+    return json.dumps({
+        "skill": "macro-fundamentals-analyst",
+        "ticker": "AAPL",
+        "date": "2026-07-16",
+        "signal": "BUY",
+        "confidence": "MEDIUM",
+        "summary": "Macro environment supporting growth assets with declining rates",
+        "details": {
+            "regime": "risk_on",
+            "indicators": [
+                {"name": "yield_curve", "signal": "Bullish"},
+                {"name": "real_rates", "signal": "Neutral"}
+            ]
+        }
+    })
+
+
+def _make_sample_macro_news_report():
+    """Create a sample macro news analyst JSON envelope."""
+    return json.dumps({
+        "skill": "macro-news-analyst",
+        "ticker": "AAPL",
+        "date": "2026-07-16",
+        "signal": "HOLD",
+        "confidence": "MEDIUM",
+        "summary": "Mixed macro news sentiment with inflation concerns offset by growth optimism",
+        "details": {
+            "articles_analyzed": 12,
+            "sentiment_score": 0.45,
+            "key_themes": ["inflation", "growth", "fed_policy"]
+        }
+    })
+
+
 @pytest.mark.unit
 class TestTraderAnalystReportsSection:
     """Tests for trader's _format_analyst_reports_section function."""
@@ -201,6 +237,82 @@ class TestTraderAnalystReportsSection:
         assert "Social media sentiment report (JSON envelope):" not in result
         assert "Latest company news (JSON envelope):" not in result
 
+    def test_both_macro_reports_included_when_present(self):
+        """Both macro reports should be included with proper formatting."""
+        market = _make_sample_market_report()
+        macro = _make_sample_macro_report()
+        macro_news = _make_sample_macro_news_report()
+
+        result = trader_format(market, None, None, None, macro_report=macro, macro_news_report=macro_news)
+
+        assert "Macro fundamentals report (JSON envelope):" in result
+        assert "Macro news report (JSON envelope):" in result
+        assert macro in result
+        assert macro_news in result
+
+    def test_only_macro_fundamentals_report_present(self):
+        """Only macro fundamentals should be included when macro_news_report is absent."""
+        macro = _make_sample_macro_report()
+
+        result = trader_format(None, None, None, None, macro_report=macro)
+
+        assert "Macro fundamentals report (JSON envelope):" in result
+        assert "Macro news report (JSON envelope):" not in result
+
+    def test_only_macro_news_report_present(self):
+        """Only macro news should be included when macro_report is absent."""
+        macro_news = _make_sample_macro_news_report()
+
+        result = trader_format(None, None, None, None, macro_news_report=macro_news)
+
+        assert "Macro fundamentals report (JSON envelope):" not in result
+        assert "Macro news report (JSON envelope):" in result
+
+    def test_neither_macro_report_present_byte_identical_to_old_format(self):
+        """Output must be byte-identical to pre-macro-reports output when neither macro report is present."""
+        market = _make_sample_market_report()
+        sentiment = _make_sample_sentiment_report()
+        news = _make_sample_news_report()
+        fundamentals = _make_sample_fundamentals_report()
+
+        # Call without macro reports (the old case)
+        result_without_macro = trader_format(market, sentiment, news, fundamentals)
+        # Call with explicit None for macro reports (new signature, but reports absent)
+        result_with_macro_none = trader_format(
+            market, sentiment, news, fundamentals,
+            macro_report=None, macro_news_report=None
+        )
+
+        # Must be byte-identical
+        assert result_without_macro == result_with_macro_none
+        # Verify no macro labels are present
+        assert "Macro fundamentals report" not in result_without_macro
+        assert "Macro news report" not in result_without_macro
+
+    def test_non_string_macro_reports_ignored(self):
+        """Non-string macro reports should be ignored."""
+        market = _make_sample_market_report()
+        macro = {"invalid": "dict"}  # Not a string
+        macro_news = 42  # Not a string
+
+        result = trader_format(market, None, None, None, macro_report=macro, macro_news_report=macro_news)
+
+        assert "Market research report (JSON envelope):" in result
+        # Non-string macro reports should be ignored
+        assert "Macro fundamentals report (JSON envelope):" not in result
+        assert "Macro news report (JSON envelope):" not in result
+
+    def test_empty_string_macro_reports_ignored(self):
+        """Empty string macro reports should be ignored."""
+        market = _make_sample_market_report()
+
+        result = trader_format(market, None, None, None, macro_report="", macro_news_report="")
+
+        assert "Market research report (JSON envelope):" in result
+        # Empty macro reports should be ignored
+        assert "Macro fundamentals report (JSON envelope):" not in result
+        assert "Macro news report (JSON envelope):" not in result
+
 
 @pytest.mark.unit
 class TestPortfolioManagerAnalystReportsSection:
@@ -251,6 +363,71 @@ class TestPortfolioManagerAnalystReportsSection:
 
         result = pm_format("", "", "", "")
         assert result == ""
+
+    def test_both_macro_reports_included_when_present(self):
+        """Both macro reports should be included with proper formatting."""
+        market = _make_sample_market_report()
+        macro = _make_sample_macro_report()
+        macro_news = _make_sample_macro_news_report()
+
+        result = pm_format(market, None, None, None, macro_report=macro, macro_news_report=macro_news)
+
+        assert "Macro fundamentals report (JSON envelope):" in result
+        assert "Macro news report (JSON envelope):" in result
+        assert macro in result
+        assert macro_news in result
+
+    def test_only_macro_fundamentals_report_present(self):
+        """Only macro fundamentals should be included when macro_news_report is absent."""
+        macro = _make_sample_macro_report()
+
+        result = pm_format(None, None, None, None, macro_report=macro)
+
+        assert "Macro fundamentals report (JSON envelope):" in result
+        assert "Macro news report (JSON envelope):" not in result
+
+    def test_only_macro_news_report_present(self):
+        """Only macro news should be included when macro_report is absent."""
+        macro_news = _make_sample_macro_news_report()
+
+        result = pm_format(None, None, None, None, macro_news_report=macro_news)
+
+        assert "Macro fundamentals report (JSON envelope):" not in result
+        assert "Macro news report (JSON envelope):" in result
+
+    def test_neither_macro_report_present_byte_identical_to_old_format(self):
+        """Output must be byte-identical to pre-macro-reports output when neither macro report is present."""
+        market = _make_sample_market_report()
+        sentiment = _make_sample_sentiment_report()
+        news = _make_sample_news_report()
+        fundamentals = _make_sample_fundamentals_report()
+
+        # Call without macro reports (the old case)
+        result_without_macro = pm_format(market, sentiment, news, fundamentals)
+        # Call with explicit None for macro reports (new signature, but reports absent)
+        result_with_macro_none = pm_format(
+            market, sentiment, news, fundamentals,
+            macro_report=None, macro_news_report=None
+        )
+
+        # Must be byte-identical
+        assert result_without_macro == result_with_macro_none
+        # Verify no macro labels are present
+        assert "Macro fundamentals report" not in result_without_macro
+        assert "Macro news report" not in result_without_macro
+
+    def test_non_string_macro_reports_ignored(self):
+        """Non-string macro reports should be ignored."""
+        market = _make_sample_market_report()
+        macro = {"invalid": "dict"}  # Not a string
+        macro_news = 42  # Not a string
+
+        result = pm_format(market, None, None, None, macro_report=macro, macro_news_report=macro_news)
+
+        assert "Market research report (JSON envelope):" in result
+        # Non-string macro reports should be ignored
+        assert "Macro fundamentals report (JSON envelope):" not in result
+        assert "Macro news report (JSON envelope):" not in result
 
 
 @pytest.mark.unit
@@ -413,6 +590,76 @@ class TestTraderPromptAssembly:
             user_message = messages[1]["content"]
 
             assert "Company fundamentals report (JSON envelope):" in user_message
+
+    def test_trader_includes_both_macro_reports_when_present(self):
+        """Trader prompt should include both macro reports when present."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY AAPL"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.trader.trader.bind_structured", return_value=None):
+            trader_node = create_trader(llm)
+            state = _make_trader_state(
+                macro_report=_make_sample_macro_report(),
+                macro_news_report=_make_sample_macro_news_report()
+            )
+            trader_node(state)
+
+            call_args = llm.invoke.call_args
+            messages = call_args[0][0]
+            user_message = messages[1]["content"]
+
+            # Verify both macro reports are in the prompt
+            assert "Macro fundamentals report (JSON envelope):" in user_message
+            assert "Macro news report (JSON envelope):" in user_message
+
+    def test_trader_includes_only_macro_fundamentals_when_news_absent(self):
+        """Trader prompt should include only macro fundamentals when macro_news_report is absent."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY AAPL"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.trader.trader.bind_structured", return_value=None):
+            trader_node = create_trader(llm)
+            state = _make_trader_state(
+                macro_report=_make_sample_macro_report(),
+                macro_news_report=None
+            )
+            trader_node(state)
+
+            call_args = llm.invoke.call_args
+            messages = call_args[0][0]
+            user_message = messages[1]["content"]
+
+            assert "Macro fundamentals report (JSON envelope):" in user_message
+            assert "Macro news report (JSON envelope):" not in user_message
+
+    def test_trader_works_without_macro_reports(self):
+        """Trader should work normally when macro reports are absent (backwards compatibility)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY AAPL"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.trader.trader.bind_structured", return_value=None):
+            trader_node = create_trader(llm)
+            state = _make_trader_state(
+                macro_report=None,
+                macro_news_report=None
+            )
+            trader_node(state)
+
+            call_args = llm.invoke.call_args
+            messages = call_args[0][0]
+            user_message = messages[1]["content"]
+
+            # The four core reports should still be present
+            assert "Market research report (JSON envelope):" in user_message
+            # But no macro reports
+            assert "Macro fundamentals report (JSON envelope):" not in user_message
+            assert "Macro news report (JSON envelope):" not in user_message
 
 
 def _make_pm_state(**overrides):
@@ -635,3 +882,70 @@ class TestPortfolioManagerPromptAssembly:
             prompt = call_args[0][0]
 
             assert "Company fundamentals report (JSON envelope):" in prompt
+
+    def test_pm_includes_both_macro_reports_when_present(self):
+        """Portfolio manager prompt should include both macro reports when present."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state(
+                macro_report=_make_sample_macro_report(),
+                macro_news_report=_make_sample_macro_news_report()
+            )
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            # Verify both macro reports are in the prompt
+            assert "Macro fundamentals report (JSON envelope):" in prompt
+            assert "Macro news report (JSON envelope):" in prompt
+
+    def test_pm_includes_only_macro_fundamentals_when_news_absent(self):
+        """Portfolio manager prompt should include only macro fundamentals when macro_news_report is absent."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state(
+                macro_report=_make_sample_macro_report(),
+                macro_news_report=None
+            )
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            assert "Macro fundamentals report (JSON envelope):" in prompt
+            assert "Macro news report (JSON envelope):" not in prompt
+
+    def test_pm_works_without_macro_reports(self):
+        """Portfolio manager should work normally when macro reports are absent (backwards compatibility)."""
+        llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "BUY"
+        llm.invoke.return_value = mock_response
+
+        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+            pm_node = create_portfolio_manager(llm)
+            state = _make_pm_state(
+                macro_report=None,
+                macro_news_report=None
+            )
+            pm_node(state)
+
+            call_args = llm.invoke.call_args
+            prompt = call_args[0][0]
+
+            # The four core reports should still be present
+            assert "Market research report (JSON envelope):" in prompt
+            # But no macro reports
+            assert "Macro fundamentals report (JSON envelope):" not in prompt
+            assert "Macro news report (JSON envelope):" not in prompt
