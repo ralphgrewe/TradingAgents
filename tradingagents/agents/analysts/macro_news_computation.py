@@ -6,13 +6,17 @@ This module handles:
 3. JSON envelope building per skills/SCHEMA.md
 
 Key design principle (issue #134, following #132's macro fundamentals pattern):
-the LLM scores articles per category; Python aggregates category signals into
-one overall signal. The category taxonomy is fixed (issue #128/#133):
-monetary_policy, inflation_prices, labor_market, growth_output,
-markets_volatility, geopolitical_trade. Per-category sentiment axes collapse
-into one signal per category (Python-computed), then into one overall signal
-(Python-computed), matching #128's specification and the LEARNINGS.md principle
-of pre-computing in Python.
+the LLM only classifies articles (bullish/bearish/neutral counts per category);
+Python computes each category's ``sentiment_score`` from those counts and
+aggregates category signals into one overall signal. The category taxonomy is
+fixed (issue #128/#133): monetary_policy, inflation_prices, labor_market,
+growth_output, markets_volatility, geopolitical_trade. Per-category sentiment
+axes collapse into one signal per category (Python-computed), then into one
+overall signal (Python-computed), matching #128's specification and the
+LEARNINGS.md principle that arithmetic belongs in Python, not in LLM prose —
+the LLM's own claimed ``sentiment_score`` (if any) is never trusted; Python
+always recomputes it from ``bullish_count``/``bearish_count``/``neutral_count``
+via ``compute_category_sentiment_scores``.
 
 Envelope shape: the envelope carries only ``signal``/``confidence``/``summary``/
 ``details``, exactly like every other analyst envelope. ``details`` includes
@@ -47,11 +51,6 @@ class CategorySentiment(BaseModel):
         description="Number of articles with neutral sentiment",
         ge=0
     )
-    sentiment_score: float = Field(
-        description="Aggregate sentiment for this category (range -1.0 to 1.0; "
-        "-1 = all bearish, 0 = balanced, 1 = all bullish)",
-        ge=-1.0, le=1.0
-    )
     top_articles: list[str] = Field(
         description="Up to 2 key article headlines from this category (≤100 chars each)",
         min_length=0, max_length=2
@@ -69,9 +68,12 @@ class MacroNewsAnalystOutput(BaseModel):
 
     The LLM reads the deterministic macro news pack (#133, per-category articles
     that are deduplicated, category-tagged, recency-ordered, and capped in Python)
-    and scores sentiment per category, then provides conservative and risky
-    ratings that drive the top-level signal/confidence (same derivation contract
-    as the news analyst and macro fundamentals analyst).
+    and *classifies* each article per category (bullish/bearish/neutral counts),
+    then provides conservative and risky ratings that drive the top-level
+    signal/confidence (same derivation contract as the news analyst and macro
+    fundamentals analyst). It deliberately does NOT compute a per-category
+    ``sentiment_score`` itself — that arithmetic is done in Python by
+    ``compute_category_sentiment_scores`` from the counts it produces here.
     """
     articles_analyzed: int = Field(description="Total number of articles analyzed", ge=0)
     categories_with_articles: list[str] = Field(
@@ -92,6 +94,38 @@ class MacroNewsAnalystOutput(BaseModel):
     risky: RatingWithConfidence = Field(
         description="Risky rating: what the macro news argues for with high risk tolerance"
     )
+
+
+def compute_category_sentiment_score(bullish_count: int, bearish_count: int, neutral_count: int) -> float:
+    """Compute one category's sentiment score from bullish/bearish/neutral counts.
+
+    ``(bullish_count - bearish_count) / total_count``, matching the formula the
+    LLM was previously (incorrectly) asked to apply itself. Per LEARNINGS.md,
+    the LLM only classifies articles; this arithmetic is Python's job, computed
+    fresh here and never trusted from the LLM's own output.
+
+    Returns 0.0 when there are no articles in the category (avoids division by
+    zero; balanced/neutral is the sensible default for an empty category).
+    """
+    total = bullish_count + bearish_count + neutral_count
+    if total <= 0:
+        return 0.0
+    return (bullish_count - bearish_count) / total
+
+
+def compute_category_sentiment_scores(details: dict) -> dict:
+    """Overwrite each entry in ``details["category_sentiments"]`` with a
+    Python-computed ``sentiment_score``, ignoring/discarding whatever the LLM
+    may have claimed for that field (it is no longer even asked for it, but
+    this stays defensive against a non-compliant response that includes one
+    anyway). Mutates and returns ``details`` in place for convenience.
+    """
+    for category in details.get("category_sentiments") or []:
+        bullish = category.get("bullish_count", 0) or 0
+        bearish = category.get("bearish_count", 0) or 0
+        neutral = category.get("neutral_count", 0) or 0
+        category["sentiment_score"] = compute_category_sentiment_score(bullish, bearish, neutral)
+    return details
 
 
 def build_json_envelope(

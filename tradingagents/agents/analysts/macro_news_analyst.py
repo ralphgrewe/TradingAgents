@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.analysts.macro_news_computation import (
     MacroNewsAnalystOutput,
     build_json_envelope,
+    compute_category_sentiment_scores,
     derive_signal_and_confidence,
 )
 from tradingagents.agents.utils.agent_utils import get_language_instruction
@@ -47,33 +48,53 @@ def create_macro_news_analyst(llm):
                 articles_by_category = pack_result.get("categories", {})
                 total_articles = pack_result.get("article_count", 0)
 
-        # Render articles for the prompt (if available)
-        articles_block = ""
-        if articles_by_category:
-            lines = ["Available macro news, organized by category:"]
-            for category, articles in articles_by_category.items():
-                lines.append(f"\n**{category.replace('_', ' ').title()}** ({len(articles)} articles):")
-                for article in articles[:3]:  # Show max 3 per category in prompt
-                    lines.append(f"- {article.get('title', 'No title')}")
-                    summary = article.get("summary", "").strip()
-                    if summary:
-                        lines.append(f"  {summary[:150]}")
-            articles_block = "\n".join(lines)
-        else:
-            articles_block = "No macro news articles available for this date."
+        # Step 1b: Gate — skip the LLM call entirely when there is nothing to
+        # analyze (gate not enabled / pack fetch failed / zero articles),
+        # mirroring researcher.py's gate-then-maybe-call structure: a closed
+        # gate must never reach the LLM at all, so a non-compliant response
+        # can't fabricate a signal from an empty set. Build a neutral envelope
+        # directly in Python instead.
+        no_articles_available = pack_unavailable_note is not None or total_articles == 0
+
+        if no_articles_available:
+            details = dict(_DEFAULT_DETAILS)
+            signal, confidence = derive_signal_and_confidence(details)
+
+            if pack_unavailable_note:
+                summary = f"Macro news unavailable ({pack_unavailable_note})"
+            else:
+                summary = "No macro news available for this date"
+
+            envelope_json = build_json_envelope(
+                signal=signal,
+                confidence=confidence,
+                summary=summary,
+                details=details,
+                ticker=ticker,
+                date=current_date,
+            )
+
+            return {
+                "messages": [],
+                "macro_news_report": envelope_json,
+            }
+
+        # Render articles for the prompt (gate open, articles present).
+        lines = ["Available macro news, organized by category:"]
+        for category, articles in articles_by_category.items():
+            lines.append(f"\n**{category.replace('_', ' ').title()}** ({len(articles)} articles):")
+            for article in articles[:3]:  # Show max 3 per category in prompt
+                lines.append(f"- {article.get('title', 'No title')}")
+                summary_text = article.get("summary", "").strip()
+                if summary_text:
+                    lines.append(f"  {summary_text[:150]}")
+        articles_block = "\n".join(lines)
 
         past_context_block = ""
         if past_context:
             past_context_block = (
                 f"\n\nYour past macro news calls on {ticker}:\n{past_context}"
             )
-
-        unavailable_block = (
-            f"\n\nNote: macro news could not be fetched ({pack_unavailable_note}). "
-            "Treat all articles as unavailable; do not fabricate sentiment."
-            if pack_unavailable_note
-            else ""
-        )
 
         system_message = f"""You are a macro news sentiment analyst for {ticker} on {current_date}.
 
@@ -82,17 +103,14 @@ labor_market, growth_output, markets_volatility, geopolitical_trade. Each articl
 a title and summary; the category assignment has already been done deterministically
 in Python.
 
-{articles_block}{unavailable_block}
+{articles_block}
 
 Your task:
-1. For each category that has articles, score the overall sentiment:
+1. For each category that has articles, classify each article's sentiment:
    - Count articles as bullish (positive for stocks), bearish (negative), or neutral
-   - Derive one sentiment_score per category (range -1.0 to 1.0):
-     * 1.0 = all articles bullish
-     * 0.0 = balanced sentiment
-     * -1.0 = all articles bearish
-     Weighting: (bullish_count - bearish_count) / total_count for the category
    - Pick up to 2 key headlines per category
+   Do not compute an aggregate sentiment score yourself — Python derives it
+   from your bullish/bearish/neutral counts.
 2. Provide two action proposals for how this macro news backdrop conditions a
    decision on {ticker}:
    - conservative: rating (BUY/HOLD/SELL) + confidence (0.0-1.0) assuming cautious risk tolerance
@@ -108,7 +126,6 @@ Return ONLY a valid JSON object matching this structure (no markdown, no prose):
       "bullish_count": <n>,
       "bearish_count": <n>,
       "neutral_count": <n>,
-      "sentiment_score": <-1.0 to 1.0>,
       "top_articles": ["headline ≤100 chars", ...]
     }},
     ...
@@ -119,6 +136,7 @@ Return ONLY a valid JSON object matching this structure (no markdown, no prose):
 
 Do NOT:
 - Compute or restate raw article counts beyond what is shown
+- Compute a sentiment_score yourself (Python computes it from your counts)
 - Estimate missing/unavailable news
 - Adjust confidences based on past context or memory{past_context_block}""" + get_language_instruction()
 
@@ -147,6 +165,10 @@ Do NOT:
                 parsed = json.loads(llm_response)
                 MacroNewsAnalystOutput(**parsed)
                 details = parsed
+                # Python-compute each category's sentiment_score from the
+                # LLM's bullish/bearish/neutral counts — never trust an
+                # LLM-claimed sentiment_score as the source of truth.
+                compute_category_sentiment_scores(details)
                 signal, confidence = derive_signal_and_confidence(details)
             except (json.JSONDecodeError, ValueError):
                 # Graceful fallback: could not parse LLM's JSON response
@@ -159,20 +181,14 @@ Do NOT:
                 signal, confidence = derive_signal_and_confidence(details)
 
         # Step 4: Deterministic one-line summary (no second LLM call).
-        # Summarize based on articles available and overall sentiment direction.
-        if total_articles == 0 and pack_unavailable_note:
-            summary = f"Macro news unavailable ({pack_unavailable_note})"
-        elif total_articles == 0:
-            summary = "No macro news available for this date"
+        # Summarize the dominant sentiment across categories with articles.
+        sentiments = details.get("category_sentiments", [])
+        if sentiments:
+            avg_sentiment = sum(s.get("sentiment_score", 0) for s in sentiments) / len(sentiments)
+            sentiment_label = "Bullish" if avg_sentiment > 0.2 else ("Bearish" if avg_sentiment < -0.2 else "Neutral")
+            summary = f"Macro news: {sentiment_label} ({total_articles} articles, {len(sentiments)} categories)"
         else:
-            # Summarize the dominant sentiment across categories with articles
-            sentiments = details.get("category_sentiments", [])
-            if sentiments:
-                avg_sentiment = sum(s.get("sentiment_score", 0) for s in sentiments) / len(sentiments)
-                sentiment_label = "Bullish" if avg_sentiment > 0.2 else ("Bearish" if avg_sentiment < -0.2 else "Neutral")
-                summary = f"Macro news: {sentiment_label} ({total_articles} articles, {len(sentiments)} categories)"
-            else:
-                summary = f"Macro news analyzed ({total_articles} articles)"
+            summary = f"Macro news analyzed ({total_articles} articles)"
 
         # Step 5: Build JSON envelope
         envelope_json = build_json_envelope(
