@@ -169,6 +169,55 @@ class TestValidation:
         _reload_with_env(monkeypatch)
 
 
+class TestMacroFundamentalsSelectable:
+    """Test macro_fundamentals is a valid, opt-in selected_analysts entry (#132)."""
+
+    def test_macro_fundamentals_not_in_default(self, monkeypatch):
+        """selected_analysts default is unchanged: macro_fundamentals is opt-in
+        (decision 2 in #126), not part of the default four."""
+        dc = _reload_with_env(monkeypatch)
+        assert "macro_fundamentals" not in dc.DEFAULT_CONFIG["selected_analysts"]
+
+    def test_macro_fundamentals_accepted_alone(self, monkeypatch):
+        """selected_analysts=['macro_fundamentals'] builds without validation error."""
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+
+        try:
+            ta = TradingAgentsGraph(selected_analysts=["macro_fundamentals"], config=config)
+            assert ta.selected_analysts == ["macro_fundamentals"]
+        except Exception as e:
+            # Graph setup may fail due to missing LLM clients, but validation
+            # itself must have passed (no "unknown analyst" error).
+            assert "unknown analyst" not in str(e).lower()
+
+        _reload_with_env(monkeypatch)
+
+    def test_macro_fundamentals_accepted_alongside_default_four(self, monkeypatch):
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+        selection = ["market", "social", "news", "fundamentals", "macro_fundamentals"]
+
+        try:
+            ta = TradingAgentsGraph(selected_analysts=selection, config=config)
+            assert ta.selected_analysts == selection
+        except Exception as e:
+            assert "unknown analyst" not in str(e).lower()
+
+        _reload_with_env(monkeypatch)
+
+    def test_misspelled_macro_fundamentals_rejected(self, monkeypatch):
+        """A misspelled key still fails validation before the run starts."""
+        dc = _reload_with_env(monkeypatch)
+        config = dc.DEFAULT_CONFIG.copy()
+        config["selected_analysts"] = ["macro_fundamental"]  # missing trailing 's'
+
+        with pytest.raises(ValueError, match="unknown analyst key: macro_fundamental"):
+            TradingAgentsGraph(selected_analysts=None, config=config)
+
+        _reload_with_env(monkeypatch)
+
+
 class TestConfigFileValidation:
     """Test run config file's 'config' block with selected_analysts."""
 

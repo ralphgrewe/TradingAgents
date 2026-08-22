@@ -351,7 +351,10 @@ def display_summary(final_state, ticker):
     # Analyst Reports. market/news/fundamentals/sentiment are all JSON
     # envelopes (#30-#32, #71); format_report_preview prefers the envelope's
     # signal/confidence/summary over a truncated raw-JSON snippet.
-    if any(final_state.get(f"{analyst}_report") for analyst in ["market", "sentiment", "news", "fundamentals"]):
+    if any(
+        final_state.get(f"{analyst}_report")
+        for analyst in ["market", "sentiment", "news", "fundamentals", "macro"]
+    ):
         print("\n📊 ANALYST TEAM REPORTS:")
         if final_state.get("market_report"):
             print(f"• Market Analyst: {format_report_preview(final_state['market_report'])}")
@@ -361,6 +364,8 @@ def display_summary(final_state, ticker):
             print(f"• News Analyst: {format_report_preview(final_state['news_report'])}")
         if final_state.get("fundamentals_report"):
             print(f"• Fundamentals Analyst: {format_report_preview(final_state['fundamentals_report'])}")
+        if final_state.get("macro_report"):
+            print(f"• Macro Fundamentals Analyst: {format_report_preview(final_state['macro_report'])}")
 
     # Research Team
     if final_state.get("investment_debate_state"):

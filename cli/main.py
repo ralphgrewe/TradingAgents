@@ -83,6 +83,7 @@ class MessageBuffer:
         "sentiment_report": ("social", "Sentiment Analyst"),
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
+        "macro_report": ("macro_fundamentals", "Macro Fundamentals Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "swing_trade_decision": (None, "Swing Trader"),
@@ -192,6 +193,7 @@ class MessageBuffer:
                 "sentiment_report": "Social Sentiment",
                 "news_report": "News Analysis",
                 "fundamentals_report": "Fundamentals Analysis",
+                "macro_report": "Macro Fundamentals Analysis",
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
                 "swing_trade_decision": "Swing Trader Decision",
@@ -208,7 +210,9 @@ class MessageBuffer:
         report_parts = []
 
         # Analyst Team Reports - use .get() to handle missing sections
-        analyst_sections = ["market_report", "sentiment_report", "news_report", "fundamentals_report"]
+        analyst_sections = [
+            "market_report", "sentiment_report", "news_report", "fundamentals_report", "macro_report",
+        ]
         if any(self.report_sections.get(section) for section in analyst_sections):
             report_parts.append("## Analyst Team Reports")
             if self.report_sections.get("market_report"):
@@ -226,6 +230,10 @@ class MessageBuffer:
             if self.report_sections.get("fundamentals_report"):
                 report_parts.append(
                     f"### Fundamentals Analysis\n{format_report_markdown(self.report_sections['fundamentals_report'])}"
+                )
+            if self.report_sections.get("macro_report"):
+                report_parts.append(
+                    f"### Macro Fundamentals Analysis\n{format_report_markdown(self.report_sections['macro_report'])}"
                 )
 
         # Research Team Reports
@@ -787,6 +795,8 @@ def display_complete_report(final_state):
         analysts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
         analysts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+    if final_state.get("macro_report"):
+        analysts.append(("Macro Fundamentals Analyst", final_state["macro_report"]))
     if analysts:
         console.print(Panel("[bold]I. Analyst Team Reports[/bold]", border_style="cyan"))
         for title, content in analysts:
@@ -853,6 +863,7 @@ ANALYST_REPORT_MAP = {
     "social": "sentiment_report",
     "news": "news_report",
     "fundamentals": "fundamentals_report",
+    "macro_fundamentals": "macro_report",
 }
 
 

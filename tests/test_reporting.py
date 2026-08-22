@@ -49,6 +49,7 @@ class TestWriteReportTree:
         assert (save_path / "1_analysts" / "sentiment.json").read_text() == "Sentiment is positive."
         assert (save_path / "1_analysts" / "news.json").read_text() == "No major news."
         assert (save_path / "1_analysts" / "fundamentals.json").read_text() == "Fundamentals are solid."
+        assert not (save_path / "1_analysts" / "macro.json").exists()
         assert (save_path / "2_research" / "bull.md").exists()
         assert (save_path / "2_research" / "bear.md").exists()
         assert (save_path / "2_research" / "manager.md").exists()
@@ -78,6 +79,19 @@ class TestWriteReportTree:
         save_path = str(tmp_path / "report")
         report_file = write_report_tree(_final_state(), "AAPL", save_path)
         assert report_file.exists()
+
+    def test_writes_macro_report_when_present(self, tmp_path):
+        """macro_report (#132, opt-in) is written as .json when present, and
+        included in the consolidated Analyst Team Reports section."""
+        save_path = tmp_path / "report"
+        state = _final_state(macro_report='{"skill": "macro-fundamentals-analyst"}')
+        report_file = write_report_tree(state, "AAPL", save_path)
+
+        assert (save_path / "1_analysts" / "macro.json").read_text() == (
+            '{"skill": "macro-fundamentals-analyst"}'
+        )
+        complete = report_file.read_text()
+        assert "Macro Fundamentals Analyst" in complete
 
 
 class TestCliSaveReportToDisk:

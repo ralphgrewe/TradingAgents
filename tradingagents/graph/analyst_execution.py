@@ -58,6 +58,18 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         tool_node=None,
         report_key="fundamentals_report",
     ),
+    "macro_fundamentals": AnalystNodeSpec(
+        # New in issue #132 (part of #126): macro data — rates, inflation,
+        # growth, labor, dollar/VIX, sentiment, gold. Like market/news/
+        # fundamentals above, the deterministic indicator pack (#131) is
+        # fetched once in Python before the LLM ever runs, so there is no
+        # tool round trip for the LLM to make either.
+        key="macro_fundamentals",
+        agent_node="Macro Fundamentals Analyst",
+        clear_node="Msg Clear Macro Fundamentals",
+        tool_node=None,
+        report_key="macro_report",
+    ),
 }
 
 

@@ -57,6 +57,7 @@ class TradingAgentsGraph:
                 - "social": Social media sentiment analysis
                 - "news": Traditional news analysis (yfinance/alpha_vantage)
                 - "fundamentals": Fundamental data analysis
+                - "macro_fundamentals": Macro indicator pack review (opt-in, issue #132)
                 - "perplexity_news": Perplexity Agent API-based news analysis
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
@@ -462,12 +463,21 @@ class TradingAgentsGraph:
                 agent="swing_trader", ticker=company_name
             )
 
+        # Fetch macro fundamentals past context via MCP, only when selected
+        # (#132, mirrors the swing_trader pattern above).
+        macro_past_context = ""
+        if "macro_fundamentals" in self.selected_analysts:
+            macro_past_context = self._memory_client.get_past_context(
+                agent="macro_fundamentals", ticker=company_name
+            )
+
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,
             asset_type=asset_type,
             past_context=past_context,
             swing_past_context=swing_past_context,
+            macro_past_context=macro_past_context,
         )
         args = self.propagator.get_graph_args()
 
@@ -593,6 +603,46 @@ class TradingAgentsGraph:
             thesis=final_state.get("final_trade_decision", "")[:500],  # truncate for DB
         )
 
+        # Store macro fundamentals decision, only when selected (#132). Stored
+        # under the run's own ticker, not a synthetic macro ticker (decision 6
+        # in #126): the analyst's signal is a macro-conditioned call on this
+        # ticker, and resolve.py needs a real price series to resolve
+        # forward_return against.
+        if "macro_fundamentals" in self.selected_analysts:
+            macro_report_raw = final_state.get("macro_report", "")
+            macro_signal = None
+            macro_confidence = None
+            macro_drivers = None
+            macro_thesis = ""
+            try:
+                macro_envelope = json.loads(macro_report_raw) if macro_report_raw else {}
+                macro_signal = macro_envelope.get("signal")
+                macro_details = macro_envelope.get("details") or {}
+                conservative = macro_details.get("conservative") or {}
+                risky = macro_details.get("risky") or {}
+                cons_conf = conservative.get("confidence")
+                risky_conf = risky.get("confidence")
+                if cons_conf is not None and risky_conf is not None:
+                    macro_confidence = (float(cons_conf) + float(risky_conf)) / 2.0
+                macro_drivers = macro_details.get("drivers")
+                macro_thesis = macro_envelope.get("summary") or ""
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            if not macro_signal:
+                # Fallback: envelope unparseable/empty — mirrors trader/PM's
+                # free-text fallback via parse_rating.
+                macro_signal = parse_rating(macro_report_raw)
+
+            self._memory_client.store_decision(
+                agent="macro_fundamentals",
+                ticker=company_name,
+                date=trade_date,
+                signal=macro_signal,
+                confidence=macro_confidence,
+                key_drivers=macro_drivers,
+                thesis=macro_thesis[:500] if macro_thesis else "",  # truncate for DB
+            )
+
         # Store swing trader decision when enabled (#93).
         if self.config.get("swing_trader_enabled"):
             swing_structured = final_state.get("swing_structured_data")
@@ -670,6 +720,7 @@ class TradingAgentsGraph:
             "news_report": final_state.get("news_report", ""),
             "perplexity_news_report": final_state.get("perplexity_news_report", ""),
             "fundamentals_report": final_state.get("fundamentals_report", ""),
+            "macro_report": final_state.get("macro_report", ""),
             "trader_investment_decision": final_state["trader_investment_plan"],
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],

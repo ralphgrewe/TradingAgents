@@ -27,6 +27,7 @@ _ANALYST_REPORT_EXTENSIONS = {
     "sentiment_report": ".json",   # JSON envelope since #71
     "news_report": ".json",        # JSON envelope since #32
     "fundamentals_report": ".json", # JSON envelope since #31
+    "macro_report": ".json",       # JSON envelope since #132
 }
 
 
@@ -111,6 +112,11 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
         ext = _ANALYST_REPORT_EXTENSIONS["fundamentals_report"]
         (analysts_dir / f"fundamentals{ext}").write_text(final_state["fundamentals_report"], encoding="utf-8")
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+    if final_state.get("macro_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        ext = _ANALYST_REPORT_EXTENSIONS["macro_report"]
+        (analysts_dir / f"macro{ext}").write_text(final_state["macro_report"], encoding="utf-8")
+        analyst_parts.append(("Macro Fundamentals Analyst", final_state["macro_report"]))
     if analyst_parts:
         # Individual per-analyst .md files above keep the raw field (JSON
         # envelope or prose) so they stay machine-parseable; the consolidated

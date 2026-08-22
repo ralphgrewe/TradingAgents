@@ -59,6 +59,9 @@ class AgentState(MessagesState):
     ]
     perplexity_news_report: Annotated[str, "Report from the Perplexity News Analyst"]
     fundamentals_report: Annotated[str, "Report from the Fundamentals Researcher"]
+    macro_report: Annotated[
+        str, "Report from the Macro Fundamentals Analyst (deterministic indicator pack + LLM regime read)"
+    ]
 
     # researcher team discussion step
     investment_debate_state: Annotated[
@@ -75,6 +78,9 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+    macro_past_context: Annotated[
+        str, "Memory context for macro fundamentals analyst (same-ticker + cross-ticker lessons)"
+    ]
 
     # swing trader decision
     swing_trade_decision: Annotated[str, "Swing trading decision rendered to markdown (when enabled)"]

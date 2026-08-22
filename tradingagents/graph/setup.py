@@ -11,6 +11,7 @@ from tradingagents.agents import (
     create_bull_researcher,
     create_conservative_debator,
     create_fundamentals_analyst,
+    create_macro_fundamentals_analyst,
     create_market_analyst,
     create_msg_delete,
     create_neutral_debator,
@@ -63,6 +64,9 @@ class GraphSetup:
                 - "social": Social media analyst
                 - "news": News analyst
                 - "fundamentals": Fundamentals analyst
+                - "macro_fundamentals": Macro fundamentals analyst (issue #132;
+                  reviews the deterministic macro indicator pack from #131 —
+                  rates, inflation, growth, labor, dollar/VIX, sentiment, gold)
 
             ("perplexity_news" is not yet wired into the execution plan —
             see ANALYST_NODE_SPECS in analyst_execution.py.)
@@ -79,6 +83,7 @@ class GraphSetup:
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(self.quick_thinking_llm),
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
+            "macro_fundamentals": lambda: create_macro_fundamentals_analyst(self.quick_thinking_llm),
         }
 
         # NOTE: "perplexity_news" is not in ANALYST_NODE_SPECS (see

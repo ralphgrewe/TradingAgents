@@ -258,8 +258,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # TRADINGAGENTS_MEMORY_DB_PATH env var > default.
     "memory_id": None,
     # List of analyst types to include in the pipeline (issue #118).
-    # Options: "market", "social", "news", "fundamentals" (the keys in
-    # ANALYST_NODE_SPECS, tradingagents/graph/analyst_execution.py).
+    # Options: "market", "social", "news", "fundamentals", "macro_fundamentals"
+    # (the keys in ANALYST_NODE_SPECS, tradingagents/graph/analyst_execution.py).
+    # "macro_fundamentals" (issue #132) is opt-in: it is NOT in the default list
+    # below (decision 2 in #126) so existing runs see no cost/latency change.
     # "perplexity_news" is NOT a valid option here — it is not wired into
     # ANALYST_NODE_SPECS / the execution plan (see the NOTE in
     # tradingagents/graph/setup.py) and will fail validation before any run

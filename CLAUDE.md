@@ -65,7 +65,9 @@ optional and controlled via `swing_trader_enabled` config key (env var `TRADINGA
 
 ```
 I.   ANALYST TEAM    → selected analysts run in sequence (default: market → social → news →
-                       fundamentals), each loops with its own tools until it writes one report
+                       fundamentals; optional opt-in: macro_fundamentals — reviews the
+                       deterministic macro indicator pack from `macro_pack.py`, see #131/#132),
+                       each loops with its own tools until it writes one report
 II.  RESEARCH STAGE  → configured by research_stage:
      - "researcher" (default): single Researcher node synthesizes analyst reports + live web search
        evidence (when trade_date == today, via Tavily API; historical dates degrade to
@@ -115,8 +117,9 @@ VI.  SWING TRADER    → (optional, when `swing_trader_enabled=True`) makes regi
 
 Key files:
 - `agent_states.py` — the shared `AgentState` TypedDict every node reads/writes. Analyst reports
-  (`market_report`, `sentiment_report`, `news_report`, `fundamentals_report`) are the load-bearing
-  fields; `investment_debate_state` / `risk_debate_state` hold per-speaker history + a
+  (`market_report`, `sentiment_report`, `news_report`, `fundamentals_report`, and the opt-in
+  `macro_report`) are the load-bearing fields; `investment_debate_state` / `risk_debate_state`
+  hold per-speaker history + a
   `judge_decision`. Message history is cleared ("Msg Clear" nodes) after each analyst so only the
   written report — not the tool-call chatter — survives into later stages.
 - `analyst_execution.py` — builds the analyst execution plan (order, concurrency) from the

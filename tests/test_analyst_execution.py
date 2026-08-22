@@ -53,6 +53,31 @@ class AnalystExecutionPlanTests(unittest.TestCase):
             "Fundamentals Analyst",
         )
 
+    def test_macro_fundamentals_has_no_tool_node(self):
+        # macro_fundamentals (#132) fetches the deterministic indicator pack
+        # (#131) once in Python before the LLM ever runs — no tool round trip,
+        # same reasoning as market/news/fundamentals (#37).
+        plan = build_analyst_execution_plan(["macro_fundamentals"])
+        spec = plan.specs[0]
+        self.assertEqual(spec.key, "macro_fundamentals")
+        self.assertEqual(spec.agent_node, "Macro Fundamentals Analyst")
+        self.assertEqual(spec.clear_node, "Msg Clear Macro Fundamentals")
+        self.assertIsNone(spec.tool_node)
+        self.assertEqual(spec.report_key, "macro_report")
+
+    def test_macro_fundamentals_selectable_alongside_default_four(self):
+        plan = build_analyst_execution_plan(
+            ["market", "social", "news", "fundamentals", "macro_fundamentals"]
+        )
+        self.assertEqual(
+            [spec.key for spec in plan.specs],
+            ["market", "social", "news", "fundamentals", "macro_fundamentals"],
+        )
+
+    def test_misspelled_macro_fundamentals_key_rejected(self):
+        with self.assertRaises(ValueError):
+            build_analyst_execution_plan(["macro_fundamental"])  # missing trailing 's'
+
     def test_social_key_displays_as_sentiment_analyst(self):
         # The wire key stays "social" for saved-config back-compat, but the
         # user-visible agent_node label must match the v0.2.5 rename so the
