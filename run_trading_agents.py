@@ -186,6 +186,7 @@ from pathlib import Path
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_call_log import LLMCallLogHandler
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.portfolio.runner import extract_rating, run_portfolio_mode
 from tradingagents.report_generator import save_report_to_disk
@@ -816,11 +817,26 @@ def main():
     # client's JSON-RPC store_decision call.
     run_date = datetime.date.today().isoformat() if not args.use_dates_from_json else None
 
+    # Per-call LLM call log (issue #138): one JSONL record per LLM call for
+    # the whole script invocation (all tickers processed below share this one
+    # handler/file), stored alongside this run's other outputs in
+    # args.report_dir. No-ops (no file written) when llm_call_log_enabled is
+    # False.
+    llm_call_log_handler = LLMCallLogHandler(
+        Path(args.report_dir) / "llm_calls.jsonl",
+        enabled=config.get("llm_call_log_enabled", True),
+    )
+
     # Initialize Trading Agents. selected_analysts is resolved from config
     # (which may have been set by TRADINGAGENTS_SELECTED_ANALYSTS env var or
     # the run config file's "config" block). Passing None lets
     # TradingAgentsGraph use the configured value.
-    ta = TradingAgentsGraph(selected_analysts=None, debug=True, config=config)
+    ta = TradingAgentsGraph(
+        selected_analysts=None,
+        debug=True,
+        config=config,
+        callbacks=[llm_call_log_handler],
+    )
 
     # Initialize list to collect structured data for consolidated summary
     all_structured_data = []
@@ -893,6 +909,26 @@ def main():
             print(f"\nConsolidated trading summary saved to: {summary_file}")
         except Exception as e:
             print(f"Warning: Failed to create consolidated summary: {str(e)}")
+
+    # Per-agent LLM call log summary (issue #138): computed from every LLM
+    # call made across all tickers processed above. Written next to
+    # llm_calls.jsonl regardless of --show-summary; printed only alongside
+    # the existing --show-summary output, consistent with that flag's role
+    # as the script's verbosity toggle.
+    summary_file = Path(args.report_dir) / "llm_calls_summary.json"
+    llm_call_log_handler.write_summary(summary_file)
+    if args.show_summary:
+        llm_call_summary = llm_call_log_handler.get_summary()
+        if llm_call_summary:
+            print("\nLLM call log summary (per agent/node):")
+            for agent, stats in sorted(llm_call_summary.items()):
+                print(
+                    f"  {agent}: {stats['call_count']} calls, "
+                    f"~{stats['total_prompt_tokens_estimated']} prompt tokens "
+                    f"(max ~{stats['max_prompt_tokens_estimated']}), "
+                    f"{stats['total_output_tokens']} output tokens"
+                )
+            print(f"Full per-call log: {Path(args.report_dir) / 'llm_calls.jsonl'}")
 
     # Portfolio mode: turn per-ticker ratings into a style-table allocation and
     # execute simulated rebalancing trades in the named depot.

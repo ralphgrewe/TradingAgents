@@ -41,6 +41,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DATA_VENDORS_KNOWLEDGE_BASE": "data_vendors.knowledge_base",
     "TRADINGAGENTS_SELECTED_ANALYSTS": "selected_analysts",
     "TRADINGAGENTS_MACRO_NEWS_CATEGORY_CAP": "macro_news_category_cap",
+    "TRADINGAGENTS_LLM_CALL_LOG_ENABLED": "llm_call_log_enabled",
 }
 
 
@@ -175,6 +176,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
     "analyst_concurrency_limit": 1,
+    # Per-call LLM call log (issue #138, part of #137): when True, a
+    # LLMCallLogHandler (tradingagents/llm_call_log.py) is wired into every
+    # run's callbacks and appends one JSONL record per LLM call (agent/node,
+    # model, prompt size, token usage, duration) to llm_calls.jsonl alongside
+    # the run's other outputs. Metadata-only and small, so it defaults on.
+    "llm_call_log_enabled": True,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.

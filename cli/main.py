@@ -46,6 +46,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_call_log import LLMCallLogHandler
 from tradingagents.reporting import format_report_markdown, write_report_tree
 
 console = Console()
@@ -1026,6 +1027,24 @@ def run_analysis(checkpoint: bool = False):
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
 
+    # Create result directory (moved ahead of the LLMCallLogHandler
+    # construction below, which needs the path for llm_calls.jsonl).
+    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = results_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    log_file = results_dir / "message_tool.log"
+    log_file.touch(exist_ok=True)
+
+    # Per-call LLM call log (issue #138): one JSONL record per LLM call,
+    # stored alongside this run's other outputs. No-ops (no file written)
+    # when llm_call_log_enabled=False.
+    llm_call_log_handler = LLMCallLogHandler(
+        results_dir / "llm_calls.jsonl",
+        enabled=config.get("llm_call_log_enabled", True),
+    )
+    call_log_callbacks = [stats_handler, llm_call_log_handler]
+
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
     selected_set = {analyst.value for analyst in selections["analysts"]}
     selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
@@ -1040,7 +1059,7 @@ def run_analysis(checkpoint: bool = False):
         selected_analyst_keys,
         config=config,
         debug=True,
-        callbacks=[stats_handler],
+        callbacks=call_log_callbacks,
     )
 
     # Initialize message buffer with selected analysts
@@ -1048,14 +1067,6 @@ def run_analysis(checkpoint: bool = False):
 
     # Track start time for elapsed display
     start_time = time.time()
-
-    # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = results_dir / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    log_file = results_dir / "message_tool.log"
-    log_file.touch(exist_ok=True)
 
     def save_message_decorator(obj, func_name):
         func = getattr(obj, func_name)
@@ -1136,7 +1147,7 @@ def run_analysis(checkpoint: bool = False):
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)
-        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
+        args = graph.propagator.get_graph_args(callbacks=call_log_callbacks)
 
         # Stream the analysis
         trace = []
@@ -1248,6 +1259,10 @@ def run_analysis(checkpoint: bool = False):
         for chunk in trace:
             final_state.update(chunk)
         graph.process_signal(final_state["final_trade_decision"])
+
+        # Write the per-agent LLM call log summary next to llm_calls.jsonl
+        # (issue #138). The existing footer stats (stats_handler) are unchanged.
+        llm_call_log_handler.write_summary(results_dir / "llm_calls_summary.json")
 
         # Update all agent statuses to completed
         for agent in message_buffer.agent_status:
