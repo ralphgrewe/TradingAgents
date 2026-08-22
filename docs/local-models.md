@@ -150,7 +150,29 @@ The TradingAgents pipeline writes contexts of varying sizes depending on the ana
 
 2. **End-of-run summary**: alongside the JSONL log, both entry points write a per-agent aggregate (call count, failed-call count, total/max estimated prompt tokens, total output tokens) to `llm_calls_summary.json` in the same directory as that run's `llm_calls.jsonl`. `run_trading_agents.py` additionally writes a batch-wide roll-up across all tickers to `<report_dir>/llm_calls_summary.json`. Passing `--show-summary` to `run_trading_agents.py` prints these — per ticker as each run finishes, and once for the whole batch at the end (only when more than one ticker ran).
 
-3. **Full prompt dumps** (issue #139): **not yet implemented** as of this writing. The plan is an opt-in mode that writes the complete rendered prompt (all messages, in order) for each call to disk for offline inspection, gated so it stays off by default (dumps are large and may contain fetched data users don't always want persisted). Until it lands, use the per-call log's `prompt_chars`/`prompt_tokens_estimated` fields to find expensive calls, then reproduce them manually if you need the full prompt text.
+3. **Full prompt dumps** (issue #139, implemented in commit d850de5): an **opt-in** mode that writes the complete rendered prompt of every LLM call to disk, so you can read exactly what an expensive call sent. It is controlled by the `llm_call_log_prompts` config key (env `TRADINGAGENTS_LLM_CALL_LOG_PROMPTS`), **default `False`** — dumps are large and may contain fetched data (news text, fundamentals, web-search evidence) that users don't always want written to disk, so you opt in explicitly. It is additionally gated on `llm_call_log_enabled` being `True`: with the per-call log switched off, nothing is dumped either.
+
+   When enabled, the handler writes one JSON file per LLM call into a `prompts/` subdirectory **next to that run's `llm_calls.jsonl`** (so `<...>/prompts/` in whichever of the two locations above applies), named `<run_id>.json`. Each file contains all messages of the call in order:
+
+   ```json
+   {
+     "format": "chat_messages",
+     "messages": [
+       {"role": "SystemMessage", "content": "..."},
+       {"role": "HumanMessage", "content": "..."}
+     ]
+   }
+   ```
+
+   `role` is the LangChain message class name (`SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`, ...). Non-chat calls, which carry plain string prompts rather than message objects, are written with `"format": "prompts"` and a `"prompt"` role instead. Failed calls are dumped too, so a call that blew up the context window leaves its prompt behind for inspection.
+
+   Every `llm_calls.jsonl` record gains a `prompt_dump_path` field to tie the two together: the relative path `prompts/<run_id>.json` when dumping is on, or `null` when it is off. So the workflow is: sort the JSONL by `prompt_tokens_estimated`, take the worst offender's `prompt_dump_path`, and open that file.
+
+   ```bash
+   # Enable dumps for one batch run
+   TRADINGAGENTS_LLM_CALL_LOG_PROMPTS=true \
+     ./venv/bin/python run_trading_agents.py stocks.json --show-summary
+   ```
 
 ### Find Your Bottleneck
 
@@ -179,6 +201,6 @@ Once you've measured where the tokens go (via the per-call log), these optimizat
 
 - **Issue #137** — the parent tracking issue for LLM context instrumentation and this guide
 - **Issue #138** — per-call LLM call log implementation (`tradingagents/llm_call_log.py`, `llm_call_log_enabled` config key)
-- **Issue #139** — opt-in full prompt dumps (not yet implemented)
+- **Issue #139** — opt-in full prompt dumps (`llm_call_log_prompts` config key, default off; dumps land in `prompts/<run_id>.json` next to `llm_calls.jsonl`)
 - **CLAUDE.md** — project architecture and LLM provider configuration
 - **Ollama Official Docs** — [FAQ](https://docs.ollama.com/faq) for complete context-length configuration and troubleshooting
