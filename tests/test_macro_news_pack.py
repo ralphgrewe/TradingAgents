@@ -282,15 +282,16 @@ class ToolWrapperTests(unittest.TestCase):
         _reset_config()
 
     def test_tool_renders_the_built_pack(self):
+        today = datetime.now().strftime("%Y-%m-%d")
         raw = {"vendor": "yfinance", "articles": [
-            _article("Fed signals rate pause", link="u1", pub_date=datetime(2026, 8, 21)),
+            _article("Fed signals rate pause", link="u1", pub_date=datetime.now()),
         ]}
         with mock.patch.dict(
             interface.VENDOR_METHODS,
             {"get_macro_news": {"yfinance": lambda *a, **k: raw}},
             clear=False,
         ):
-            out = get_macro_news.func(curr_date="2026-08-21")
+            out = get_macro_news.func(curr_date=today)
         self.assertIn("Monetary Policy", out)
         self.assertIn("Fed signals rate pause", out)
 
