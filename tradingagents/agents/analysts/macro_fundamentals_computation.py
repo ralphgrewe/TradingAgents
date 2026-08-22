@@ -12,13 +12,17 @@ only job is to *read* the prepared pack and characterize the macro regime,
 mirroring the news analyst's "LLM scores, Python aggregates/derives"
 division of labor (``news_computation.py``).
 
-Envelope shape: ``details`` stays compact (macro regime, rationale, and the
-handful of indicators that drove the read) so it stays cheap to inject into
-downstream prompts and to truncate for SQLite memory storage. The full
-deterministic pack — already available on demand via ``get_macro_pack`` — is
-attached as a sibling ``pack`` key on the envelope (not nested inside
-``details``) purely for on-disk auditability of the report file; consumers
-that only need the verdict can ignore it.
+Envelope shape: the envelope carries only ``signal``/``confidence``/``summary``/
+``details``, exactly like every other analyst envelope (``news_computation.py``).
+``details`` stays compact (macro regime, rationale, and the handful of
+indicators that drove the read) so it stays cheap to inject into downstream
+prompts and to truncate for SQLite memory storage. The full deterministic pack
+is deliberately *not* included anywhere in the envelope: the report file and
+the envelope are the same object here (``reporting.py`` writes the envelope
+string verbatim as ``macro.json``), and downstream consumers inject report
+strings into trader/portfolio-manager prompts verbatim
+(``format_analyst_reports_section``), so duplicating the pack would bloat those
+prompts. The pack remains available on demand via ``get_macro_pack``.
 """
 
 import json
@@ -80,7 +84,6 @@ def build_json_envelope(
     details: dict,
     ticker: str,
     date: str,
-    pack: dict | None = None,
 ) -> str:
     """
     Build the JSON envelope per skills/SCHEMA.md and the news-analyst-derived
@@ -94,9 +97,6 @@ def build_json_envelope(
             conservative/risky ratings) — never the full indicator pack.
         ticker: Stock/asset ticker symbol
         date: ISO 8601 date (YYYY-MM-DD)
-        pack: The full deterministic macro indicator pack (#131), attached as
-            a sibling top-level key for on-disk auditability. Omitted from the
-            envelope entirely when None (e.g. a whole-pack fetch failure).
 
     Returns:
         JSON string serialized for storage in macro_report
@@ -110,8 +110,6 @@ def build_json_envelope(
         "summary": summary,
         "details": details,
     }
-    if pack is not None:
-        envelope["pack"] = pack
     return json.dumps(envelope, indent=2)
 
 

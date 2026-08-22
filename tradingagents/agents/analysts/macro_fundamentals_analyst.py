@@ -36,11 +36,9 @@ def create_macro_fundamentals_analyst(llm):
             # Individual series failures are already absorbed inside the pack
             # itself (see macro_pack.py), so this only fires for total failure.
             pack_unavailable_note = pack_result
-            pack = None
             indicators = {}
         else:
-            pack = pack_result
-            indicators = pack.get("indicators", {})
+            indicators = pack_result.get("indicators", {})
 
         indicators_json = json.dumps(indicators, indent=2, sort_keys=True)
 
@@ -144,7 +142,6 @@ Do NOT:
             details=details,
             ticker=ticker,
             date=current_date,
-            pack=pack,
         )
 
         return {

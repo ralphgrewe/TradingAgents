@@ -132,23 +132,30 @@ class TestMacroFundamentalsAnalystJsonEnvelope:
         # The full pack's per-series numeric fields must not leak into details.
         assert "indicators" not in details
 
-    def test_pack_attached_as_sibling_key_when_available(self):
-        """The full pack is attached at the envelope's top level (for the report
-        file / audit trail), not nested inside details."""
-        pack = _make_sample_pack()
-        result, _ = _run_node(json.dumps(_make_sample_llm_output()), pack=pack)
+    def test_full_pack_never_attached_to_envelope(self):
+        """The envelope carries only the standard analyst keys — the full
+        indicator pack is never duplicated into it (it stays available on
+        demand via get_macro_pack), so report strings injected verbatim into
+        downstream prompts stay compact."""
+        result, _ = _run_node(
+            json.dumps(_make_sample_llm_output()), pack=_make_sample_pack()
+        )
         envelope = json.loads(result["macro_report"])
-        assert envelope["pack"] == pack
+        assert "pack" not in envelope
+        assert set(envelope) == {
+            "skill", "ticker", "date", "signal", "confidence", "summary", "details",
+        }
 
-    def test_pack_omitted_when_whole_pack_fetch_fails(self):
-        """route_to_vendor returning a string sentinel (whole-pack failure) means
-        no 'pack' key and the LLM prompt sees no indicator data."""
+    def test_whole_pack_fetch_failure_still_yields_a_valid_envelope(self):
+        """route_to_vendor returning a string sentinel (whole-pack failure) is
+        absorbed: the LLM prompt sees no indicator data but the envelope is
+        still well-formed."""
         result, mock_route = _run_node(
             json.dumps(_make_sample_llm_output()),
             pack="DATA_UNAVAILABLE: optional macro_data could not be retrieved (boom)",
         )
         envelope = json.loads(result["macro_report"])
-        assert "pack" not in envelope
+        assert envelope["details"]["macro_regime"] == "RISK_OFF"
         mock_route.assert_called_once_with("get_macro_pack", "2026-07-06")
 
     def test_route_to_vendor_called_with_trade_date(self):
