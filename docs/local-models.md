@@ -134,24 +134,27 @@ You have three levers:
 
 ## Measuring Your Actual Context Sizes
 
-The TradingAgents pipeline writes contexts of varying sizes depending on the analysis stage (analyst reports, research synthesis, risk debate, etc.). To understand which agents consume the most tokens:
+The TradingAgents pipeline writes contexts of varying sizes depending on the analysis stage (analyst reports, research synthesis, risk debate, etc.). To understand which agents consume the most tokens, use the per-call LLM log (issue #138, implemented in commit 774a6ba):
 
-1. **Per-call LLM log**: every `run_trading_agents.py` ticker run generates a per-call JSONL log at `reports/<TICKER>_<DATE>_<TIMESTAMP>/llm_calls.jsonl` — one file per ticker, in that ticker's own report directory, so a multi-ticker `stocks.json` batch stays separable (when the feature is enabled — see issue #138). This log includes:
-   - Ticker and date the call belongs to
-   - Calling agent/graph node
-   - Model name
-   - Prompt token count and character count
-   - Reported input/output tokens
-   - Duration
-   - `error` — `null` for a successful call, otherwise the failure that ended it (failed calls are logged too, with null token counts)
+1. **Per-call LLM log**: `LLMCallLogHandler` (`tradingagents/llm_call_log.py`) is wired into every run's callbacks and appends one JSON object per line (JSONL) for every LLM call. It is controlled by the `llm_call_log_enabled` config key (env `TRADINGAGENTS_LLM_CALL_LOG_ENABLED`), **default `True`** — logging is on unless you disable it. Each record includes:
+   - `ticker` and `date` the call belongs to
+   - `run_id` and `agent` (the LangGraph node that made the call)
+   - `model`, `message_count`, `prompt_chars`, `prompt_tokens_estimated` (chars/4 heuristic)
+   - `input_tokens` / `output_tokens` (provider-reported, when available; e.g. Ollama's OpenAI-compatible endpoint supplies these)
+   - `duration_seconds`
+   - `error` — `null` for a successful call, otherwise a `"TypeName: message"` string for a failed call (failed calls are logged too, via `on_llm_error`, with null token counts)
 
-2. **Full prompt dumps** (opt-in, see issue #139): set `prompt_dump_enabled=true` in config or `TRADINGAGENTS_PROMPT_DUMP_ENABLED=true` to write the complete prompt text of each call to disk, enabling offline analysis.
+   **Where the log lands** differs between the two entry points:
+   - `run_trading_agents.py` (batch/multi-ticker): one JSONL file **per ticker** at `<report_dir>/<TICKER>_<DATE>_<TIMESTAMP>/llm_calls.jsonl` — the same per-ticker directory `save_report_to_disk` uses — so a multi-ticker `stocks.json` batch stays separable.
+   - `cli/main.py` (interactive, single ticker+date per run): `<results_dir>/<ticker>/<date>/llm_calls.jsonl`.
 
-3. **End-of-run summary**: when the per-call log is enabled, TradingAgents writes aggregate per-agent statistics (total calls, failed calls, total/max prompt tokens, output tokens) to `llm_calls_summary.json` next to each ticker's `llm_calls.jsonl`, plus a batch-wide roll-up at `reports/llm_calls_summary.json`. With `--show-summary` these are also printed — per ticker as each run finishes, and once for the whole batch at the end.
+2. **End-of-run summary**: alongside the JSONL log, both entry points write a per-agent aggregate (call count, failed-call count, total/max estimated prompt tokens, total output tokens) to `llm_calls_summary.json` in the same directory as that run's `llm_calls.jsonl`. `run_trading_agents.py` additionally writes a batch-wide roll-up across all tickers to `<report_dir>/llm_calls_summary.json`. Passing `--show-summary` to `run_trading_agents.py` prints these — per ticker as each run finishes, and once for the whole batch at the end (only when more than one ticker ran).
+
+3. **Full prompt dumps** (issue #139): **not yet implemented** as of this writing. The plan is an opt-in mode that writes the complete rendered prompt (all messages, in order) for each call to disk for offline inspection, gated so it stays off by default (dumps are large and may contain fetched data users don't always want persisted). Until it lands, use the per-call log's `prompt_chars`/`prompt_tokens_estimated` fields to find expensive calls, then reproduce them manually if you need the full prompt text.
 
 ### Find Your Bottleneck
 
-Once you have the per-call log, sort by `prompt_tokens` (descending) to find which agent consumes the most context. The largest consumers are typically:
+Once you have the per-call log, sort its JSONL records by `prompt_tokens_estimated` (descending) to find which agent consumes the most context. The largest consumers are typically:
 
 - **Researcher** — synthesis of analyst reports + evidence pack (can be 10–15K tokens)
 - **Risk Debate** — repeated re-reading of the trader's plan across multiple speakers
@@ -175,7 +178,7 @@ Once you've measured where the tokens go (via the per-call log), these optimizat
 ## See Also
 
 - **Issue #137** — the parent tracking issue for LLM context instrumentation and this guide
-- **Issue #138** — per-call LLM call log implementation
-- **Issue #139** — opt-in full prompt dumps
+- **Issue #138** — per-call LLM call log implementation (`tradingagents/llm_call_log.py`, `llm_call_log_enabled` config key)
+- **Issue #139** — opt-in full prompt dumps (not yet implemented)
 - **CLAUDE.md** — project architecture and LLM provider configuration
 - **Ollama Official Docs** — [FAQ](https://docs.ollama.com/faq) for complete context-length configuration and troubleshooting
