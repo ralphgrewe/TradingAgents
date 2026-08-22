@@ -398,6 +398,50 @@ def display_summary(final_state, ticker):
     print(f"FINAL DECISION: {final_state.get('final_trade_decision', 'N/A')}")
     print(f"{'='*60}\n")
 
+
+def _print_llm_call_summary(title: str, summary: dict) -> None:
+    """Print a per-agent LLM call log aggregate (issue #138) under ``title``."""
+    print(f"\n{title}")
+    for agent, stats in sorted(summary.items()):
+        errors = stats.get("error_count", 0)
+        error_note = f", {errors} failed" if errors else ""
+        print(
+            f"  {agent}: {stats['call_count']} calls{error_note}, "
+            f"~{stats['total_prompt_tokens_estimated']} prompt tokens "
+            f"(max ~{stats['max_prompt_tokens_estimated']}), "
+            f"{stats['total_output_tokens']} output tokens"
+        )
+
+
+def _flush_llm_call_log(
+    handler,
+    stock_report_dir: Path,
+    ticker: str,
+    date: str,
+    show_summary: bool,
+) -> bool:
+    """Write (and optionally print) one ticker run's per-agent LLM call summary.
+
+    The JSONL records themselves are streamed to
+    ``stock_report_dir/llm_calls.jsonl`` as the run proceeds; this writes the
+    aggregate for *this* ticker/date next to them once the run is over (or has
+    failed). Returns ``True`` when the ticker produced at least one record —
+    i.e. when that llm_calls.jsonl exists — so the caller can point at it.
+    """
+    summary = handler.get_summary(ticker=ticker, date=date)
+    if not summary:
+        return False
+    handler.write_summary(
+        stock_report_dir / "llm_calls_summary.json", ticker=ticker, date=date
+    )
+    if show_summary:
+        _print_llm_call_summary(
+            f"LLM call log summary for {ticker} ({date}), per agent/node:", summary
+        )
+        print(f"Full per-call log: {stock_report_dir / 'llm_calls.jsonl'}")
+    return True
+
+
 def _validate_config_file(config_data: dict, config_path: str) -> None:
     """Validate an already-parsed run config file's shape.
 
@@ -817,11 +861,17 @@ def main():
     # client's JSON-RPC store_decision call.
     run_date = datetime.date.today().isoformat() if not args.use_dates_from_json else None
 
-    # Per-call LLM call log (issue #138): one JSONL record per LLM call for
-    # the whole script invocation (all tickers processed below share this one
-    # handler/file), stored alongside this run's other outputs in
-    # args.report_dir. No-ops (no file written) when llm_call_log_enabled is
-    # False.
+    # Per-call LLM call log (issue #138): one JSONL record per LLM call.
+    # Callbacks are bound into the LLM clients when TradingAgentsGraph is
+    # constructed (below, once for the whole batch), so a single handler
+    # instance spans every ticker; handler.start_run(...) is called before each
+    # ta.propagate() to tag that ticker's records and point them at that
+    # ticker's own report directory (same {ticker}_{date}_{timestamp} layout
+    # save_report_to_disk uses), so a multi-ticker stocks.json run doesn't pool
+    # every ticker's calls into one undifferentiated file. The path passed here
+    # is only a fallback for calls made outside any ticker run (there are none
+    # in practice — nothing calls an LLM before the loop below). No-ops (no
+    # file written) when llm_call_log_enabled is False.
     llm_call_log_handler = LLMCallLogHandler(
         Path(args.report_dir) / "llm_calls.jsonl",
         enabled=config.get("llm_call_log_enabled", True),
@@ -842,6 +892,8 @@ def main():
     all_structured_data = []
     # Ratings collected for portfolio mode (only tickers whose run succeeded)
     portfolio_ratings = {}
+    # Per-ticker LLM call log paths, for the end-of-batch pointer printed below
+    llm_call_log_paths = []
 
     # Process each stock
     for stock in stocks:
@@ -849,6 +901,21 @@ def main():
         # Resolve the date: use run_date (today) in default mode, or the stock's date in from-JSON mode
         date = run_date if not args.use_dates_from_json else stock['date']
         print(f"\nProcessing {ticker} for date {date}...")
+
+        # This ticker's own output directory, resolved *before* the run so the
+        # LLM call log can stream into it while the run is in flight (the
+        # report itself is written into the same directory afterwards). The
+        # timestamp therefore marks when the ticker's analysis started.
+        report_dir = Path(args.report_dir)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        stock_report_dir = report_dir / f"{ticker}_{date}_{timestamp}"
+
+        # Tag this ticker's LLM calls and route them to its own llm_calls.jsonl.
+        llm_call_log_handler.start_run(
+            ticker=ticker,
+            date=date,
+            log_path=stock_report_dir / "llm_calls.jsonl",
+        )
 
         try:
             final_state, decision = ta.propagate(ticker, date)
@@ -863,10 +930,6 @@ def main():
 
             # Generate and save report if report directory is specified
             if args.report_dir:
-                report_dir = Path(args.report_dir)
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                stock_report_dir = report_dir / f"{ticker}_{date}_{timestamp}"
-
                 try:
                     report_file, structured_data = save_report_to_disk(final_state, ticker, stock_report_dir)
                     print(f"Report saved to: {report_file}")
@@ -880,9 +943,23 @@ def main():
                 except Exception as e:
                     print(f"Warning: Failed to save report for {ticker}: {str(e)}")
         except Exception as e:
+            # Flush this ticker's call-log summary before bailing out: a failed
+            # run is exactly when the per-call timing/size data is worth having.
+            _flush_llm_call_log(
+                llm_call_log_handler, stock_report_dir, ticker, date,
+                show_summary=args.show_summary,
+            )
             exc_type = type(e).__name__
             print(f"\nFatal error processing {ticker}: [{exc_type}] {str(e)}")
             sys.exit(1)
+
+        # Per-agent LLM call summary for this ticker only, written next to this
+        # ticker's llm_calls.jsonl (issue #138).
+        if _flush_llm_call_log(
+            llm_call_log_handler, stock_report_dir, ticker, date,
+            show_summary=args.show_summary,
+        ):
+            llm_call_log_paths.append(stock_report_dir / "llm_calls.jsonl")
 
     # Create consolidated trading summary if we have data
     if args.report_dir and all_structured_data:
@@ -910,25 +987,25 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to create consolidated summary: {str(e)}")
 
-    # Per-agent LLM call log summary (issue #138): computed from every LLM
-    # call made across all tickers processed above. Written next to
-    # llm_calls.jsonl regardless of --show-summary; printed only alongside
-    # the existing --show-summary output, consistent with that flag's role
-    # as the script's verbosity toggle.
-    summary_file = Path(args.report_dir) / "llm_calls_summary.json"
-    llm_call_log_handler.write_summary(summary_file)
-    if args.show_summary:
-        llm_call_summary = llm_call_log_handler.get_summary()
-        if llm_call_summary:
-            print("\nLLM call log summary (per agent/node):")
-            for agent, stats in sorted(llm_call_summary.items()):
-                print(
-                    f"  {agent}: {stats['call_count']} calls, "
-                    f"~{stats['total_prompt_tokens_estimated']} prompt tokens "
-                    f"(max ~{stats['max_prompt_tokens_estimated']}), "
-                    f"{stats['total_output_tokens']} output tokens"
-                )
-            print(f"Full per-call log: {Path(args.report_dir) / 'llm_calls.jsonl'}")
+    # Batch-level roll-up of the per-agent LLM call summaries (issue #138).
+    # Each ticker already got its own llm_calls.jsonl + llm_calls_summary.json
+    # inside its report directory (see the loop above); this file aggregates
+    # every ticker so a whole batch can be read at a glance. Written regardless
+    # of --show-summary; printed (and only when more than one ticker
+    # contributed, since a single ticker's roll-up would just repeat what was
+    # printed in the loop) alongside the existing --show-summary output.
+    llm_call_log_handler.write_summary(Path(args.report_dir) / "llm_calls_summary.json")
+    if args.show_summary and len(llm_call_log_paths) > 1:
+        batch_summary = llm_call_log_handler.get_summary()
+        if batch_summary:
+            _print_llm_call_summary(
+                f"LLM call log summary for all {len(llm_call_log_paths)} ticker runs "
+                "(per agent/node):",
+                batch_summary,
+            )
+            print("Full per-call logs:")
+            for log_path in llm_call_log_paths:
+                print(f"  {log_path}")
 
     # Portfolio mode: turn per-ticker ratings into a style-table allocation and
     # execute simulated rebalancing trades in the named depot.

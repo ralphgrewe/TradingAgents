@@ -35,6 +35,21 @@ Design notes:
   callers follow the results-directory layout already used for a run's other
   outputs (see ``tradingagents/reporting.py`` and the callers in
   ``run_trading_agents.py`` / ``cli/main.py``).
+- A single handler instance can span several ticker runs, because callbacks
+  are bound into the LLM clients when ``TradingAgentsGraph`` is constructed
+  (``trading_graph.py`` puts them in ``llm_kwargs``) and
+  ``run_trading_agents.py`` builds that graph once for a whole ``stocks.json``
+  batch. ``start_run()`` therefore lets the caller retarget the handler at the
+  ticker/date it is about to analyze: every record is tagged with that
+  ``ticker``/``date``, and the JSONL destination can be switched to that
+  ticker's own report directory so a batch run does not pool every ticker's
+  calls into one undifferentiated file.
+- Failed calls are logged too: ``on_llm_error`` pops the same ``run_id``
+  bookkeeping ``on_llm_end`` would have popped (otherwise a failed call leaks
+  its pending entry for the rest of the run) and writes a record with the same
+  shape, with ``input_tokens``/``output_tokens`` as ``None`` and the ``error``
+  field populated. Successful records carry ``"error": None`` so both kinds of
+  record share one schema.
 """
 
 from __future__ import annotations
@@ -127,19 +142,36 @@ def _extract_usage(response: LLMResult) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _format_error(error: BaseException | Any) -> str:
+    """Render a callback error as ``"TypeName: message"`` (bare type name when the message is empty)."""
+    message = str(error).strip()
+    type_name = type(error).__name__
+    return f"{type_name}: {message}" if message else type_name
+
+
 class LLMCallLogHandler(BaseCallbackHandler):
     """Callback handler that appends one JSONL record per LLM call.
 
     Args:
         log_path: File to append JSONL records to. Parent directories are
             created on first write. May be ``None`` (equivalent to
-            ``enabled=False``): no file is ever written.
+            ``enabled=False``): no file is ever written. ``start_run()`` can
+            point subsequent records at a different file.
         enabled: When ``False``, the handler is a no-op — no file is created
             and no records are kept in memory. Callers wire this to the
             ``llm_call_log_enabled`` config key (default ``True``).
+        ticker / date: Optional run context stamped onto every record. Usually
+            set via ``start_run()`` rather than here, since one handler
+            instance can outlive a single ticker run (see module docstring).
     """
 
-    def __init__(self, log_path: str | Path | None, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        log_path: str | Path | None,
+        enabled: bool = True,
+        ticker: str | None = None,
+        date: str | None = None,
+    ) -> None:
         super().__init__()
         self.log_path = Path(log_path) if log_path is not None else None
         self.enabled = enabled and self.log_path is not None
@@ -150,9 +182,40 @@ class LLMCallLogHandler(BaseCallbackHandler):
         # racing on "the last call started".
         self._pending: dict[str, dict[str, Any]] = {}
         self._records: list[dict[str, Any]] = []
+        self._ticker = ticker
+        self._date = date
 
         if self.enabled:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # -- run context ----------------------------------------------------------
+
+    def start_run(
+        self,
+        ticker: str | None = None,
+        date: str | None = None,
+        log_path: str | Path | None = None,
+    ) -> None:
+        """Retarget the handler at the ticker/date run that is about to start.
+
+        Every record written from now on is tagged with ``ticker``/``date``,
+        and — when ``log_path`` is given — appended to that file instead of the
+        one the handler was constructed with. Callbacks are bound into the LLM
+        clients at ``TradingAgentsGraph`` construction time, so a multi-ticker
+        batch shares one handler instance; this is how each ticker's calls end
+        up in its own report directory (and stay attributable even if the JSONL
+        files are later concatenated).
+
+        Records already written are left alone: ``get_records()`` /
+        ``get_summary()`` keep accumulating across runs and can be filtered
+        back down per ticker/date.
+        """
+        with self._lock:
+            self._ticker = ticker
+            self._date = date
+            if log_path is not None and self.enabled:
+                self.log_path = Path(log_path)
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # -- call-start handlers -------------------------------------------------
 
@@ -218,7 +281,53 @@ class LLMCallLogHandler(BaseCallbackHandler):
             prompt_chars=prompt_chars,
         )
 
-    # -- call-end handler -----------------------------------------------------
+    # -- call-end handlers ----------------------------------------------------
+
+    def _finish(
+        self,
+        run_id: Any,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        error: str | None,
+    ) -> None:
+        """Pop the pending start for ``run_id`` and append its completed record.
+
+        Shared by ``on_llm_end`` and ``on_llm_error`` so a failed call is
+        bookkept (and logged) exactly like a successful one.
+        """
+        with self._lock:
+            start = self._pending.pop(str(run_id), None)
+            ticker, date = self._ticker, self._date
+            log_path = self.log_path
+        if start is None:
+            # No matching start record (e.g. handler was constructed mid-run,
+            # or this is a call type we don't track the start of). Skip
+            # rather than emit a record with a bogus/zero duration.
+            return
+
+        duration_seconds = time.monotonic() - start["start_monotonic"]
+        prompt_chars = start["prompt_chars"]
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": str(run_id),
+            "ticker": ticker,
+            "date": date,
+            "agent": start["agent"],
+            "model": start["model"],
+            "message_count": start["message_count"],
+            "prompt_chars": prompt_chars,
+            "prompt_tokens_estimated": prompt_chars // _CHARS_PER_TOKEN_ESTIMATE,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "duration_seconds": round(duration_seconds, 3),
+            "error": error,
+        }
+
+        with self._lock:
+            self._records.append(record)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
 
     def on_llm_end(
         self,
@@ -231,50 +340,60 @@ class LLMCallLogHandler(BaseCallbackHandler):
     ) -> None:
         if not self.enabled:
             return
-
-        with self._lock:
-            start = self._pending.pop(str(run_id), None)
-        if start is None:
-            # No matching start record (e.g. handler was constructed mid-run,
-            # or this is a call type we don't track the start of). Skip
-            # rather than emit a record with a bogus/zero duration.
-            return
-
-        duration_seconds = time.monotonic() - start["start_monotonic"]
         input_tokens, output_tokens = _extract_usage(response)
-        prompt_chars = start["prompt_chars"]
+        self._finish(run_id, input_tokens, output_tokens, error=None)
 
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "run_id": str(run_id),
-            "agent": start["agent"],
-            "model": start["model"],
-            "message_count": start["message_count"],
-            "prompt_chars": prompt_chars,
-            "prompt_tokens_estimated": prompt_chars // _CHARS_PER_TOKEN_ESTIMATE,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "duration_seconds": round(duration_seconds, 3),
-        }
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Log a failed LLM call (timeout, transport error, provider error, ...).
 
-        with self._lock:
-            self._records.append(record)
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
+        Without this, the call's ``_pending`` entry would never be popped and
+        the failure — the most interesting event for context-size/timeout
+        diagnostics — would be missing from the log entirely. Token counts are
+        ``None`` because there is no response to read ``usage_metadata`` from.
+        """
+        if not self.enabled:
+            return
+        self._finish(run_id, input_tokens=None, output_tokens=None, error=_format_error(error))
 
     # -- summary ---------------------------------------------------------------
 
-    def get_records(self) -> list[dict[str, Any]]:
-        """Return a snapshot of the records written so far."""
+    def get_records(
+        self, ticker: str | None = None, date: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return a snapshot of the records written so far.
+
+        ``ticker``/``date`` narrow the snapshot to one ticker run of a
+        multi-ticker batch; omitting both returns everything.
+        """
         with self._lock:
-            return list(self._records)
+            records = list(self._records)
+        if ticker is not None:
+            records = [r for r in records if r.get("ticker") == ticker]
+        if date is not None:
+            records = [r for r in records if r.get("date") == date]
+        return records
 
-    def get_summary(self) -> dict[str, dict[str, Any]]:
+    def get_summary(
+        self, ticker: str | None = None, date: str | None = None
+    ) -> dict[str, dict[str, Any]]:
         """Return the per-agent aggregate (call count, prompt/output tokens) computed so far."""
-        return summarize_records(self.get_records())
+        return summarize_records(self.get_records(ticker=ticker, date=date))
 
-    def write_summary(self, summary_path: str | Path) -> None:
-        """Write ``get_summary()`` to ``summary_path`` as JSON.
+    def write_summary(
+        self,
+        summary_path: str | Path,
+        ticker: str | None = None,
+        date: str | None = None,
+    ) -> None:
+        """Write ``get_summary(ticker, date)`` to ``summary_path`` as JSON.
 
         No-op when the handler is disabled, matching the "no file when
         llm_call_log_enabled=False" behavior of the JSONL log itself.
@@ -283,7 +402,8 @@ class LLMCallLogHandler(BaseCallbackHandler):
             return
         summary_path = Path(summary_path)
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps(self.get_summary(), indent=2), encoding="utf-8")
+        summary = self.get_summary(ticker=ticker, date=date)
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -295,6 +415,10 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         sum/max of each call's chars/4 estimate (always available).
       - ``total_output_tokens``: sum of provider-reported ``output_tokens``
         (calls where the provider didn't report usage contribute 0).
+      - ``error_count``: how many of those calls failed (records with a
+        non-null ``error``). Failed calls still count towards ``call_count``
+        and the prompt-token figures — the prompt was sent — but contribute no
+        output tokens, so this keeps the other numbers readable.
     """
     aggregates: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -302,6 +426,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             "total_prompt_tokens_estimated": 0,
             "max_prompt_tokens_estimated": 0,
             "total_output_tokens": 0,
+            "error_count": 0,
         }
     )
     for record in records:
@@ -312,5 +437,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         bucket["total_prompt_tokens_estimated"] += estimated
         bucket["max_prompt_tokens_estimated"] = max(bucket["max_prompt_tokens_estimated"], estimated)
         bucket["total_output_tokens"] += record.get("output_tokens") or 0
+        if record.get("error"):
+            bucket["error_count"] += 1
 
     return dict(aggregates)

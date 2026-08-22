@@ -136,16 +136,18 @@ You have three levers:
 
 The TradingAgents pipeline writes contexts of varying sizes depending on the analysis stage (analyst reports, research synthesis, risk debate, etc.). To understand which agents consume the most tokens:
 
-1. **Per-call LLM log**: every `run_trading_agents.py` run generates a per-call JSONL log at `reports/<run_dir>/llm_calls.jsonl` (when the feature is enabled — see issue #138). This log includes:
+1. **Per-call LLM log**: every `run_trading_agents.py` ticker run generates a per-call JSONL log at `reports/<TICKER>_<DATE>_<TIMESTAMP>/llm_calls.jsonl` — one file per ticker, in that ticker's own report directory, so a multi-ticker `stocks.json` batch stays separable (when the feature is enabled — see issue #138). This log includes:
+   - Ticker and date the call belongs to
    - Calling agent/graph node
    - Model name
    - Prompt token count and character count
    - Reported input/output tokens
    - Duration
+   - `error` — `null` for a successful call, otherwise the failure that ended it (failed calls are logged too, with null token counts)
 
 2. **Full prompt dumps** (opt-in, see issue #139): set `prompt_dump_enabled=true` in config or `TRADINGAGENTS_PROMPT_DUMP_ENABLED=true` to write the complete prompt text of each call to disk, enabling offline analysis.
 
-3. **End-of-run summary**: when the per-call log is enabled, TradingAgents prints aggregate per-agent statistics at the end of the run (total calls, total/max prompt tokens per agent).
+3. **End-of-run summary**: when the per-call log is enabled, TradingAgents writes aggregate per-agent statistics (total calls, failed calls, total/max prompt tokens, output tokens) to `llm_calls_summary.json` next to each ticker's `llm_calls.jsonl`, plus a batch-wide roll-up at `reports/llm_calls_summary.json`. With `--show-summary` these are also printed — per ticker as each run finishes, and once for the whole batch at the end.
 
 ### Find Your Bottleneck
 
