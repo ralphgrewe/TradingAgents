@@ -301,6 +301,27 @@ they become a directory name; an invalid ID exits with an error before the run s
 `--memory-id` and no `TRADINGAGENTS_MEMORY_ID` set, behavior is unchanged from before this
 option existed.
 
+### Checking memory statistics
+
+`python -m tradingagents.memory.stats` computes hit-rate, average forward-return, and
+confidence-calibration statistics over the shared SQLite decision-memory store — but only over
+**resolved** decisions (ones with a `forward_return` already filled in by `resolve_pending`).
+This is the same computation behind the `memory_get_statistics` MCP tool, exposed as a standalone
+CLI so you can check stats by hand between runs without needing the MCP server running.
+
+```bash
+./venv/bin/python -m tradingagents.memory.stats --agent trader
+```
+
+Flags: `--agent` (restrict to one agent id), `--ticker` (restrict to one ticker, exact match),
+`--since` (inclusive lower bound on `decision_date`, `YYYY-MM-DD`), `--db-path` (override the
+memory DB path, e.g. to point at a `--memory-id`-scoped store), and `--json` (print raw JSON
+instead of the default prompt-ready markdown table — the same table `format_statistics_markdown`
+produces for `memory_get_statistics`).
+
+See the module docstring in `tradingagents/memory/stats.py` for the exact correctness/bucketing
+definitions (HOLD threshold, confidence buckets, signal normalization).
+
 ## Starting the memory MCP server
 
 `mcp_server.py` exposes the pipeline and the shared decision-memory store as MCP tools
