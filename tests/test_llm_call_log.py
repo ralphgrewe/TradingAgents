@@ -659,3 +659,256 @@ def test_env_override_disables_llm_call_log(monkeypatch):
     finally:
         monkeypatch.delenv("TRADINGAGENTS_LLM_CALL_LOG_ENABLED", raising=False)
         importlib.reload(default_config_module)
+
+
+# -- prompt dumps (issue #139) -------------------------------------------
+
+
+def test_default_config_llm_call_log_prompts_is_false():
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["llm_call_log_prompts"] is False
+
+
+def test_env_override_enables_llm_call_log_prompts(monkeypatch):
+    import importlib
+
+    import tradingagents.default_config as default_config_module
+
+    monkeypatch.setenv("TRADINGAGENTS_LLM_CALL_LOG_PROMPTS", "true")
+    try:
+        reloaded = importlib.reload(default_config_module)
+        assert reloaded.DEFAULT_CONFIG["llm_call_log_prompts"] is True
+    finally:
+        monkeypatch.delenv("TRADINGAGENTS_LLM_CALL_LOG_PROMPTS", raising=False)
+        importlib.reload(default_config_module)
+
+
+def test_prompt_dump_disabled_by_default_no_files_written(tmp_path):
+    """When dump_prompts=False (default), no prompts/ subdir or files are written."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=False)
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content="hello"), HumanMessage(content="world")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Test Node"},
+    )
+    handler.on_llm_end(_chat_result("response"), run_id=run_id)
+
+    # No prompts directory should be created
+    prompts_dir = tmp_path / "prompts"
+    assert not prompts_dir.exists()
+
+    # JSONL record should have null prompt_dump_path
+    record = handler.get_records()[0]
+    assert record["prompt_dump_path"] is None
+
+
+def test_prompt_dump_enabled_creates_files_and_references(tmp_path):
+    """When dump_prompts=True, prompt files are created and referenced from JSONL."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+    run_id = uuid.uuid4()
+
+    messages = [
+        HumanMessage(content="What is machine learning?"),
+        HumanMessage(content="Explain in detail."),
+    ]
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [messages],
+        run_id=run_id,
+        metadata={"langgraph_node": "Researcher"},
+    )
+    handler.on_llm_end(_chat_result("ML is a subfield of AI..."), run_id=run_id)
+
+    # Prompts directory should exist
+    prompts_dir = tmp_path / "prompts"
+    assert prompts_dir.exists()
+
+    # Dump file should exist with the run_id as filename
+    dump_file = prompts_dir / f"{run_id}.json"
+    assert dump_file.exists()
+
+    # Parse the dump file
+    dump_data = json.loads(dump_file.read_text(encoding="utf-8"))
+    assert dump_data["format"] == "chat_messages"
+    assert len(dump_data["messages"]) == 2
+    assert dump_data["messages"][0]["role"] == "HumanMessage"
+    assert dump_data["messages"][0]["content"] == "What is machine learning?"
+    assert dump_data["messages"][1]["role"] == "HumanMessage"
+    assert dump_data["messages"][1]["content"] == "Explain in detail."
+
+    # JSONL record should reference the dump file
+    record = handler.get_records()[0]
+    assert record["prompt_dump_path"] == f"prompts/{run_id}.json"
+
+
+def test_prompt_dump_with_ai_message(tmp_path):
+    """Prompt dump should correctly handle AIMessage role."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+    run_id = uuid.uuid4()
+
+    from langchain_core.messages import SystemMessage
+
+    messages = [
+        SystemMessage(content="You are a helpful assistant."),
+        HumanMessage(content="Hello"),
+        AIMessage(content="Hi there!"),
+    ]
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [messages],
+        run_id=run_id,
+        metadata={"langgraph_node": "Analyst"},
+    )
+    handler.on_llm_end(_chat_result("response"), run_id=run_id)
+
+    dump_file = tmp_path / "prompts" / f"{run_id}.json"
+    dump_data = json.loads(dump_file.read_text(encoding="utf-8"))
+
+    assert len(dump_data["messages"]) == 3
+    assert dump_data["messages"][0]["role"] == "SystemMessage"
+    assert dump_data["messages"][1]["role"] == "HumanMessage"
+    assert dump_data["messages"][2]["role"] == "AIMessage"
+
+
+def test_prompt_dump_with_legacy_llm_start(tmp_path):
+    """Prompt dump should handle legacy on_llm_start with string prompts."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+    run_id = uuid.uuid4()
+
+    prompts = ["first prompt", "second prompt"]
+    handler.on_llm_start(
+        {"kwargs": {"model": "text-davinci-003"}},
+        prompts,
+        run_id=run_id,
+        metadata={"langgraph_node": "Legacy Node"},
+    )
+    handler.on_llm_end(_chat_result("done"), run_id=run_id)
+
+    dump_file = tmp_path / "prompts" / f"{run_id}.json"
+    dump_data = json.loads(dump_file.read_text(encoding="utf-8"))
+
+    assert dump_data["format"] == "prompts"
+    assert len(dump_data["messages"]) == 2
+    assert dump_data["messages"][0]["role"] == "prompt"
+    assert dump_data["messages"][0]["content"] == "first prompt"
+    assert dump_data["messages"][1]["content"] == "second prompt"
+
+
+def test_prompt_dump_disabled_creates_no_prompts_dir_even_when_retargeting(tmp_path):
+    """When dump_prompts=False, start_run() should not create prompts dir."""
+    fallback_log = tmp_path / "fallback.jsonl"
+    handler = LLMCallLogHandler(fallback_log, dump_prompts=False)
+
+    per_ticker_log = tmp_path / "AAPL_2024-01-15_120000" / "llm_calls.jsonl"
+    handler.start_run(ticker="AAPL", date="2024-01-15", log_path=per_ticker_log)
+    _emit_call(handler)
+
+    assert not (tmp_path / "AAPL_2024-01-15_120000" / "prompts").exists()
+    record = handler.get_records()[0]
+    assert record["prompt_dump_path"] is None
+
+
+def test_prompt_dump_enabled_creates_dir_when_retargeting(tmp_path):
+    """When dump_prompts=True, start_run() should create prompts dir for each ticker."""
+    fallback_log = tmp_path / "fallback.jsonl"
+    handler = LLMCallLogHandler(fallback_log, dump_prompts=True)
+
+    aapl_log = tmp_path / "AAPL_2024-01-15_120000" / "llm_calls.jsonl"
+    msft_log = tmp_path / "MSFT_2024-01-15_120500" / "llm_calls.jsonl"
+
+    handler.start_run(ticker="AAPL", date="2024-01-15", log_path=aapl_log)
+    _emit_call(handler)
+
+    handler.start_run(ticker="MSFT", date="2024-01-15", log_path=msft_log)
+    _emit_call(handler)
+
+    # Each ticker should have its own prompts directory
+    aapl_prompts_dir = tmp_path / "AAPL_2024-01-15_120000" / "prompts"
+    msft_prompts_dir = tmp_path / "MSFT_2024-01-15_120500" / "prompts"
+
+    assert aapl_prompts_dir.exists()
+    assert msft_prompts_dir.exists()
+
+    # Each ticker should have one dump file
+    aapl_dumps = list(aapl_prompts_dir.glob("*.json"))
+    msft_dumps = list(msft_prompts_dir.glob("*.json"))
+    assert len(aapl_dumps) == 1
+    assert len(msft_dumps) == 1
+
+
+def test_prompt_dump_multimodal_content_serialized_correctly(tmp_path):
+    """Multimodal content (list) should be serialized as-is in prompt dump."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+    run_id = uuid.uuid4()
+
+    # Message with multimodal content (list with text and dict blocks)
+    multimodal_content = [
+        {"type": "text", "text": "What's in this image?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+    ]
+    messages = [HumanMessage(content=multimodal_content)]
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o"}},
+        [messages],
+        run_id=run_id,
+        metadata={"langgraph_node": "Vision Analyst"},
+    )
+    handler.on_llm_end(_chat_result("I see..."), run_id=run_id)
+
+    dump_file = tmp_path / "prompts" / f"{run_id}.json"
+    dump_data = json.loads(dump_file.read_text(encoding="utf-8"))
+
+    assert dump_data["messages"][0]["content"] == multimodal_content
+
+
+def test_prompt_dump_null_when_no_matching_start(tmp_path):
+    """Orphaned on_llm_end (no matching start) should be skipped entirely."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+
+    # Call on_llm_end without matching on_chat_model_start
+    handler.on_llm_end(_chat_result("orphaned"), run_id=uuid.uuid4())
+
+    # No record should be created
+    assert handler.get_records() == []
+    # No dump file should be created (directory exists but is empty)
+    prompts_dir = tmp_path / "prompts"
+    assert prompts_dir.exists()  # Directory is created at init time
+    assert list(prompts_dir.glob("*.json")) == []  # But no files in it
+
+
+def test_prompt_dump_on_error(tmp_path):
+    """Prompt dump should still be created even when the LLM call fails."""
+    log_path = tmp_path / "llm_calls.jsonl"
+    handler = LLMCallLogHandler(log_path, dump_prompts=True)
+    run_id = uuid.uuid4()
+
+    messages = [HumanMessage(content="This will fail")]
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [messages],
+        run_id=run_id,
+        metadata={"langgraph_node": "Analyst"},
+    )
+    handler.on_llm_error(TimeoutError("request timed out"), run_id=run_id)
+
+    # Dump file should still be created
+    dump_file = tmp_path / "prompts" / f"{run_id}.json"
+    assert dump_file.exists()
+
+    dump_data = json.loads(dump_file.read_text(encoding="utf-8"))
+    assert dump_data["messages"][0]["content"] == "This will fail"
+
+    # JSONL record should reference the dump and have error info
+    record = handler.get_records()[0]
+    assert record["prompt_dump_path"] == f"prompts/{run_id}.json"
+    assert "TimeoutError" in record["error"]

@@ -1042,6 +1042,7 @@ def run_analysis(checkpoint: bool = False):
     llm_call_log_handler = LLMCallLogHandler(
         results_dir / "llm_calls.jsonl",
         enabled=config.get("llm_call_log_enabled", True),
+        dump_prompts=config.get("llm_call_log_prompts", False),
     )
     call_log_callbacks = [stats_handler, llm_call_log_handler]
 

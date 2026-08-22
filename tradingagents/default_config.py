@@ -42,6 +42,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SELECTED_ANALYSTS": "selected_analysts",
     "TRADINGAGENTS_MACRO_NEWS_CATEGORY_CAP": "macro_news_category_cap",
     "TRADINGAGENTS_LLM_CALL_LOG_ENABLED": "llm_call_log_enabled",
+    "TRADINGAGENTS_LLM_CALL_LOG_PROMPTS": "llm_call_log_prompts",
 }
 
 
@@ -182,6 +183,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # model, prompt size, token usage, duration) to llm_calls.jsonl alongside
     # the run's other outputs. Metadata-only and small, so it defaults on.
     "llm_call_log_enabled": True,
+    # Full prompt dumps for LLM calls (issue #139, part of #137): when True
+    # and llm_call_log_enabled is True, the handler also writes the complete
+    # rendered prompt (all messages with roles, in order) of every LLM call
+    # to disk under prompts/ subdirectory. Disabled by default since dumps
+    # are large and may contain fetched data users don't always want written.
+    "llm_call_log_prompts": False,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.

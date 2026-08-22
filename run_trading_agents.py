@@ -875,6 +875,7 @@ def main():
     llm_call_log_handler = LLMCallLogHandler(
         Path(args.report_dir) / "llm_calls.jsonl",
         enabled=config.get("llm_call_log_enabled", True),
+        dump_prompts=config.get("llm_call_log_prompts", False),
     )
 
     # Initialize Trading Agents. selected_analysts is resolved from config

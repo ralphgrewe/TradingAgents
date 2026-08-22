@@ -149,6 +149,36 @@ def _format_error(error: BaseException | Any) -> str:
     return f"{type_name}: {message}" if message else type_name
 
 
+def _format_messages_for_dump(messages: list[BaseMessage] | list[str] | None) -> dict[str, Any]:
+    """Format messages for a prompt dump file.
+
+    Returns a dict with 'format' (indicating the message type) and 'messages'
+    (a list of message dicts with 'role' and 'content').
+    """
+    if messages is None:
+        return {"format": "none", "messages": []}
+
+    # Check if we have BaseMessage objects (from on_chat_model_start)
+    if messages and isinstance(messages[0], BaseMessage):
+        formatted_messages = []
+        for msg in messages:
+            role = type(msg).__name__  # e.g., "HumanMessage", "AIMessage"
+            content = getattr(msg, "content", "")
+            if isinstance(content, list):
+                # Multimodal content: serialize as list
+                content = content
+            elif isinstance(content, str):
+                pass  # Already a string
+            else:
+                content = str(content)
+            formatted_messages.append({"role": role, "content": content})
+        return {"format": "chat_messages", "messages": formatted_messages}
+    else:
+        # String prompts from on_llm_start
+        formatted_messages = [{"role": "prompt", "content": msg} for msg in (messages or [])]
+        return {"format": "prompts", "messages": formatted_messages}
+
+
 class LLMCallLogHandler(BaseCallbackHandler):
     """Callback handler that appends one JSONL record per LLM call.
 
@@ -160,6 +190,9 @@ class LLMCallLogHandler(BaseCallbackHandler):
         enabled: When ``False``, the handler is a no-op — no file is created
             and no records are kept in memory. Callers wire this to the
             ``llm_call_log_enabled`` config key (default ``True``).
+        dump_prompts: When ``True`` and ``enabled=True``, full prompts are
+            written to disk under a ``prompts/`` subdirectory. Callers wire
+            this to the ``llm_call_log_prompts`` config key (default ``False``).
         ticker / date: Optional run context stamped onto every record. Usually
             set via ``start_run()`` rather than here, since one handler
             instance can outlive a single ticker run (see module docstring).
@@ -169,12 +202,20 @@ class LLMCallLogHandler(BaseCallbackHandler):
         self,
         log_path: str | Path | None,
         enabled: bool = True,
+        dump_prompts: bool = False,
         ticker: str | None = None,
         date: str | None = None,
     ) -> None:
         super().__init__()
         self.log_path = Path(log_path) if log_path is not None else None
         self.enabled = enabled and self.log_path is not None
+        self.dump_prompts = dump_prompts and self.enabled
+        self.prompts_dir = None
+        if self.enabled:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.dump_prompts:
+                self.prompts_dir = self.log_path.parent / "prompts"
+                self.prompts_dir.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
         # run_id (str(UUID)) -> start-time bookkeeping, so interleaved calls
@@ -184,9 +225,6 @@ class LLMCallLogHandler(BaseCallbackHandler):
         self._records: list[dict[str, Any]] = []
         self._ticker = ticker
         self._date = date
-
-        if self.enabled:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # -- run context ----------------------------------------------------------
 
@@ -216,6 +254,9 @@ class LLMCallLogHandler(BaseCallbackHandler):
             if log_path is not None and self.enabled:
                 self.log_path = Path(log_path)
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                if self.dump_prompts:
+                    self.prompts_dir = self.log_path.parent / "prompts"
+                    self.prompts_dir.mkdir(parents=True, exist_ok=True)
 
     # -- call-start handlers -------------------------------------------------
 
@@ -226,6 +267,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
         model: str,
         message_count: int,
         prompt_chars: int,
+        messages: list[BaseMessage] | None = None,
     ) -> None:
         with self._lock:
             self._pending[str(run_id)] = {
@@ -234,6 +276,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
                 "model": model,
                 "message_count": message_count,
                 "prompt_chars": prompt_chars,
+                "messages": messages if self.dump_prompts else None,
             }
 
     def on_chat_model_start(
@@ -257,6 +300,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             model=_extract_model_name(serialized, kwargs),
             message_count=len(flat_messages),
             prompt_chars=prompt_chars,
+            messages=flat_messages if self.dump_prompts else None,
         )
 
     def on_llm_start(
@@ -273,12 +317,16 @@ class LLMCallLogHandler(BaseCallbackHandler):
         if not self.enabled:
             return
         prompt_chars = sum(len(p) for p in prompts)
+        # For legacy on_llm_start, we don't have message objects, just strings.
+        # Store them as a simple list if dumping prompts is enabled.
+        messages = prompts if self.dump_prompts else None
         self._record_start(
             run_id,
             agent=_extract_agent_name(metadata),
             model=_extract_model_name(serialized, kwargs),
             message_count=len(prompts),
             prompt_chars=prompt_chars,
+            messages=messages,
         )
 
     # -- call-end handlers ----------------------------------------------------
@@ -299,6 +347,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             start = self._pending.pop(str(run_id), None)
             ticker, date = self._ticker, self._date
             log_path = self.log_path
+            prompts_dir = self.prompts_dir
         if start is None:
             # No matching start record (e.g. handler was constructed mid-run,
             # or this is a call type we don't track the start of). Skip
@@ -307,6 +356,19 @@ class LLMCallLogHandler(BaseCallbackHandler):
 
         duration_seconds = time.monotonic() - start["start_monotonic"]
         prompt_chars = start["prompt_chars"]
+
+        # Write prompt dump if enabled
+        prompt_dump_path = None
+        if self.dump_prompts and prompts_dir is not None:
+            dump_filename = f"{run_id}.json"
+            dump_file_path = prompts_dir / dump_filename
+            prompt_dump_data = _format_messages_for_dump(start.get("messages"))
+            dump_file_path.write_text(
+                json.dumps(prompt_dump_data, indent=2, default=str),
+                encoding="utf-8",
+            )
+            # Store relative path for the JSONL record
+            prompt_dump_path = f"prompts/{dump_filename}"
 
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -322,6 +384,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             "output_tokens": output_tokens,
             "duration_seconds": round(duration_seconds, 3),
             "error": error,
+            "prompt_dump_path": prompt_dump_path,
         }
 
         with self._lock:
