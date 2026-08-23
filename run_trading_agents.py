@@ -206,7 +206,7 @@ from tradingagents.simulation import SimulationClientError
 _CONFIG_FILE_FLAG_KEYS = (
     "llm_provider", "deep_think_llm", "quick_think_llm", "report_dir",
     "show_summary", "use_dates_from_json", "portfolio", "style",
-    "depot_id", "memory_id",
+    "depot_id", "memory_id", "llm_call_log_prompts",
 )
 _CONFIG_FILE_RECOGNIZED_KEYS = frozenset({"stocks_file", "config", *_CONFIG_FILE_FLAG_KEYS})
 
@@ -570,6 +570,11 @@ def main():
     parser.add_argument('--memory-id', dest='memory_id', default=None,
                         help='Named memory ID to isolate SQLite decision history '
                              '(default: off, uses runs/memory/memory.db).')
+    parser.add_argument('--llm-call-log-prompts', dest='llm_call_log_prompts', action='store_true', default=None,
+                        help='Write the full rendered prompt of every LLM call to disk under the '
+                             'report dir, alongside the per-call llm_calls.jsonl log '
+                             '(default: off; also settable via the llm_call_log_prompts config key '
+                             'or TRADINGAGENTS_LLM_CALL_LOG_PROMPTS env var).')
     args = parser.parse_args()
 
     # No arguments case: print help to stdout and exit 0 (issue #124). This
@@ -808,6 +813,14 @@ def main():
     # Set memory_id if provided (issue #114)
     if args.memory_id:
         config["memory_id"] = args.memory_id
+
+    # Set llm_call_log_prompts if provided (issue #139). `is not None` (not
+    # truthiness) so an explicit False from a top-level config-file key is
+    # honored the same as a CLI-omitted flag would be — both leave
+    # DEFAULT_CONFIG's own False in place, but this keeps the check correct
+    # if that ever changes.
+    if args.llm_call_log_prompts is not None:
+        config["llm_call_log_prompts"] = args.llm_call_log_prompts
 
     effective_provider = config["llm_provider"]
 
