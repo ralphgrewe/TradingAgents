@@ -141,7 +141,10 @@ OpenAI-compatible providers (openai, xai, deepseek, qwen/qwen-cn, glm/glm-cn, mi
 ollama, openrouter, mistral) all share `OpenAIClient`; anthropic, google, azure, and perplexity
 each have a dedicated client. Provider-specific "thinking" knobs (`google_thinking_level`,
 `openai_reasoning_effort`, `anthropic_effort`) are applied per-provider in
-`TradingAgentsGraph._get_provider_kwargs`.
+`TradingAgentsGraph._get_provider_kwargs`. The same method applies `ollama_num_ctx` (issue #149) for
+the `ollama` provider — forwarded through `OpenAIClient.get_llm` as `extra_body={"options":
+{"num_ctx": N}}`, Ollama's OpenAI-compatible endpoint's non-standard way of pinning context length
+per request. See "Oversize-prompt enforcement" under Configuration below for why this exists.
 
 ## Data vendors
 
@@ -294,6 +297,40 @@ The corpus and retrieval are designed to support **on-demand, query-scoped wiki 
 than automatic prompt injection. See `docs/design/llm-wiki.md` for the design rationale, article
 schema, ingestion pipeline, and extensibility guidance for wiring the wiki into other agents
 (trader, researchers, risk team).
+
+### Oversize-prompt enforcement (issue #149)
+
+`docs/analysis/prompt-truncation-diagnosis.md` (issue #148) found that a prompt exceeding a local
+Ollama model's actual (VRAM-tiered auto-fit, not fixed) context window can be silently truncated with
+no error and no indication in `llm_calls.jsonl` — and that the provider-reported `input_tokens` cannot
+be used to detect this (it locks to a wrong constant past a size threshold). `TradingAgentsGraph`
+addresses this by attaching `ContextWindowGuardHandler` (`tradingagents/llm_call_log.py`) to every LLM
+call's callbacks, regardless of what callbacks the caller passed in:
+
+- **`ollama_num_ctx`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX`, default `None`/unset): explicit context
+  length forwarded to Ollama's OpenAI-compatible endpoint per request (see "LLM providers" above) and
+  used as the *known* context window for `quick_think_llm`/`deep_think_llm` when `llm_provider` is
+  `"ollama"`. Left unset, Ollama's own invisible auto-fit still governs and this check has nothing to
+  compare against for the ollama provider.
+- **`context_window_overrides`** (config-only dict, `{model_name: context_window_tokens}`, default
+  `{}`): lets any provider/model opt into the same check without this codebase guessing a limit it has
+  no evidence for. Takes precedence over the `ollama_num_ctx`-derived entry for the same model name.
+- **`context_window_safety_margin`** (env: `TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN`, default
+  `1.3`): multiplier applied to the #147 `prompt_tokens_estimated` figure before comparing it to the
+  known window, since #148's calibration found that estimate under-counts the real (provider-native)
+  tokenizer's output on the Ollama/Ministral corpus by roughly 1.3x–1.9x.
+- **`context_window_check_enabled`** (env: `TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED`, default
+  `True`): the escape hatch. Enforcement is on by default, but only actually enforces something once a
+  context window is known (`ollama_num_ctx` or `context_window_overrides`) — an unknown model always
+  passes through unchecked, so out of the box (neither set) this is a no-op.
+
+A model with no known context window is never checked. When a checked prompt's adjusted estimate
+exceeds the known window, the run aborts with `PromptContextOverflowError` (naming the agent, model,
+measured/adjusted prompt size, and limit) before the call is dispatched, and the failure is also
+written to that ticker's `llm_calls.jsonl` with the same error-record shape a failed call gets. This
+follows the same hard-fail precedent as the memory MCP server above: `run_trading_agents.py`'s
+per-ticker `except Exception` already treats this like any other run-aborting error (flushes the call
+log, prints the error, exits) with no code change needed for that behavior.
 
 ### Accessing configuration in code
 

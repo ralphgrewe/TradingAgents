@@ -25,6 +25,7 @@ from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.llm_call_log import ContextWindowGuardHandler, LLMCallLogHandler
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.memory.mcp_client import MemoryMCPClient
 from tradingagents.reporting import write_report_tree
@@ -77,6 +78,18 @@ class TradingAgentsGraph:
         self._validate_risk_stage(self.config.get("risk_stage", "debate"))
 
         self.callbacks = callbacks or []
+
+        # Oversize-prompt enforcement (issue #149): a dedicated callback
+        # handler that aborts a run before a prompt exceeding a *known*
+        # context window is dispatched -- see llm_call_log.py's "oversize-
+        # prompt enforcement" section for the full design rationale. Added
+        # for every TradingAgentsGraph regardless of what callbacks the
+        # caller passed in (so every entry point -- cli/main.py,
+        # run_trading_agents.py, and any future one -- gets the check without
+        # having to wire it up itself), and is a safe no-op when no context
+        # window is known for the configured models (context_windows empty)
+        # or when context_window_check_enabled is False.
+        self.callbacks = [*self.callbacks, self._build_context_window_guard()]
 
         # Update the interface's config
         set_config(self.config)
@@ -201,6 +214,47 @@ class TradingAgentsGraph:
                 f"{', '.join(sorted(valid_values))}"
             )
 
+    def _build_context_window_guard(self) -> ContextWindowGuardHandler:
+        """Build the issue #149 oversize-prompt guard from ``self.config``.
+
+        ``context_windows`` (model name -> known context-window tokens) is
+        resolved once here, not per call: the ollama-derived entry comes from
+        ``ollama_num_ctx`` (applied to both ``quick_think_llm`` and
+        ``deep_think_llm`` -- the only two model names this run will ever use)
+        when the configured provider is ``"ollama"``, and any
+        ``context_window_overrides`` entries are layered on top (explicit
+        overrides win over the ollama-derived value for the same model name).
+        A model with no entry either way is passed through unchecked by
+        ``ContextWindowGuardHandler`` -- see that class's docstring.
+
+        The guard writes its JSONL audit record through whichever
+        ``LLMCallLogHandler`` is present in ``self.callbacks`` (found by
+        type, not by name, since callers construct and pass it themselves --
+        see cli/main.py / run_trading_agents.py). ``None`` when no such
+        handler was passed in: the guard still raises, it just has nowhere to
+        write the audit record.
+        """
+        provider = self.config.get("llm_provider", "").lower()
+
+        context_windows: dict[str, int] = dict(self.config.get("context_window_overrides") or {})
+        if provider == "ollama":
+            num_ctx = self.config.get("ollama_num_ctx")
+            if num_ctx:
+                num_ctx = int(num_ctx)
+                context_windows.setdefault(self.config.get("quick_think_llm"), num_ctx)
+                context_windows.setdefault(self.config.get("deep_think_llm"), num_ctx)
+
+        log_handler = next(
+            (cb for cb in self.callbacks if isinstance(cb, LLMCallLogHandler)), None
+        )
+
+        return ContextWindowGuardHandler(
+            context_windows=context_windows,
+            safety_margin=float(self.config.get("context_window_safety_margin", 1.3)),
+            enabled=bool(self.config.get("context_window_check_enabled", True)),
+            log_handler=log_handler,
+        )
+
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
@@ -220,6 +274,17 @@ class TradingAgentsGraph:
             effort = self.config.get("anthropic_effort")
             if effort:
                 kwargs["effort"] = effort
+
+        elif provider == "ollama":
+            # Explicit context-length override (issue #149) -- see
+            # default_config.py's "ollama_num_ctx" doc comment and
+            # docs/analysis/prompt-truncation-diagnosis.md. int() tolerates a
+            # string value here (e.g. from TRADINGAGENTS_OLLAMA_NUM_CTX,
+            # which _coerce leaves as a raw string when the default is None
+            # -- same pattern as "temperature" below).
+            num_ctx = self.config.get("ollama_num_ctx")
+            if num_ctx:
+                kwargs["num_ctx"] = int(num_ctx)
 
         # Temperature is supported by all providers. Cast through float() so a
         # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config

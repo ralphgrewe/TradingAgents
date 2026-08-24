@@ -155,6 +155,7 @@ Design notes (continued):
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -165,6 +166,8 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import LLMResult
+
+logger = logging.getLogger(__name__)
 
 # chars/4 heuristic for estimating token counts from character counts,
 # consistent with tradingagents/dataflows/tavily_search.py's evidence-pack
@@ -652,6 +655,61 @@ class LLMCallLogHandler(BaseCallbackHandler):
             return
         self._finish(run_id, input_tokens=None, output_tokens=None, error=_format_error(error))
 
+    # -- pre-dispatch abort (issue #149) --------------------------------------
+
+    def log_precheck_error(
+        self,
+        *,
+        agent: str,
+        model: str,
+        message_count: int,
+        prompt_chars: int,
+        prompt_tokens_estimated: int,
+        token_count_method: str,
+        error: str,
+    ) -> None:
+        """Write a JSONL record for a call aborted *before* dispatch.
+
+        Called by ``ContextWindowGuardHandler`` when a prompt is estimated to
+        exceed the model's known context window (``PromptContextOverflowError``)
+        — the acceptance criterion in issue #149 that this event must reach
+        ``llm_calls.jsonl`` "using the existing error-record shape". The
+        record matches what ``on_llm_error`` writes (``input_tokens``/
+        ``output_tokens`` are ``None``, ``error`` populated), except
+        ``duration_seconds`` is ``0.0`` (the call never reached the provider)
+        and there is no ``run_id``-based ``_pending`` entry to pop — the call
+        never got as far as ``on_chat_model_start`` finishing, since the guard
+        raises before that.
+        """
+        if not self.enabled:
+            return
+        with self._lock:
+            ticker, date = self._ticker, self._date
+            log_path = self.log_path
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": None,
+            "ticker": ticker,
+            "date": date,
+            "agent": agent,
+            "model": model,
+            "message_count": message_count,
+            "prompt_chars": prompt_chars,
+            "prompt_tokens_estimated": prompt_tokens_estimated,
+            "token_count_method": token_count_method,
+            "input_tokens": None,
+            "output_tokens": None,
+            "duration_seconds": 0.0,
+            "error": error,
+            "prompt_dump_path": None,
+        }
+
+        with self._lock:
+            self._records.append(record)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
     # -- summary ---------------------------------------------------------------
 
     def get_records(
@@ -732,3 +790,217 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             bucket["error_count"] += 1
 
     return dict(aggregates)
+
+
+# -- oversize-prompt enforcement (issue #149) ---------------------------------
+#
+# Part of the #146 tracking issue's third sub-issue. #147 made the prompt-size
+# estimate (prompt_tokens_estimated / token_count_method above) trustworthy;
+# #148 (docs/analysis/prompt-truncation-diagnosis.md) confirmed truncation is
+# plausible/observed under real memory pressure (Ollama's VRAM-tiered
+# auto-fit context window can land at 4096 regardless of what a model could
+# nominally support) and that the provider-reported ``input_tokens`` cannot be
+# used to detect it (Anomaly A: a wrong, size-independent constant). This
+# section makes the failure loud instead of silent: before a prompt is
+# dispatched, compare its #147 estimate (with a safety margin -- see
+# ``context_window_safety_margin`` in default_config.py) against a *known*
+# context window for that model. "Known" currently means: the model matches
+# an entry in the ``context_windows`` mapping the caller supplies --
+# ``TradingAgentsGraph.__init__`` builds this from ``ollama_num_ctx`` (for the
+# ollama provider) and ``context_window_overrides`` (any provider, opt-in).
+# A model not in that mapping is passed through unchecked -- guessing a limit
+# this codebase has no evidence for is explicitly out of scope (see #149's
+# "Out of scope" and the parent #146 issue's provider-coverage note).
+
+
+class PromptContextOverflowError(RuntimeError):
+    """Raised when a prompt's estimated size exceeds the model's known context window.
+
+    Deliberately a dedicated exception type (not a bare ``RuntimeError`` or
+    ``ValueError``) so callers — and tests — can distinguish "this run was
+    aborted because a prompt didn't fit" from any other failure. Carries the
+    fields needed both for the actionable error message below and for the
+    JSONL audit record ``ContextWindowGuardHandler`` writes via
+    ``LLMCallLogHandler.log_precheck_error`` before re-raising.
+    """
+
+    def __init__(
+        self,
+        *,
+        agent: str,
+        model: str,
+        prompt_tokens_estimated: int,
+        token_count_method: str,
+        context_window: int,
+        safety_margin: float,
+    ) -> None:
+        self.agent = agent
+        self.model = model
+        self.prompt_tokens_estimated = prompt_tokens_estimated
+        self.token_count_method = token_count_method
+        self.context_window = context_window
+        self.safety_margin = safety_margin
+        self.adjusted_tokens = int(prompt_tokens_estimated * safety_margin)
+
+        message = (
+            f"Prompt for agent '{agent}' (model '{model}') is estimated at "
+            f"{prompt_tokens_estimated} tokens ({token_count_method}); with the "
+            f"configured {safety_margin:g}x safety margin that is ~"
+            f"{self.adjusted_tokens} tokens, which exceeds the known context "
+            f"window of {context_window} tokens for this model. The run has "
+            "been aborted instead of risking a decision made from a silently "
+            "truncated prompt (issue #149). To fix: raise the model's context "
+            "window (see docs/local-models.md 'Context-Length Knobs', e.g. "
+            "TRADINGAGENTS_OLLAMA_NUM_CTX for Ollama) or reduce this prompt's "
+            "size (fewer debate/risk-discussion rounds, shorter memory "
+            "injection, fewer selected analysts). To disable this check "
+            "entirely (not recommended), set "
+            "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false."
+        )
+        super().__init__(message)
+
+
+class ContextWindowGuardHandler(BaseCallbackHandler):
+    """Callback handler that aborts a run before dispatching an oversize prompt.
+
+    A deliberately separate, minimal handler rather than folding this into
+    ``LLMCallLogHandler``: that handler's whole design (see its module
+    docstring) is that logging must *never* break a run, so it never sets
+    ``raise_error``. This handler's entire purpose is the opposite — to
+    raise, on purpose, exactly when a prompt doesn't fit — so it gets its own
+    class with ``raise_error = True`` rather than weakening the logging
+    handler's "never break a run" guarantee.
+
+    LangChain's callback manager (``langchain_core.callbacks.manager.
+    handle_event``) invokes ``on_chat_model_start``/``on_llm_start`` callbacks
+    *before* the underlying HTTP request is dispatched, and re-raises a
+    handler's exception immediately when that handler's ``raise_error`` is
+    ``True`` (instead of logging-and-swallowing it, the default for every
+    other handler). That is what makes "before a call is dispatched" true
+    here without any change to call sites throughout ``tradingagents/agents/``
+    — every LLM call in this codebase goes through this same callback path
+    regardless of which agent or provider made it.
+
+    Only the deliberate oversize check is allowed to raise: token counting
+    reuses ``_count_prompt_tokens``, which by construction never raises (see
+    the module docstring's "Tokenizer strategy"), and the only I/O this class
+    performs (writing the JSONL audit record) is wrapped in its own
+    try/except so a logging failure can't either mask the real error or
+    (accidentally, via ``raise_error``) replace it with an unrelated one.
+    """
+
+    raise_error = True
+
+    def __init__(
+        self,
+        context_windows: dict[str, int] | None = None,
+        safety_margin: float = 1.3,
+        enabled: bool = True,
+        log_handler: LLMCallLogHandler | None = None,
+    ) -> None:
+        super().__init__()
+        self.context_windows = dict(context_windows or {})
+        self.safety_margin = safety_margin
+        self.enabled = enabled
+        self.log_handler = log_handler
+
+    def _check(
+        self,
+        *,
+        agent: str,
+        model: str,
+        message_count: int,
+        prompt_chars: int,
+        prompt_text: str,
+        llm_type: str | None,
+    ) -> None:
+        if not self.enabled:
+            return
+        context_window = self.context_windows.get(model)
+        if context_window is None:
+            # Unknown model: no known limit to check against, so pass
+            # through unchecked rather than guess (see module-section note).
+            return
+
+        token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
+        adjusted = token_count * self.safety_margin
+        if adjusted <= context_window:
+            return
+
+        error = PromptContextOverflowError(
+            agent=agent,
+            model=model,
+            prompt_tokens_estimated=token_count,
+            token_count_method=token_count_method,
+            context_window=context_window,
+            safety_margin=self.safety_margin,
+        )
+
+        if self.log_handler is not None:
+            try:
+                self.log_handler.log_precheck_error(
+                    agent=agent,
+                    model=model,
+                    message_count=message_count,
+                    prompt_chars=prompt_chars,
+                    prompt_tokens_estimated=token_count,
+                    token_count_method=token_count_method,
+                    error=str(error),
+                )
+            except Exception:
+                logger.warning(
+                    "ContextWindowGuardHandler: failed to write the oversize-prompt "
+                    "audit record to llm_calls.jsonl; aborting the run anyway.",
+                    exc_info=True,
+                )
+
+        raise error
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[BaseMessage]],
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not self.enabled or not self.context_windows:
+            return
+        flat_messages = [m for batch in messages for m in batch]
+        prompt_text = "".join(_message_text(m) for m in flat_messages)
+        model = _extract_model_name(serialized, kwargs)
+        self._check(
+            agent=_extract_agent_name(metadata),
+            model=model,
+            message_count=len(flat_messages),
+            prompt_chars=len(prompt_text),
+            prompt_text=prompt_text,
+            llm_type=_extract_llm_type(kwargs),
+        )
+
+    def on_llm_start(
+        self,
+        serialized: dict[str, Any],
+        prompts: list[str],
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not self.enabled or not self.context_windows:
+            return
+        prompt_text = "".join(prompts)
+        model = _extract_model_name(serialized, kwargs)
+        self._check(
+            agent=_extract_agent_name(metadata),
+            model=model,
+            message_count=len(prompts),
+            prompt_chars=len(prompt_text),
+            prompt_text=prompt_text,
+            llm_type=_extract_llm_type(kwargs),
+        )

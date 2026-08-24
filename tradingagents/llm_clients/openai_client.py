@@ -323,6 +323,23 @@ class OpenAIClient(BaseLLMClient):
                 continue
             llm_kwargs[key] = self.kwargs[key]
 
+        # Ollama-native context-length override (issue #149, per the #148
+        # diagnosis at docs/analysis/prompt-truncation-diagnosis.md): num_ctx
+        # has no OpenAI chat-completions equivalent, so it can't go through
+        # _PASSTHROUGH_KWARGS as a direct ChatOpenAI constructor kwarg.
+        # Ollama's OpenAI-compatible endpoint accepts it via a non-standard
+        # top-level "options" request field instead (confirmed live by
+        # scripts/repro_ollama_token_anomaly.py) -- ChatOpenAI's own
+        # ``extra_body`` field is serialized as extra top-level JSON on every
+        # request, which is exactly the hook this needs. Only forwarded when
+        # the caller actually set num_ctx (ollama_num_ctx config key,
+        # TradingAgentsGraph._get_provider_kwargs) -- other OpenAI-compatible
+        # providers don't get this kwarg passed to them at all, so they never
+        # see an "options" field they might reject.
+        num_ctx = self.kwargs.get("num_ctx")
+        if num_ctx is not None:
+            llm_kwargs["extra_body"] = {"options": {"num_ctx": int(num_ctx)}}
+
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
 

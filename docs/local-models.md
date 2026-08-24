@@ -47,10 +47,8 @@ If you see a CPU/GPU split and your run is slow, your model is too large for you
 > **See also**: [`docs/analysis/prompt-truncation-diagnosis.md`](analysis/prompt-truncation-diagnosis.md)
 > (issue #148) diagnoses two token-accounting anomalies observed against a live local Ollama server — a
 > provider-reported `input_tokens` figure that becomes a wrong constant (2051) above a size threshold, and
-> a ~4096-token ceiling below what this codebase's own prompts can reach. It also corrects the "flat 4096
-> default" claim below: this repo's `ollama_num_ctx` knob does not exist yet (see that report's
-> recommendation for #149) and nothing in this codebase pins `num_ctx` today, so the effective context
-> window is entirely up to Ollama's own auto-fit behavior described next.
+> a ~4096-token ceiling below what this codebase's own prompts can reach. It also recommended the
+> `ollama_num_ctx` knob and the oversize-prompt check documented below (issue #149), both now implemented.
 
 ### Ollama Server Default
 
@@ -101,16 +99,57 @@ Or set it persistently in your shell profile or systemd service.
 
 #### 3. API Request Parameter (lowest precedence, per-call)
 
-This repo talks to Ollama via the **OpenAI-compatible endpoint** at `http://localhost:11434/v1` (overridable via `OLLAMA_BASE_URL`). The context length **comes from the Ollama server or model configuration**, not from TradingAgents' config.
-
-If you need per-call context overrides, they would be set at the Ollama API level:
+This repo talks to Ollama via the **OpenAI-compatible endpoint** at `http://localhost:11434/v1` (overridable via `OLLAMA_BASE_URL`). Per-call overrides are set at the Ollama API level via a non-standard `options` request field:
 
 ```bash
 curl http://localhost:11434/api/chat \
   -d '{"model": "llama2", "messages": [...], "options": {"num_ctx": 8192}}'
 ```
 
-This repo does not expose such per-call overrides — context length is a server/model property.
+**As of issue #149, this repo *does* expose that override**, via the `ollama_num_ctx` config key
+(env `TRADINGAGENTS_OLLAMA_NUM_CTX`, default unset). When set, `TradingAgentsGraph` forwards it as
+`extra_body={"options": {"num_ctx": N}}` on every `ChatOpenAI` request for the `ollama` provider
+(`tradingagents/llm_clients/openai_client.py`'s `OpenAIClient.get_llm`) — the same mechanism the
+`curl` example above uses, just sent automatically on every call instead of typed by hand. Leaving it
+unset preserves the pre-#149 behavior exactly: Ollama's own VRAM-tiered auto-fit still decides context
+length, invisibly, as described above.
+
+**Why you should set it anyway**: without a known, code-controlled context length, this codebase cannot
+tell whether a given prompt fits — see "Oversize-Prompt Enforcement" below, which depends on
+`ollama_num_ctx` (or a `context_window_overrides` entry) being set to have anything to check against.
+
+### Oversize-Prompt Enforcement (issue #149)
+
+Before dispatching any LLM call, `ContextWindowGuardHandler` (`tradingagents/llm_call_log.py`) compares
+that call's #147 prompt-size estimate (`prompt_tokens_estimated`, tiktoken-based where available —
+**not** the provider-reported `input_tokens`, which #148 showed becomes an unreliable constant on Ollama
+past a size threshold) against the model's *known* context window. "Known" means the model has an entry
+in the mapping `TradingAgentsGraph` builds from:
+
+- `ollama_num_ctx` (above), applied to both `quick_think_llm` and `deep_think_llm` when the configured
+  provider is `ollama`; and/or
+- `context_window_overrides` — a `{model_name: context_window_tokens}` dict config key, for any
+  provider/model to opt in explicitly without this codebase guessing a limit it has no evidence for
+  (explicit overrides win over the ollama-derived value for the same model name).
+
+A model with **no** entry either way is passed through **unchecked** — an unknown limit is never enforced,
+matching this project's stance of not fabricating context-window numbers it doesn't actually know.
+
+When a prompt *is* checked and its estimate — multiplied by `context_window_safety_margin` (default
+`1.3`, env `TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN`; #148's calibration found the estimate
+under-counts Ministral's real tokenizer by roughly 1.3×–1.9×) — exceeds the known window, the run aborts
+immediately with a `PromptContextOverflowError` naming the agent, model, measured/adjusted prompt size,
+and the limit, and points back at this section and at `context_window_overrides`/`ollama_num_ctx` for the
+remedy. The event is also written to that ticker's `llm_calls.jsonl` with the same error-record shape a
+failed call gets (`input_tokens`/`output_tokens` null, `error` populated), so a batch run
+(`run_trading_agents.py`) leaves diagnosable evidence behind even though it aborts that ticker rather
+than continuing on a possibly-truncated prompt.
+
+**Escape hatch**: set `context_window_check_enabled=False` (env
+`TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false`) to disable this check entirely. Enforcement is on by
+default, but it only ever *does* anything once a context window is actually known (`ollama_num_ctx` or
+`context_window_overrides`) — with neither set, the mechanism is active but every call is an "unknown
+model," so nothing is enforced (the pre-#149 behavior).
 
 ## Practical Guidance for ~12 GB VRAM
 

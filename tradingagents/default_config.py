@@ -30,6 +30,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_RESEARCH_SEARCH_QUERIES_MAX": "research_search_queries_max",
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
     "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
+    "TRADINGAGENTS_OLLAMA_NUM_CTX":       "ollama_num_ctx",
+    "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED": "context_window_check_enabled",
+    "TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN": "context_window_safety_margin",
     "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
     "TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD": "swing_trader_min_risk_reward",
     "TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS": "swing_trader_max_holding_days",
@@ -141,6 +144,52 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # to finish a normal turn while still failing fast on a truly wedged
     # endpoint; override via TRADINGAGENTS_LLM_TIMEOUT for slower hardware.
     "llm_timeout": 120,
+    # Explicit Ollama context length (issue #149, per the #148 diagnosis at
+    # docs/analysis/prompt-truncation-diagnosis.md): without this, Ollama's
+    # actual serving context window is an invisible, VRAM-tiered auto-fit
+    # ("4k/32k/256k based on VRAM") that this codebase cannot see or reason
+    # about, and #148 observed it landing as low as 4096 under real memory
+    # pressure. When set, this value is forwarded to Ollama's OpenAI-compatible
+    # endpoint as a non-standard top-level ``options.num_ctx`` request field
+    # (see ``tradingagents.llm_clients.openai_client.OpenAIClient.get_llm``)
+    # AND used as the known context window for the oversize-prompt check
+    # below. None (default) means "don't set it" -- Ollama keeps auto-fitting,
+    # and the oversize check has no known window to check the ollama provider
+    # against (an unknown limit is never enforced -- see
+    # context_window_check_enabled). Only meaningful for provider "ollama".
+    # See docs/local-models.md "Context-Length Knobs" for sizing guidance.
+    "ollama_num_ctx": None,
+    # Oversize-prompt enforcement (issue #149): before an LLM call is
+    # dispatched, ContextWindowGuardHandler (tradingagents/llm_call_log.py)
+    # compares the #147 tiktoken/heuristic prompt-size estimate --
+    # deliberately NOT the provider-reported input_tokens, which #148 showed
+    # is unreliable for this comparison on Ollama past a size threshold --
+    # against the known context window for that model (currently: only
+    # ollama_num_ctx above, plus any per-model context_window_overrides
+    # entry). A model with no known window is never checked (a guessed limit
+    # is worse than no check). This is the escape hatch: set to False to
+    # disable enforcement entirely (not recommended -- the whole point of
+    # #149 is to fail loudly instead of silently deciding on a truncated
+    # prompt).
+    "context_window_check_enabled": True,
+    # Multiplier applied to the prompt-size estimate before comparing it to
+    # the known context window. #148's calibration against the Ollama/
+    # Ministral corpus found the #147 estimate under-counts the real
+    # (provider-native) tokenizer's output by roughly 1.3x-1.9x -- so
+    # comparing the raw estimate to the window at face value would miss
+    # prompts that are actually oversize by the model's own tokenizer. This
+    # single global margin is a simplification of #148's "provider-family-
+    # aware margin would be more accurate" recommendation; override per
+    # environment via the env var below if calibration for your model
+    # differs.
+    "context_window_safety_margin": 1.3,
+    # Per-model known context windows (model name -> tokens), for providers
+    # other than ollama to opt into the same oversize check without this
+    # codebase guessing a limit it has no evidence for. Takes precedence over
+    # the ollama_num_ctx-derived entry for the same model name. Empty by
+    # default: config-only (no single env var fits a dict of model names), set
+    # programmatically or in a config file.
+    "context_window_overrides": {},
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
