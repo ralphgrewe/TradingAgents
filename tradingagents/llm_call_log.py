@@ -23,13 +23,113 @@ Design notes:
   (a ``uuid.UUID``) that its matching ``on_llm_end`` call also carries.
   In-flight start/end pairs are keyed by that ``run_id`` (never by "the last
   call") so interleaved calls from concurrent analysts pair up correctly.
-- Prompt size is reported both as a raw character count and as an estimated
-  token count using the chars/4 heuristic already used elsewhere in this
-  codebase (see ``tradingagents/dataflows/tavily_search.py``), explicitly
-  labeled as an estimate. ``input_tokens``/``output_tokens`` are the
-  provider-reported figures from ``usage_metadata`` on the response when
-  available (e.g. Ollama via the OpenAI-compatible endpoint supplies these),
-  else ``None``.
+- Prompt size is reported both as a raw character count (``prompt_chars``)
+  and as a token count (``prompt_tokens_estimated``) — the field name and
+  meaning (a token count for the prompt) are unchanged from before issue
+  #147, but the *value* now comes from a real tokenizer where one is
+  available, falling back to the chars/4 heuristic already used elsewhere in
+  this codebase (see ``tradingagents/dataflows/tavily_search.py``) otherwise.
+  A new field, ``token_count_method``, names which of the two produced the
+  number for that record (see "Tokenizer strategy" below) so a consumer can
+  tell a real count from an approximation instead of having to guess.
+  ``input_tokens``/``output_tokens`` are the provider-reported figures from
+  ``usage_metadata`` on the response when available (e.g. Ollama via the
+  OpenAI-compatible endpoint supplies these), else ``None``.
+
+Tokenizer strategy (issue #147)
+--------------------------------
+``_CHARS_PER_TOKEN_ESTIMATE`` (chars/4) was the only token-count mechanism
+through issue #138/#143. Measured against the ~33-run corpus under
+``reports/*/llm_calls.jsonl``, its error against provider-reported
+``input_tokens`` was large and asymmetric enough (issue #146/#147) that the
+number could not be used to reason about context-window headroom. This
+module now picks a counting mechanism per call, based on which LangChain
+chat-model class made it (read from ``invocation_params["_type"]``, the
+``_llm_type`` LangChain attaches to every chat model — see
+``_extract_llm_type``), and always labels the result:
+
+- **``"tiktoken"``** — used when ``_type == "openai-chat"``, i.e. the call
+  went through ``langchain_openai.ChatOpenAI`` or a subclass of it. Every
+  OpenAI-compatible provider this codebase's ``OpenAIClient`` routes to
+  (openai, xai, deepseek, qwen/qwen-cn, glm/glm-cn, minimax/minimax-cn,
+  ollama, openrouter, mistral, kimi, groq, nvidia, openai_compatible — see
+  ``tradingagents/llm_clients/factory.py`` and ``openai_client.py``) shares
+  this LangChain class regardless of what model the base_url actually points
+  at. ``tiktoken.encoding_for_model`` is tried first (exact for genuine
+  OpenAI model names); an unrecognized name (the common case here, since
+  most of these providers serve their own model names, e.g. Ollama's
+  ``ministral-3:3b``) falls back to a fixed modern encoding
+  (``_TIKTOKEN_FALLBACK_ENCODING = "o200k_base"``) as a family-level
+  approximation, not a claim of an exact match to that model's own
+  tokenizer. Anthropic (``_type == "anthropic-chat"``) is deliberately
+  *not* in this set: the ``anthropic`` SDK's only token-counting entry
+  point, ``client.messages.count_tokens``, is a network call to Anthropic's
+  Token Count API (verified against ``anthropic`` 0.120.0's source), not a
+  local computation — making a network round trip on every LLM call's
+  logging path is the wrong trade for a hot path, so Anthropic calls use the
+  heuristic below instead. Google, Azure, Perplexity, Bedrock and Intel XPU
+  calls do the same: no local/offline tokenizer for those was evaluated as
+  clearly better than an explicitly-labeled heuristic, so they are left on
+  it rather than reaching for an approximation with an undocumented error
+  bar.
+- **``"heuristic_chars_per_token"``** — the chars/4 estimate, used whenever
+  the tiktoken path above doesn't apply, tiktoken raises for any reason
+  (unavailable, unexpected input, ...), or the calling code predates this
+  field entirely (see "Backward compatibility" below). This is graceful
+  degradation by construction: nothing on this path raises out to the
+  caller (see "must never break a run" below).
+
+**Calibration.** Run against the same ~33-run / 521-call corpus using the
+prompt dumps under ``reports/*/prompts/`` (``llm_call_log_prompts=True`` was
+set for these runs), re-tokenizing each prompt's actual text with tiktoken
+and comparing to that call's provider-reported ``input_tokens`` (520 calls
+had both a dump and a reported ``input_tokens``; all via Ollama, models
+``ministral-3:3b``/``ministral-3:8b``, family ``"openai-chat"``):
+
+  - tiktoken ratio to reported ``input_tokens``: mean 1.96x, median 1.59x,
+    36.7% of calls within ±20%.
+  - chars/4 ratio to reported ``input_tokens`` (same calls): mean 1.90x,
+    median 1.50x, 26.9% of calls within ±20%.
+  - tiktoken and chars/4 track each other closely (tiktoken averages ~5%
+    higher token counts than chars/4 on this corpus) and neither is
+    consistently closer to reported ``input_tokens`` than the other
+    (tiktoken closer on 242/520 calls, chars/4 closer on 272/520, 6 ties).
+
+Two things follow from this. First, tiktoken is a real, modest improvement
+in the "close enough" bucket (+10 points within ±20%) even against a model
+family (Ministral via Ollama) it was never designed for, which is the
+expected outcome of a family-level approximation rather than an exact
+match — for genuine OpenAI models it is exact. Second, and more
+importantly: neither counter tracks reported ``input_tokens`` well on this
+corpus, and they disagree with it in the *same direction and rough
+magnitude* as each other. That is consistent with the anomaly living in
+``input_tokens``/the provider-reported path rather than in the
+counting-instrument change made here — which is exactly the question issue
+#146's next sub-issue (diagnosing the truncation/anomaly itself) is scoped
+to answer, not this one. This module's job was only to make the measuring
+instrument itself sound and its error bar documented, which the above does.
+
+**No import-time cost, no crash risk.** ``tiktoken`` is imported lazily
+inside ``_get_tiktoken_encoding``, matching the lazy-import-per-provider
+convention in ``tradingagents/llm_clients/factory.py`` — importing this
+module never pulls in ``tiktoken`` for a run that never hits the
+OpenAI-compatible path. Encodings are cached per model name
+(``_TIKTOKEN_ENCODING_CACHE``) so the (comparatively expensive) BPE rank
+load happens once per model, not once per call, across the lifetime of the
+process. ``_count_prompt_tokens`` never raises: a missing tokenizer, an
+unrecognized model, or any exception mid-encode all fall back to the
+heuristic rather than failing the call that triggered the log record —
+instrumentation failing a trading run is a worse outcome than an imprecise
+number.
+
+**Backward compatibility.** Pre-#147 records in the existing
+``reports/*/llm_calls.jsonl`` corpus have no ``token_count_method`` field at
+all (it did not exist yet) — ``scripts/analyze_llm_calls.py`` and any other
+reader should treat a missing/absent field as ``"heuristic_chars_per_token"``,
+which is what those records' numbers always were.
+
+Design notes (continued):
+
 - Records are appended as JSONL (one JSON object per line) to a file the
   caller supplies. This module does not decide *where* that file lives —
   callers follow the results-directory layout already used for a run's other
@@ -68,26 +168,112 @@ from langchain_core.outputs import LLMResult
 
 # chars/4 heuristic for estimating token counts from character counts,
 # consistent with tradingagents/dataflows/tavily_search.py's evidence-pack
-# budgeting. This is explicitly an estimate, not a real tokenizer count.
+# budgeting. This is explicitly an estimate, not a real tokenizer count;
+# used as the fallback whenever a real tokenizer isn't available (see
+# "Tokenizer strategy" in the module docstring).
 _CHARS_PER_TOKEN_ESTIMATE = 4
+
+# Names written to the new `token_count_method` field, distinguishing a real
+# tokenizer count from the chars/4 heuristic fallback (issue #147).
+_TOKEN_COUNT_METHOD_TIKTOKEN = "tiktoken"
+_TOKEN_COUNT_METHOD_HEURISTIC = "heuristic_chars_per_token"
+
+# LangChain invocation_params["_type"] values that indicate the call went
+# through langchain_openai.ChatOpenAI or a subclass of it — every provider
+# tradingagents/llm_clients/openai_client.py's OpenAIClient routes to (see
+# "Tokenizer strategy" in the module docstring for the full provider list
+# and the reasoning). tiktoken only ships true encodings for OpenAI's own
+# model names, so applying it to this whole family is a deliberate
+# family-level approximation for the non-OpenAI members, not a claim of
+# exactness — see the calibration write-up above.
+_TIKTOKEN_LLM_TYPES = frozenset({"openai-chat"})
+
+# Fallback tiktoken encoding for model names tiktoken.encoding_for_model
+# doesn't recognize (the common case for this family — see above). o200k_base
+# is the encoding OpenAI's current-generation models use; picked as a modern,
+# general-purpose BPE vocabulary rather than a claim of exactness for
+# non-OpenAI models.
+_TIKTOKEN_FALLBACK_ENCODING = "o200k_base"
+
+# Cache of model name -> tiktoken encoding, so the (comparatively expensive)
+# BPE rank load happens once per model name, not once per LLM call. Guarded
+# by _TIKTOKEN_LOCK since concurrent analysts (analyst_concurrency_limit) can
+# race to populate it from different threads.
+_TIKTOKEN_ENCODING_CACHE: dict[str, Any] = {}
+_TIKTOKEN_LOCK = threading.Lock()
+
+
+def _get_tiktoken_encoding(model: str) -> Any:
+    """Return a cached tiktoken encoding for ``model``, loading it on first use.
+
+    ``tiktoken`` is imported lazily here (not at module import time) so a run
+    that never hits the OpenAI-compatible path never pays its import cost,
+    matching the lazy-import-per-provider convention in
+    ``tradingagents/llm_clients/factory.py``. Raises whatever ``tiktoken``
+    raises on a genuine failure (e.g. the package isn't installed) — callers
+    are expected to catch broadly, since this is not the fallback path itself
+    (see ``_count_prompt_tokens``).
+    """
+    with _TIKTOKEN_LOCK:
+        cached = _TIKTOKEN_ENCODING_CACHE.get(model)
+        if cached is not None:
+            return cached
+
+        import tiktoken
+
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
+        _TIKTOKEN_ENCODING_CACHE[model] = encoding
+        return encoding
+
+
+def _count_prompt_tokens(text: str, model: str, llm_type: str | None) -> tuple[int, str]:
+    """Return ``(token_count, method)`` for a prompt's full text.
+
+    Uses tiktoken when ``llm_type`` names a ChatOpenAI-family provider (see
+    ``_TIKTOKEN_LLM_TYPES``); otherwise, and on any failure loading or
+    running the tokenizer (missing dependency, unexpected input, ...), falls
+    back to the chars/4 heuristic. Never raises: a broken tokenizer must
+    degrade the number, not fail the LLM call it's logging (see the module
+    docstring's "must never break a run" note).
+    """
+    if llm_type in _TIKTOKEN_LLM_TYPES:
+        try:
+            encoding = _get_tiktoken_encoding(model)
+            # disallowed_special=() so a prompt that happens to contain a
+            # substring that looks like a tiktoken special token (e.g. text
+            # copied from a chat transcript) is counted as ordinary text
+            # instead of raising ValueError.
+            token_count = len(encoding.encode(text, disallowed_special=()))
+            return token_count, _TOKEN_COUNT_METHOD_TIKTOKEN
+        except Exception:
+            pass  # fall through to the heuristic below
+    return len(text) // _CHARS_PER_TOKEN_ESTIMATE, _TOKEN_COUNT_METHOD_HEURISTIC
+
+
+def _message_text(message: BaseMessage) -> str:
+    """Return the text content of a (possibly multimodal) message, concatenated."""
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content)
 
 
 def _message_text_len(message: BaseMessage) -> int:
     """Return the character length of a (possibly multimodal) message's content."""
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return len(content)
-    if isinstance(content, list):
-        total = 0
-        for block in content:
-            if isinstance(block, str):
-                total += len(block)
-            elif isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    total += len(text)
-        return total
-    return len(str(content))
+    return len(_message_text(message))
 
 
 def _extract_model_name(serialized: dict[str, Any] | None, kwargs: dict[str, Any]) -> str:
@@ -125,6 +311,31 @@ def _extract_agent_name(metadata: dict[str, Any] | None) -> str:
         if node:
             return str(node)
     return "unknown"
+
+
+def _extract_llm_type(kwargs: dict[str, Any]) -> str | None:
+    """Return the LangChain ``_type`` invocation param, or ``None`` when absent.
+
+    ``BaseChatModel._get_invocation_params`` includes ``"_type"`` — derived
+    from each chat model class's ``_llm_type`` property — alongside
+    ``"model"`` for every provider this codebase wires up (verified for
+    ``ChatOpenAI``/its ``OpenAIClient`` subclasses: ``"openai-chat"``;
+    ``ChatAnthropic``: ``"anthropic-chat"``; ``ChatGoogleGenerativeAI``:
+    ``"chat-google-generative-ai"``; ``AzureChatOpenAI``:
+    ``"azure-openai-chat"``). It is the tokenizer-family signal used by
+    ``_count_prompt_tokens`` (see the module docstring's "Tokenizer
+    strategy") because, unlike the model name, it doesn't depend on
+    providers using recognizable name prefixes — several OpenAI-compatible
+    providers in this codebase serve custom or locally-hosted model names
+    (e.g. Ollama's ``ministral-3:3b``) that a name-based heuristic would
+    misclassify.
+    """
+    invocation_params = kwargs.get("invocation_params")
+    if isinstance(invocation_params, dict):
+        llm_type = invocation_params.get("_type")
+        if isinstance(llm_type, str):
+            return llm_type
+    return None
 
 
 def _extract_usage(response: LLMResult) -> tuple[int | None, int | None]:
@@ -267,6 +478,8 @@ class LLMCallLogHandler(BaseCallbackHandler):
         model: str,
         message_count: int,
         prompt_chars: int,
+        token_count: int,
+        token_count_method: str,
         messages: list[BaseMessage] | None = None,
     ) -> None:
         with self._lock:
@@ -276,6 +489,8 @@ class LLMCallLogHandler(BaseCallbackHandler):
                 "model": model,
                 "message_count": message_count,
                 "prompt_chars": prompt_chars,
+                "token_count": token_count,
+                "token_count_method": token_count_method,
                 "messages": messages if self.dump_prompts else None,
             }
 
@@ -293,13 +508,18 @@ class LLMCallLogHandler(BaseCallbackHandler):
         if not self.enabled:
             return
         flat_messages = [m for batch in messages for m in batch]
-        prompt_chars = sum(_message_text_len(m) for m in flat_messages)
+        prompt_text = "".join(_message_text(m) for m in flat_messages)
+        model = _extract_model_name(serialized, kwargs)
+        llm_type = _extract_llm_type(kwargs)
+        token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
         self._record_start(
             run_id,
             agent=_extract_agent_name(metadata),
-            model=_extract_model_name(serialized, kwargs),
+            model=model,
             message_count=len(flat_messages),
-            prompt_chars=prompt_chars,
+            prompt_chars=len(prompt_text),
+            token_count=token_count,
+            token_count_method=token_count_method,
             messages=flat_messages if self.dump_prompts else None,
         )
 
@@ -316,16 +536,21 @@ class LLMCallLogHandler(BaseCallbackHandler):
     ) -> None:
         if not self.enabled:
             return
-        prompt_chars = sum(len(p) for p in prompts)
+        prompt_text = "".join(prompts)
+        model = _extract_model_name(serialized, kwargs)
+        llm_type = _extract_llm_type(kwargs)
+        token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
         # For legacy on_llm_start, we don't have message objects, just strings.
         # Store them as a simple list if dumping prompts is enabled.
         messages = prompts if self.dump_prompts else None
         self._record_start(
             run_id,
             agent=_extract_agent_name(metadata),
-            model=_extract_model_name(serialized, kwargs),
+            model=model,
             message_count=len(prompts),
-            prompt_chars=prompt_chars,
+            prompt_chars=len(prompt_text),
+            token_count=token_count,
+            token_count_method=token_count_method,
             messages=messages,
         )
 
@@ -379,7 +604,8 @@ class LLMCallLogHandler(BaseCallbackHandler):
             "model": start["model"],
             "message_count": start["message_count"],
             "prompt_chars": prompt_chars,
-            "prompt_tokens_estimated": prompt_chars // _CHARS_PER_TOKEN_ESTIMATE,
+            "prompt_tokens_estimated": start["token_count"],
+            "token_count_method": start["token_count_method"],
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "duration_seconds": round(duration_seconds, 3),
@@ -475,7 +701,9 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     Returns a dict keyed by agent/node name with:
       - ``call_count``: number of LLM calls attributed to this agent.
       - ``total_prompt_tokens_estimated`` / ``max_prompt_tokens_estimated``:
-        sum/max of each call's chars/4 estimate (always available).
+        sum/max of each call's ``prompt_tokens_estimated`` (a real tokenizer
+        count or the chars/4 heuristic fallback — see ``token_count_method``
+        on the individual record; always available either way).
       - ``total_output_tokens``: sum of provider-reported ``output_tokens``
         (calls where the provider didn't report usage contribute 0).
       - ``error_count``: how many of those calls failed (records with a

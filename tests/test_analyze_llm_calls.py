@@ -163,6 +163,17 @@ class TestCallRecord:
         assert record.input_tokens is None
         assert record.error is None
 
+    def test_from_jsonl_dict_pre_147_record_defaults_token_count_method_to_heuristic(self):
+        """A record written before issue #147 has no token_count_method key at all
+        (``_call_record()`` doesn't set one) -- it must load as the heuristic, since
+        that's what those numbers always were."""
+        record = CallRecord.from_jsonl_dict(_call_record())
+        assert record.token_count_method == "heuristic_chars_per_token"
+
+    def test_from_jsonl_dict_reads_explicit_token_count_method(self):
+        record = CallRecord.from_jsonl_dict(_call_record(token_count_method="tiktoken"))
+        assert record.token_count_method == "tiktoken"
+
     def test_run_dir_captured_at_load_time(self, tmp_path):
         run_dir = tmp_path / "AAPL_2026-08-23_run1"
         record = CallRecord.from_jsonl_dict(_call_record(), run_dir=run_dir)

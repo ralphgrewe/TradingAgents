@@ -21,7 +21,15 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
-from tradingagents.llm_call_log import LLMCallLogHandler, summarize_records
+from tradingagents.llm_call_log import (
+    _TOKEN_COUNT_METHOD_HEURISTIC,
+    _TOKEN_COUNT_METHOD_TIKTOKEN,
+    LLMCallLogHandler,
+    _count_prompt_tokens,
+    _extract_llm_type,
+    _get_tiktoken_encoding,
+    summarize_records,
+)
 
 
 def _chat_result(content: str, input_tokens=None, output_tokens=None) -> LLMResult:
@@ -912,3 +920,220 @@ def test_prompt_dump_on_error(tmp_path):
     record = handler.get_records()[0]
     assert record["prompt_dump_path"] == f"prompts/{run_id}.json"
     assert "TimeoutError" in record["error"]
+
+
+# -- token counting: real tokenizer vs. heuristic fallback (issue #147) -----
+
+
+def test_extract_llm_type_reads_invocation_params_underscore_type():
+    assert _extract_llm_type({"invocation_params": {"_type": "openai-chat"}}) == "openai-chat"
+    assert (
+        _extract_llm_type({"invocation_params": {"_type": "anthropic-chat"}}) == "anthropic-chat"
+    )
+
+
+def test_extract_llm_type_returns_none_when_absent_or_malformed():
+    assert _extract_llm_type({}) is None
+    assert _extract_llm_type({"invocation_params": {}}) is None
+    assert _extract_llm_type({"invocation_params": "not-a-dict"}) is None
+    assert _extract_llm_type({"invocation_params": {"_type": 123}}) is None
+
+
+def test_count_prompt_tokens_uses_tiktoken_for_openai_chat_llm_type():
+    """A ChatOpenAI-family call (_type == 'openai-chat') gets a real tokenizer count."""
+    import tiktoken
+
+    text = "The quick brown fox jumps over the lazy dog. " * 10
+    count, method = _count_prompt_tokens(text, "gpt-4o-mini", "openai-chat")
+
+    assert method == _TOKEN_COUNT_METHOD_TIKTOKEN
+    expected = len(
+        tiktoken.encoding_for_model("gpt-4o-mini").encode(text, disallowed_special=())
+    )
+    assert count == expected
+    # A real BPE count is not the same figure as the chars/4 heuristic.
+    assert count != len(text) // 4
+
+
+def test_count_prompt_tokens_falls_back_to_heuristic_for_non_openai_llm_type():
+    """anthropic-chat (and any other non-ChatOpenAI _type) has no local tokenizer, so
+    it degrades to the heuristic and is labeled as such (see module docstring:
+    the Anthropic SDK's only counting entry point is a network call)."""
+    text = "x" * 400
+    count, method = _count_prompt_tokens(text, "claude-sonnet-4-6", "anthropic-chat")
+
+    assert method == _TOKEN_COUNT_METHOD_HEURISTIC
+    assert count == 100
+
+
+def test_count_prompt_tokens_falls_back_to_heuristic_when_llm_type_is_unknown():
+    """No invocation_params at all (llm_type=None) -- the common case for callers that
+    don't pass invocation_params, e.g. plain on_llm_start callbacks."""
+    text = "y" * 40
+    count, method = _count_prompt_tokens(text, "some-model", None)
+
+    assert method == _TOKEN_COUNT_METHOD_HEURISTIC
+    assert count == 10
+
+
+def test_get_tiktoken_encoding_unknown_model_name_falls_back_to_default_encoding():
+    """A model name tiktoken doesn't recognize (the common case: most OpenAI-compatible
+    providers here serve non-OpenAI-branded names, e.g. Ollama's ministral-3:3b) still
+    returns a usable encoding rather than raising."""
+    encoding = _get_tiktoken_encoding("ministral-3:3b-totally-unrecognized")
+    assert encoding.name == "o200k_base"
+
+
+def test_get_tiktoken_encoding_is_cached_per_model(monkeypatch):
+    """Tokenizer objects are built once per model name, not once per call."""
+    import tradingagents.llm_call_log as llm_call_log
+
+    llm_call_log._TIKTOKEN_ENCODING_CACHE.clear()
+    calls = {"n": 0}
+    real_get_tiktoken_encoding = llm_call_log._get_tiktoken_encoding
+
+    # Call twice for the same model; only the first should hit tiktoken itself.
+    first = real_get_tiktoken_encoding("gpt-4o-mini")
+    calls["n"] += 1
+    second = real_get_tiktoken_encoding("gpt-4o-mini")
+    calls["n"] += 1
+
+    assert first is second
+    assert "gpt-4o-mini" in llm_call_log._TIKTOKEN_ENCODING_CACHE
+
+
+def test_count_prompt_tokens_degrades_to_heuristic_when_tokenizer_raises(monkeypatch):
+    """A tokenizer exception (corrupt encoding, missing dependency, ...) must never
+    propagate out of the logging path -- it degrades to the heuristic instead."""
+    import tradingagents.llm_call_log as llm_call_log
+
+    def _boom(model):
+        raise RuntimeError("tokenizer exploded")
+
+    monkeypatch.setattr(llm_call_log, "_get_tiktoken_encoding", _boom)
+
+    text = "z" * 800
+    count, method = llm_call_log._count_prompt_tokens(text, "gpt-4o-mini", "openai-chat")
+
+    assert method == _TOKEN_COUNT_METHOD_HEURISTIC
+    assert count == 200
+
+
+def test_handler_records_tiktoken_method_and_count_for_openai_chat_calls(tmp_path):
+    """End-to-end: on_chat_model_start with invocation_params identifying an
+    OpenAI-family call produces a real-tokenizer-labeled record."""
+    import tiktoken
+
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+    text = "Hello there, this is a test prompt with several distinct words in it."
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content=text)]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Market Analyst"},
+        invocation_params={"model": "gpt-4o-mini", "_type": "openai-chat"},
+    )
+    handler.on_llm_end(_chat_result("ok"), run_id=run_id)
+
+    record = handler.get_records()[0]
+    assert record["token_count_method"] == "tiktoken"
+    expected = len(
+        tiktoken.encoding_for_model("gpt-4o-mini").encode(text, disallowed_special=())
+    )
+    assert record["prompt_tokens_estimated"] == expected
+
+
+def test_handler_records_heuristic_method_for_anthropic_calls(tmp_path):
+    """A ChatAnthropic call (_type == 'anthropic-chat') has no local tokenizer, so the
+    record is labeled heuristic and the value matches chars/4."""
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+    text = "a" * 400
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "claude-sonnet-4-6"}},
+        [[HumanMessage(content=text)]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Trader"},
+        invocation_params={"model": "claude-sonnet-4-6", "_type": "anthropic-chat"},
+    )
+    handler.on_llm_end(_chat_result("ok"), run_id=run_id)
+
+    record = handler.get_records()[0]
+    assert record["token_count_method"] == "heuristic_chars_per_token"
+    assert record["prompt_tokens_estimated"] == 100
+
+
+def test_handler_records_heuristic_method_when_no_invocation_params_given(tmp_path):
+    """The pre-#147 call shape (no invocation_params kwarg at all, as in the other tests
+    in this file) still produces a valid record, labeled heuristic."""
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content="hello"), HumanMessage(content="world!")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Market Analyst"},
+    )
+    handler.on_llm_end(_chat_result("ok"), run_id=run_id)
+
+    record = handler.get_records()[0]
+    assert record["token_count_method"] == "heuristic_chars_per_token"
+    assert record["prompt_tokens_estimated"] == record["prompt_chars"] // 4
+
+
+def test_handler_records_tiktoken_method_via_on_llm_start_legacy_path(tmp_path):
+    """The legacy string-prompts on_llm_start path also wires invocation_params through."""
+    import tiktoken
+
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+    prompts = ["first prompt with some words", "second prompt with a few more words"]
+
+    handler.on_llm_start(
+        {"kwargs": {"model": "gpt-4o-mini"}},
+        prompts,
+        run_id=run_id,
+        metadata={"langgraph_node": "Legacy Node"},
+        invocation_params={"model": "gpt-4o-mini", "_type": "openai-chat"},
+    )
+    handler.on_llm_end(_chat_result("ok"), run_id=run_id)
+
+    record = handler.get_records()[0]
+    assert record["token_count_method"] == "tiktoken"
+    expected = len(
+        tiktoken.encoding_for_model("gpt-4o-mini").encode(
+            "".join(prompts), disallowed_special=()
+        )
+    )
+    assert record["prompt_tokens_estimated"] == expected
+
+
+def test_reading_a_pre_change_record_without_token_count_method_field(tmp_path):
+    """A record written before issue #147 (no token_count_method key at all) must still
+    be readable -- summarize_records must not choke on the missing field, and
+    prompt_tokens_estimated (the old field, unchanged in name/meaning) still works."""
+    pre_change_record = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "run_id": "old-run",
+        "ticker": "AAPL",
+        "date": "2024-01-15",
+        "agent": "Market Analyst",
+        "model": "ministral-3:3b",
+        "message_count": 1,
+        "prompt_chars": 400,
+        "prompt_tokens_estimated": 100,
+        "input_tokens": 90,
+        "output_tokens": 10,
+        "duration_seconds": 1.0,
+        "error": None,
+        "prompt_dump_path": None,
+        # no "token_count_method" key -- this is the pre-#147 shape.
+    }
+
+    summary = summarize_records([pre_change_record])
+    assert summary["Market Analyst"]["call_count"] == 1
+    assert summary["Market Analyst"]["total_prompt_tokens_estimated"] == 100

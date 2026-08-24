@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tradingagents.llm_call_log import _CHARS_PER_TOKEN_ESTIMATE
+from tradingagents.llm_call_log import _CHARS_PER_TOKEN_ESTIMATE, _TOKEN_COUNT_METHOD_HEURISTIC
 
 # ─── Segment anchors (define in one place for easy extension) ──────────────
 
@@ -126,6 +126,7 @@ class CallRecord:
     message_count: int
     prompt_chars: int
     prompt_tokens_estimated: int
+    token_count_method: str
     input_tokens: int | None
     output_tokens: int | None
     duration_seconds: float
@@ -145,6 +146,10 @@ class CallRecord:
             message_count=d.get("message_count", 0),
             prompt_chars=d.get("prompt_chars", 0),
             prompt_tokens_estimated=d.get("prompt_tokens_estimated", 0),
+            # Pre-#147 records predate this field entirely; those numbers were
+            # always the chars/4 heuristic, so a missing field defaults to it
+            # (see tradingagents/llm_call_log.py's module docstring).
+            token_count_method=d.get("token_count_method") or _TOKEN_COUNT_METHOD_HEURISTIC,
             input_tokens=d.get("input_tokens"),
             output_tokens=d.get("output_tokens"),
             duration_seconds=d.get("duration_seconds", 0.0),
