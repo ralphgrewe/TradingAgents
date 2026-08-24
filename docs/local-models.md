@@ -186,7 +186,8 @@ Use this data to inform which optimizations matter most for your setup (see "Can
 
 ## Candidate Optimizations (Follow-Up Issues)
 
-The measurement run this section used to recommend has now happened: **`docs/analysis/prompt-size-findings.md`**
+The measurement run this section used to recommend has now happened:
+**[`docs/analysis/prompt-size-findings.md`](analysis/prompt-size-findings.md)**
 (issue #144) reports the actual corpus-wide numbers — which agent's prompts are largest and slowest, and
 what a Portfolio Manager prompt is made of, segment by segment, with reproducible commands and cited
 examples. Read that report before choosing an optimization; the headline findings are that the Portfolio
@@ -195,9 +196,11 @@ analyst reports (~32% median) dominate its prompt today, and that memory injecti
 the one segment with no size cap and is projected to overtake both of those as ticker history accumulates.
 
 Ranking concrete optimizations against those numbers — with estimated savings, effort, and risk for each —
-is issue #145's job (`docs/analysis/prompt-optimization-options.md` once it lands), not this guide's. **Do
-not guess which optimization to try**: read the findings report, then the optimization-options report, and
-pick from its checklist rather than this list.
+is now done: **[`docs/analysis/prompt-optimization-options.md`](analysis/prompt-optimization-options.md)**
+(issue #145) ranks the available options into a shortening-first (Tier 1) vs. long-prompt-handling
+fallback (Tier 2) list, gives an explicit cross-tier ranking with a "start here" recommendation, and ends
+in a selection checklist. **Do not guess which optimization to try**: read the findings report, then the
+optimization-options report, and pick from its checklist rather than this list.
 
 ## See Also
 
