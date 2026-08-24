@@ -186,16 +186,18 @@ Use this data to inform which optimizations matter most for your setup (see "Can
 
 ## Candidate Optimizations (Follow-Up Issues)
 
-Once you've measured where the tokens go (via the per-call log), these optimizations can reduce context burden. **Do not implement these yet** — file separate issues once you have data:
+The measurement run this section used to recommend has now happened: **`docs/analysis/prompt-size-findings.md`**
+(issue #144) reports the actual corpus-wide numbers — which agent's prompts are largest and slowest, and
+what a Portfolio Manager prompt is made of, segment by segment, with reproducible commands and cited
+examples. Read that report before choosing an optimization; the headline findings are that the Portfolio
+Manager is the critical prompt on both size and wall-time, that risk-debate history (~34% median) and
+analyst reports (~32% median) dominate its prompt today, and that memory injection (~14% today, PM-only) is
+the one segment with no size cap and is projected to overtake both of those as ticker history accumulates.
 
-1. **Truncate/summarize analyst reports** before later stages — keep the key findings but drop verbose reasoning. (Impact: saves 20–40% on post-analyst context.)
-2. **Lower `research_evidence_token_budget`** — reduce the evidence pack from web search in researcher mode. (Config key: `research_evidence_token_budget`, default 3000.) (Impact: saves 1–2K tokens in researcher stage.)
-3. **Reduce debate rounds** — `max_debate_rounds` (research debate) and `max_risk_discuss_rounds` (risk debate) re-read the same plans repeatedly. Setting both to 0 removes debate entirely. (Impact: saves 3–8K tokens per debate run.)
-4. **Run fewer analysts** — `selected_analysts` (default: market, social, news, fundamentals) controls which analysts run. Remove slower or redundant ones. (Impact: saves 5–15K tokens, reduces run time.)
-5. **Sequential chunked processing** — for large texts (e.g., news articles in the fundamental analyst), process them in chunks and merge results instead of feeding the full text inline. (Complex; defers to a dedicated issue.)
-6. **Flash Attention for KV cache** — if using llama.cpp 0.3.0+, Flash Attention can reduce KV cache memory by 40–60% without changing context length. Check your Ollama/llama.cpp version and enable if available.
-
-**Do not guess which optimization to try** — start with a measurement run to see which agents burn the most tokens, then file an issue for a concrete optimization targeting that agent.
+Ranking concrete optimizations against those numbers — with estimated savings, effort, and risk for each —
+is issue #145's job (`docs/analysis/prompt-optimization-options.md` once it lands), not this guide's. **Do
+not guess which optimization to try**: read the findings report, then the optimization-options report, and
+pick from its checklist rather than this list.
 
 ## See Also
 
