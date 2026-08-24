@@ -44,9 +44,24 @@ If you see a CPU/GPU split and your run is slow, your model is too large for you
 
 ## Context-Length Knobs
 
+> **See also**: [`docs/analysis/prompt-truncation-diagnosis.md`](analysis/prompt-truncation-diagnosis.md)
+> (issue #148) diagnoses two token-accounting anomalies observed against a live local Ollama server — a
+> provider-reported `input_tokens` figure that becomes a wrong constant (2051) above a size threshold, and
+> a ~4096-token ceiling below what this codebase's own prompts can reach. It also corrects the "flat 4096
+> default" claim below: this repo's `ollama_num_ctx` knob does not exist yet (see that report's
+> recommendation for #149) and nothing in this codebase pins `num_ctx` today, so the effective context
+> window is entirely up to Ollama's own auto-fit behavior described next.
+
 ### Ollama Server Default
 
-By default, **Ollama uses a context window of 4,096 tokens** for all models. This is typically the KV cache budget you get unless you override it.
+Ollama does **not** use a fixed context window by default. With `OLLAMA_CONTEXT_LENGTH` unset, the server
+auto-fits context length to free VRAM at model-load time — `ollama serve --help` (verified against Ollama
+0.32.3) documents this as **"4k/32k/256k based on VRAM"**. This was confirmed live during the #148
+investigation: the same model's context varied across separate loads on one machine purely as a function
+of how much VRAM a concurrent process had claimed at that moment (observed values: 11677, 10887, 9622,
+9596, and — under real memory pressure — exactly **4096**). Do not assume "4096" as a safe floor or a
+predictable value; see the diagnosis linked above for the full picture, including how this interacts with
+the KV-cache/offload mechanism described next.
 
 ### How to Configure Context Length
 
