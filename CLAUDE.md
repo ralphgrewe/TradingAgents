@@ -488,10 +488,12 @@ the same precedent as `MemoryMCPConnectionError` and `PromptContextOverflowError
   via `SignalProcessor` parsing.
 
 When a ticker aborts with `PortfolioDecisionError`, the exception propagates to `run_trading_agents.py`'s
-per-ticker `except Exception` handler, which treats it like any other run-aborting error (flushes the
-call log, prints the error, and continues to the next ticker). The failing ticker is absent from
-`portfolio_ratings` passed to `run_portfolio_mode`, which drops it with its existing "pipeline run failed"
-warning rather than trading on a parsed guess.
+per-ticker `except Exception` handler, which treats it like any other run-aborting error: flushes the
+call log, prints the error, and **exits the process** (`run_trading_agents.py:977` calls `sys.exit(1)`),
+ending the entire batch rather than continuing to the next ticker. This fail-fast behaviour is
+deliberate (see `docs/analysis/structured-output-failure-diagnosis.md` for the investigation that
+surfaced it) and stays as-is; a ticker that never gets far enough to hit this handler simply never
+appears in `portfolio_ratings` passed to `run_portfolio_mode`.
 
 ### Accessing configuration in code
 
