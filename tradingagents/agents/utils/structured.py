@@ -462,61 +462,25 @@ def run_structured_with_tools(
     retry_trace: list[BaseMessage] | None = None
 
     if structured_llm is not None:
+        # Normalize both failure shapes -- a raised exception, or a silent
+        # ``None`` return (issue #160) -- into a single "did the first attempt
+        # fail, and why" description, so there is exactly one retry block
+        # below instead of one copy per failure shape.
+        first_failure: Exception | str | None = None
         try:
             structured_result = structured_llm.invoke(message_trace)
             if structured_result is None:
                 # Silent None return: model emitted prose instead of a tool call.
-                # Treat as a failure and trigger retry logic (issue #160).
                 first_failure = "returned None (model emitted no tool call)"
-                should_retry = bool(
-                    get_config().get("structured_output_repair_retry", True)
-                )
-
-                if should_retry:
-                    logger.warning(
-                        "%s: structured output failed after tool loop (%s); "
-                        "retrying once with schema-repair instruction",
-                        agent_name, first_failure,
-                    )
-
-                    # Append repair instruction to trace
-                    repair_instruction = _generate_repair_instruction(response_model)
-                    retry_trace = message_trace + [HumanMessage(content=repair_instruction)]
-
-                    try:
-                        structured_result = structured_llm.invoke(retry_trace)
-                        # Check retry result for None as well (issue #160)
-                        if structured_result is None:
-                            logger.warning(
-                                "%s: structured output retry also returned None; "
-                                "falling back to free text",
-                                agent_name,
-                            )
-                        else:
-                            logger.warning(
-                                "%s: structured output retry succeeded",
-                                agent_name,
-                            )
-                    except Exception as retry_exc:
-                        logger.warning(
-                            "%s: structured output retry also failed (%s); "
-                            "falling back to free text",
-                            agent_name, retry_exc,
-                        )
-                else:
-                    logger.warning(
-                        "%s: structured output failed after tool loop (%s); "
-                        "falling back to free text on the final trace (retry disabled)",
-                        agent_name, first_failure,
-                    )
             else:
                 logger.debug(
                     "%s: structured output succeeded after %d loop rounds",
                     agent_name, round_count,
                 )
         except Exception as exc:
-            # First attempt failed; attempt retry if enabled in config
             first_failure = exc
+
+        if first_failure is not None:
             should_retry = bool(
                 get_config().get("structured_output_repair_retry", True)
             )
