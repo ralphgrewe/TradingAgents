@@ -533,7 +533,7 @@ class TestStructuredOutputRepairRetry:
 
     def test_first_attempt_success_no_retry(self, caplog):
         """When first attempt succeeds, no retry happens."""
-        from tradingagents.dataflows.config import set_config, get_config
+        from tradingagents.dataflows.config import get_config, set_config
         config = get_config().copy()
         config["structured_output_repair_retry"] = True
         set_config(config)
@@ -573,7 +573,7 @@ class TestStructuredOutputRepairRetry:
 
     def test_first_fails_retry_succeeds(self, caplog):
         """When first fails and retry succeeds, return the retry result."""
-        from tradingagents.dataflows.config import set_config, get_config
+        from tradingagents.dataflows.config import get_config, set_config
         config = get_config().copy()
         config["structured_output_repair_retry"] = True
         set_config(config)
@@ -618,7 +618,7 @@ class TestStructuredOutputRepairRetry:
 
     def test_both_attempts_fail_fallback_used(self, caplog):
         """When both attempts fail, fallback to free text."""
-        from tradingagents.dataflows.config import set_config, get_config
+        from tradingagents.dataflows.config import get_config, set_config
         config = get_config().copy()
         config["structured_output_repair_retry"] = True
         set_config(config)
@@ -664,7 +664,7 @@ class TestStructuredOutputRepairRetry:
 
     def test_retry_disabled_by_config(self, caplog):
         """When retry is disabled by config, no retry happens."""
-        from tradingagents.dataflows.config import set_config, get_config
+        from tradingagents.dataflows.config import get_config, set_config
         config = get_config().copy()
         config["structured_output_repair_retry"] = False
         set_config(config)
@@ -709,7 +709,7 @@ class TestStructuredOutputRepairRetry:
 
     def test_structured_llm_none_skips_retry(self, caplog):
         """When structured_llm is None, no retry is attempted."""
-        from tradingagents.dataflows.config import set_config, get_config
+        from tradingagents.dataflows.config import get_config, set_config
         config = get_config().copy()
         config["structured_output_repair_retry"] = True
         set_config(config)

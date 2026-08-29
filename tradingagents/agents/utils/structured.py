@@ -30,6 +30,8 @@ from typing import Any, TypeVar
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
+from tradingagents.dataflows.config import get_config
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -312,8 +314,6 @@ def run_structured_with_tools(
             first_failure = exc
             should_retry = False
 
-            # Import here to avoid circular dependency
-            from tradingagents.dataflows.config import get_config
             if get_config().get("structured_output_repair_retry", True):
                 should_retry = True
 
