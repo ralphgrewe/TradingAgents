@@ -285,6 +285,56 @@ class TestRunStructuredWithToolsFallbackPriority2:
         assert len(invoke_calls) == 2
         assert "fallback invoked fresh LLM response" in caplog.text
 
+    def test_trace_ending_in_whitespace_only_aimessage_invokes_fallback(self, caplog):
+        """Whitespace-only AIMessage content must not be treated as reusable.
+
+        Plain Python truthiness on ``.content`` treats a string like " " or
+        "\\n" as truthy, which would incorrectly reuse it as the "real"
+        answer. This must fall through to the fresh llm.invoke fallback,
+        exactly like fully-empty content does.
+        """
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        # Structured output will fail
+        def _with_structured_output(schema):
+            structured = MagicMock()
+            structured.invoke.side_effect = ValueError("Parsing failed")
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        invoke_calls = []
+
+        def mock_invoke(msg_list):
+            invoke_calls.append(msg_list)
+            if len(invoke_calls) == 1:
+                # Loop returns whitespace-only AIMessage
+                return AIMessage(content="   \n", tool_calls=[])
+            else:
+                # Fallback invoke
+                return MagicMock(content="Fallback content.")
+
+        mock_llm.invoke = mock_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.DEBUG):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        assert result is None
+        assert fallback_text == "Fallback content."
+        # Two invokes: loop and fallback -- the whitespace-only content must
+        # NOT be reused directly.
+        assert len(invoke_calls) == 2
+        assert "fallback invoked fresh LLM response" in caplog.text
+
     def test_max_rounds_zero_still_uses_fallback_invoke(self):
         """max_rounds=0 (no loop) still gets fallback invoke, not trace[-1]."""
         mock_llm = MagicMock()

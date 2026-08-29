@@ -150,13 +150,15 @@ def run_structured_with_tools(
                             failed or is unsupported.
         - fallback_text: Free-text content on fallback, always populated (never None) when
                         ``structured_result`` is None. Sources are prioritized:
-                        1. If the trace ends in an ``AIMessage`` with non-empty content,
-                           that content is normalized and reused (no extra LLM call).
+                        1. If the trace ends in an ``AIMessage`` whose content, once
+                           normalized and stripped of surrounding whitespace, is
+                           non-empty, that normalized content is reused (no extra
+                           LLM call).
                         2. Otherwise, a plain ``llm.invoke`` call on the final trace
                            (mirrors ``invoke_structured_or_freetext``'s fallback).
                         When the trace ends in a ``ToolMessage`` (e.g., tool loop exhausted
-                        its rounds) or an empty ``AIMessage``, path 2 is used.
-                        None when the structured call succeeded.
+                        its rounds) or an empty/whitespace-only ``AIMessage``, path 2 is
+                        used. None when the structured call succeeded.
         - message_trace: The full message history including tool calls and results,
                         useful for prompt logging (e.g., via record_agent_prompt).
 
@@ -312,13 +314,20 @@ def run_structured_with_tools(
         # matches how the graph nodes treat a dead provider elsewhere (abort, don't
         # guess), and keeps the documented invariant that exactly one of
         # structured_result / fallback_text is non-None on every return.
-        if (
-            message_trace
-            and isinstance(message_trace[-1], AIMessage)
-            and message_trace[-1].content
-        ):
-            # Trace ends in an AIMessage with non-empty content: reuse it.
-            fallback_text = _normalize_content(message_trace[-1].content)
+        normalized_last_content = (
+            _normalize_content(message_trace[-1].content)
+            if message_trace and isinstance(message_trace[-1], AIMessage)
+            else None
+        )
+        if normalized_last_content is not None and normalized_last_content.strip():
+            # Trace ends in an AIMessage with non-empty, non-whitespace-only
+            # content: reuse it. Checking after normalization (and stripping
+            # whitespace) -- rather than plain Python truthiness on the raw
+            # ``.content`` -- ensures a whitespace-only string (e.g. " " or
+            # "\n") is treated the same as empty content and falls through to
+            # the fresh-invoke fallback below, instead of being reused as if
+            # it were a real answer.
+            fallback_text = normalized_last_content
             logger.debug(
                 "%s: reusing model's final AIMessage from tool loop as fallback "
                 "(no extra invoke)",
