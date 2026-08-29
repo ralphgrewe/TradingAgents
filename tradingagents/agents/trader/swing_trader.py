@@ -1,4 +1,10 @@
-"""Swing Trader: regime-gated hybrid swing trading decisions with numeric setup levels."""
+"""Swing Trader: regime-gated hybrid swing trading decisions with numeric setup levels.
+
+Every invocation goes through ``run_structured_with_tools``, so the
+structured-output contract (tool loop, free-text fallback, schema-repair retry)
+lives in exactly one place. ``knowledge_base_enabled`` only selects whether the
+strategy-wiki tool and a tool-loop round budget are offered.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +20,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     is_present_text,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    run_structured_with_tools,
-)
+from tradingagents.agents.utils.structured import run_structured_with_tools
 from tradingagents.agents.utils.wiki_tools import search_strategy_wiki
 from tradingagents.dataflows.config import get_config
 
@@ -184,8 +187,6 @@ def create_swing_trader(llm):
     Returns:
         callable node function
     """
-    structured_llm = bind_structured(llm, SwingDecision, "SwingTrader")
-
     def swing_trader_node(state, name):
         config = get_config()
 
@@ -216,27 +217,21 @@ def create_swing_trader(llm):
         knowledge_base_enabled = config.get("knowledge_base_enabled", True)
         max_holding = config.get("swing_trader_max_holding_days", 15)
 
-        # Try structured output with or without knowledge base tools
-        if knowledge_base_enabled:
-            max_rounds = config.get("knowledge_base_tool_max_rounds", 2)
-            structured_result, fallback_text, message_trace = run_structured_with_tools(
-                llm, messages, [search_strategy_wiki], SwingDecision,
-                max_rounds=max_rounds,
-                agent_name="Swing Trader",
-            )
-        else:
-            # When knowledge base is disabled, use the original single-shot structured path
-            structured_result = None
-            fallback_text = None
-            message_trace = list(messages)
+        # One path, always. `knowledge_base_enabled` decides only what the LLM
+        # is offered (the wiki tool plus a tool-loop round budget), not how the
+        # structured call is made. With the knowledge base off, no tools and
+        # max_rounds=0 make run_structured_with_tools skip bind_tools and the
+        # loop entirely, degenerating to the single structured call this branch
+        # used to hand-roll -- but with the shared free-text fallback (#152) and
+        # schema-repair retry (#153), which the hand-rolled branch never had.
+        tools = [search_strategy_wiki] if knowledge_base_enabled else []
+        max_rounds = config.get("knowledge_base_tool_max_rounds", 2) if knowledge_base_enabled else 0
 
-            if structured_llm is not None:
-                try:
-                    structured_result = structured_llm.invoke(messages)
-                    message_trace.append(structured_result)
-                except Exception:
-                    # Fall back to free-text generation
-                    pass
+        structured_result, fallback_text, message_trace = run_structured_with_tools(
+            llm, messages, tools, SwingDecision,
+            max_rounds=max_rounds,
+            agent_name="Swing Trader",
+        )
 
         # Process the structured result if available
         if structured_result is not None:

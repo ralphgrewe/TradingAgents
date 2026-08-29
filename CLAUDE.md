@@ -300,23 +300,40 @@ schema, ingestion pipeline, and extensibility guidance for wiring the wiki into 
 
 ### Structured output repair retry (issue #153)
 
-When the Portfolio Manager or Swing Trader's first structured output call fails (typically due to
-malformed JSON from a weak model), the system can automatically retry exactly once with an explicit
-schema-repair instruction appended to the trace before falling back to free text. This improves
-recovery rates for small local models that frequently produce nearly-correct JSON and correct it
-when told plainly what shape is required.
+When a structured-output call made through `run_structured_with_tools`
+(`tradingagents/agents/utils/structured.py`) fails — typically malformed JSON from a weak model —
+the helper retries exactly once with an explicit schema-repair instruction appended to the trace
+before falling back to free text. This improves recovery rates for small local models that produce
+nearly-correct JSON and correct it when told plainly what shape is required.
+
+This covers the Portfolio Manager and Swing Trader in **both** knowledge-base configurations. Both
+nodes call `run_structured_with_tools` unconditionally; `knowledge_base_enabled` selects only what
+the LLM is offered (`tools=[search_strategy_wiki]` and `max_rounds=knowledge_base_tool_max_rounds`
+when True, `tools=[]` and `max_rounds=0` when False). With no tools nothing is bound and the loop
+body never runs, so the helper degenerates to a single structured call plus the shared
+fallback/retry — which is precisely why neither node keeps its own copy of that logic any more
+(before #153 the knowledge-base-off branch hand-rolled it, and the retry was dead code there). The
+older `invoke_structured_or_freetext` helper, used by other agents, has no retry.
 
 - **`structured_output_repair_retry`** (env: `TRADINGAGENTS_STRUCTURED_OUTPUT_REPAIR_RETRY`, default
   `True`): enable/disable the retry. When enabled and the first structured call fails, the system
-  appends a self-contained instruction listing all required fields and their types (derived from the
-  Pydantic response model) and states that the reply must be JSON only, with no prose. The retry
-  attempt and its outcome (success or failure) are logged at WARNING level. When disabled or when the
-  provider does not support structured output (structured_llm is None), no retry happens — the fallback
-  to free text fires immediately on the first failure.
+  appends a self-contained instruction and states that the reply must be JSON only, with no prose.
+  The retry attempt and its outcome (success or failure) are logged at WARNING level. When disabled
+  or when the provider does not support structured output (`structured_llm is None`), no retry
+  happens — the fallback to free text fires immediately on the first failure.
 
-- If the retry also fails, behaviour is identical to the post-#152 fallback: the trace's last
-  `AIMessage` content is reused if it's non-empty and non-whitespace-only, otherwise a fresh
-  `llm.invoke` call is made for a fallback response.
+- The instruction is derived from `response_model.model_json_schema()`, not from raw Python
+  annotations: each field is rendered with its requiredness, a readable type phrase (enum members as
+  an explicit list of legal values, e.g. `one of: "Buy", "Overweight", …`; numeric bounds; array item
+  shapes) and its `Field(description=...)` text, which per `agents/schemas.py` *is* the model's
+  output instruction. Rendering `field_info.annotation` instead produced `<enum 'PortfolioRating'>`
+  and named none of the legal values on `rating`/`action` — the fields most likely to be malformed.
+
+- If the retry also fails, behaviour is identical to the post-#152 fallback: the *tool-loop* trace's
+  last `AIMessage` content is reused if it's non-empty and non-whitespace-only, otherwise a fresh
+  `llm.invoke` is made for a fallback response. The repair instruction is deliberately excluded from
+  that decision (it would always force the extra invoke the #152 fix exists to avoid), but it *is*
+  present in the returned `message_trace`, which records everything that was sent.
 
 ### Oversize-prompt enforcement (issues #149, #154)
 

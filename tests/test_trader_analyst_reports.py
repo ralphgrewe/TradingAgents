@@ -693,12 +693,14 @@ def _make_pm_state(**overrides):
 class TestPortfolioManagerPromptAssembly:
     """Tests for portfolio manager node prompt assembly with analyst reports.
 
-    These tests exercise the old direct (no-tool) invocation path, where
-    ``llm.invoke`` is called with the rendered prompt string directly, so they
-    disable the wiki tool-loop (``knowledge_base_enabled=False``) -- otherwise
-    (issue #105) PM would route through ``run_structured_with_tools`` and
-    ``llm.invoke`` would receive a list of messages instead of a plain string,
-    which is orthogonal to what this class is testing (prompt-section assembly).
+    These tests exercise the no-tools configuration (``knowledge_base_enabled=
+    False``), which since issue #153 still routes through
+    ``run_structured_with_tools`` -- just with no tools and ``max_rounds=0`` --
+    so that the free-text fallback and schema-repair retry are shared rather
+    than duplicated. Structured output is disabled here (``bind_structured``
+    patched to return None) to force the free-text fallback, whose single
+    ``llm.invoke`` receives the one-element ``[HumanMessage(prompt)]`` list the
+    PM builds; ``call_args[0][0][0].content`` is that rendered prompt.
     """
 
     @pytest.fixture(autouse=True)
@@ -712,7 +714,7 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state()
             pm_node(state)
@@ -720,7 +722,7 @@ class TestPortfolioManagerPromptAssembly:
             # Check that llm.invoke was called (fallback path)
             assert llm.invoke.called
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             # Verify all four reports are in the prompt
             assert "Market research report (JSON envelope):" in prompt
@@ -735,13 +737,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state()
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert "structured JSON envelopes" in prompt
             assert "`signal`" in prompt
@@ -756,13 +758,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(news_report=None, fundamentals_report="")
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             # Market and sentiment should be in the prompt
             assert "Market research report (JSON envelope):" in prompt
@@ -778,13 +780,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state()
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             # These should still be present (requirement: keep investment_plan)
             assert "investment plan: **Bullish outlook from research team**" in prompt
@@ -798,13 +800,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state()
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert "**Risk Analysts Debate History:**" in prompt
             assert "Aggressive analyst: High growth potential." in prompt
@@ -832,13 +834,13 @@ class TestPortfolioManagerPromptAssembly:
             "count": 0,
         }
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(risk_debate_state=empty_risk_state)
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert "**Risk Analysts Debate History:**" not in prompt
 
@@ -851,13 +853,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(asset_type="crypto")
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert (
                 "Asset fundamentals report (may be unavailable for crypto) (JSON envelope):"
@@ -873,13 +875,13 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state()
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert "Company fundamentals report (JSON envelope):" in prompt
 
@@ -890,7 +892,7 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(
                 macro_report=_make_sample_macro_report(),
@@ -899,7 +901,7 @@ class TestPortfolioManagerPromptAssembly:
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             # Verify both macro reports are in the prompt
             assert "Macro fundamentals report (JSON envelope):" in prompt
@@ -912,7 +914,7 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(
                 macro_report=_make_sample_macro_report(),
@@ -921,7 +923,7 @@ class TestPortfolioManagerPromptAssembly:
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             assert "Macro fundamentals report (JSON envelope):" in prompt
             assert "Macro news report (JSON envelope):" not in prompt
@@ -933,7 +935,7 @@ class TestPortfolioManagerPromptAssembly:
         mock_response.content = "BUY"
         llm.invoke.return_value = mock_response
 
-        with patch("tradingagents.agents.managers.portfolio_manager.bind_structured", return_value=None):
+        with patch("tradingagents.agents.utils.structured.bind_structured", return_value=None):
             pm_node = create_portfolio_manager(llm)
             state = _make_pm_state(
                 macro_report=None,
@@ -942,7 +944,7 @@ class TestPortfolioManagerPromptAssembly:
             pm_node(state)
 
             call_args = llm.invoke.call_args
-            prompt = call_args[0][0]
+            prompt = call_args[0][0][0].content
 
             # The four core reports should still be present
             assert "Market research report (JSON envelope):" in prompt

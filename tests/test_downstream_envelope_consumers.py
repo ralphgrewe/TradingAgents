@@ -760,6 +760,72 @@ class TestPortfolioManagerWikiToolIntegration:
         assert "Sell" in result["final_trade_decision"]
         assert "portfolio_structured_data" not in result or result["portfolio_structured_data"] is None
 
+    def test_pm_retries_with_repair_instruction_when_kb_disabled(self):
+        """Issue #153: the schema-repair retry fires with knowledge_base_enabled=False.
+
+        That configuration used to take a hand-rolled ``structured_llm.invoke``
+        path that bypassed ``run_structured_with_tools`` entirely, so the retry
+        added by #153 was dead code for every run with the knowledge base off.
+        The PM now always routes through the shared helper (with no tools and
+        max_rounds=0), so the retry applies in both configurations.
+        """
+        from tradingagents.dataflows.config import set_config
+
+        structured_calls = []
+
+        def _structured_invoke(messages):
+            structured_calls.append(messages)
+            if len(structured_calls) == 1:
+                raise ValueError("Malformed JSON from a weak model")
+            return PortfolioDecision(
+                rating=PortfolioRating.OVERWEIGHT,
+                executive_summary="Repaired on the second attempt.",
+                investment_thesis="Structured output recovered after repair.",
+            )
+
+        structured = MagicMock()
+        structured.invoke = _structured_invoke
+
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        llm.bind_tools = MagicMock(
+            side_effect=AssertionError("bind_tools must not be called with no tools")
+        )
+        llm.invoke = MagicMock(
+            side_effect=AssertionError("free-text fallback must not be reached")
+        )
+
+        set_config({"knowledge_base_enabled": False})
+
+        pm = create_portfolio_manager(llm)
+        state = _envelope_state()
+        state["investment_plan"] = "**Recommendation**: Overweight"
+        state["trader_investment_plan"] = "**Action**: Buy"
+        state["risk_debate_state"] = {
+            "history": "Debate concluded.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        }
+
+        result = pm(state)
+
+        # Exactly two structured attempts: the original and the repair retry.
+        assert len(structured_calls) == 2
+        # The retry appended a repair instruction naming the legal ratings.
+        repair_instruction = structured_calls[1][-1].content
+        assert "Reply with ONLY valid JSON" in repair_instruction
+        assert '"Overweight"' in repair_instruction
+        # The retry's result is what the node returned -- no free-text fallback.
+        assert "**Rating**: Overweight" in result["final_trade_decision"]
+        assert result["portfolio_structured_data"]["rating"] == PortfolioRating.OVERWEIGHT.value
+
     def test_pm_preserves_risk_debate_state(self):
         """Portfolio Manager preserves all risk_debate_state fields correctly."""
         from tradingagents.dataflows.config import set_config

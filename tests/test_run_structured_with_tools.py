@@ -16,7 +16,9 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
+from tradingagents.agents.schemas import PortfolioDecision, SwingDecision
 from tradingagents.agents.utils.structured import (
+    _generate_repair_instruction,
     _normalize_content,
     run_structured_with_tools,
 )
@@ -371,9 +373,17 @@ class TestRunStructuredWithToolsFallbackPriority2:
         assert fallback_text == "Fallback response."
         # One invoke: the fallback (no loop iterations)
         assert len(invoke_calls) == 1
-        # Trace should only have the initial HumanMessage
-        assert len(trace) == 1
+        # The loop contributed nothing, so the trace is the initial
+        # HumanMessage plus the one schema-repair instruction the retry sent
+        # (issue #153) -- the returned trace records everything that was sent.
+        assert len(trace) == 2
         assert isinstance(trace[0], HumanMessage)
+        assert trace[0].content == "Test"
+        assert "Reply with ONLY valid JSON" in trace[1].content
+        # The fallback itself ran on the pre-repair trace (see
+        # run_structured_with_tools: appending the repair instruction must not
+        # disturb the #152 "reuse the final AIMessage" decision).
+        assert invoke_calls[0] == trace[:-1]
 
 
 class TestRunStructuredWithToolsContentNormalization:
@@ -737,3 +747,78 @@ class TestStructuredOutputRepairRetry:
         assert result is None
         assert fallback_text == "Fallback (no structured support)."
         assert "structured output not supported" in caplog.text
+
+
+class TestRepairInstructionRendering:
+    """Tests for _generate_repair_instruction's rendered content (issue #153).
+
+    The instruction is sent verbatim to a model that just failed to produce
+    parseable structured output, so it has to read as instructions -- above all
+    on the enum fields (``rating`` / ``action``), which are both the most
+    consequential and the most likely to be malformed. The first implementation
+    stringified ``field_info.annotation``, which rendered "<enum
+    'PortfolioRating'>" and named none of the legal values.
+    """
+
+    def test_portfolio_decision_lists_legal_rating_values(self):
+        """Every PortfolioRating member is named, so the model can pick one."""
+        instruction = _generate_repair_instruction(PortfolioDecision)
+
+        rating_line = next(
+            line for line in instruction.splitlines() if line.startswith("- rating ")
+        )
+        for legal_value in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
+            assert f'"{legal_value}"' in rating_line
+
+    def test_swing_decision_lists_legal_action_values(self):
+        """Every SwingAction member is named, so the model can pick one."""
+        instruction = _generate_repair_instruction(SwingDecision)
+
+        action_line = next(
+            line for line in instruction.splitlines() if line.startswith("- action ")
+        )
+        for legal_value in ("Buy", "Hold", "Sell"):
+            assert f'"{legal_value}"' in action_line
+
+    @pytest.mark.parametrize("model", [PortfolioDecision, SwingDecision])
+    def test_no_raw_python_reprs(self, model):
+        """No "<class 'float'>" / "<enum 'SwingAction'>" leaks into the prompt."""
+        instruction = _generate_repair_instruction(model)
+
+        assert "<class" not in instruction
+        assert "<enum" not in instruction
+        assert "typing." not in instruction
+
+    @pytest.mark.parametrize("model", [PortfolioDecision, SwingDecision])
+    def test_field_descriptions_are_carried_through(self, model):
+        """Field descriptions -- which *are* the output instructions per
+        agents/schemas.py -- appear in the repair instruction."""
+        instruction = _generate_repair_instruction(model)
+
+        for field_name, field_info in model.model_fields.items():
+            description = field_info.description
+            if not description:
+                continue
+            # Descriptions are whitespace-collapsed onto one line.
+            assert " ".join(description.split()) in instruction, field_name
+
+    def test_required_and_optional_fields_are_distinguished(self):
+        """Optional fields are marked optional so the model doesn't invent values."""
+        instruction = _generate_repair_instruction(PortfolioDecision)
+
+        assert "- executive_summary (required, string)" in instruction
+        assert "- price_target (optional, number or null)" in instruction
+
+    def test_numeric_bounds_are_rendered(self):
+        """Constrained numbers carry their bounds (SwingDecision.conviction)."""
+        instruction = _generate_repair_instruction(SwingDecision)
+
+        assert "- conviction (required, number, >= 0.0, <= 1.0)" in instruction
+
+    def test_instruction_demands_json_only(self):
+        """The instruction still ends with the JSON-only demand."""
+        instruction = _generate_repair_instruction(PortfolioDecision)
+
+        assert instruction.rstrip().endswith(
+            "Reply with ONLY valid JSON, no prose or explanation."
+        )

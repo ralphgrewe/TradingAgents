@@ -7,9 +7,12 @@ CLI display, and saved reports continue to consume the same shape they do
 today.  When a provider does not expose structured output, the agent falls
 back gracefully to free-text generation.
 
-When ``knowledge_base_enabled`` is True (default), the Portfolio Manager
-consults the strategy wiki via a bounded tool-calling loop before delivering
-the final decision, using ``run_structured_with_tools``.
+Every invocation goes through ``run_structured_with_tools`` so the
+structured-output contract (tool loop, free-text fallback, schema-repair
+retry) lives in exactly one place. ``knowledge_base_enabled`` only decides
+whether the strategy-wiki tool and a tool-loop round budget are offered:
+when it is False the helper is called with no tools and ``max_rounds=0``,
+which reduces it to a single structured call plus the shared fallback.
 """
 
 from __future__ import annotations
@@ -23,14 +26,12 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     is_present_text,
 )
-from tradingagents.agents.utils.structured import bind_structured, run_structured_with_tools
+from tradingagents.agents.utils.structured import run_structured_with_tools
 from tradingagents.agents.utils.wiki_tools import search_strategy_wiki
 from tradingagents.dataflows.config import get_config
 
 
 def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
-
     def portfolio_manager_node(state) -> dict:
         asset_type = state.get("asset_type", "stock")
         instrument_context = build_instrument_context(state["company_of_interest"])
@@ -114,50 +115,47 @@ regime-specific approaches (e.g., "Should I use mean reversion in this regime?" 
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{wiki_availability_note}{get_language_instruction()}"""
 
-        # Determine which path to take: with tools or without.
-        # Gate solely on knowledge_base_enabled -- run_structured_with_tools binds
-        # tools via llm.bind_tools(tools) independently of structured-output support,
-        # and handles structured_llm being unusable/None internally by falling back
-        # to free text on the final call. Gating on `structured_llm is not None` here
-        # too would silently skip tool binding (and the wiki_availability_note becomes
-        # a lie to the LLM) whenever the provider doesn't support structured output.
-        if knowledge_base_enabled:
-            # Use the wiki-aware tool-loop path
-            messages = [HumanMessage(content=prompt)]
-            tools = [search_strategy_wiki]
-            structured_result, fallback_text, message_trace = run_structured_with_tools(
-                llm,
-                messages,
-                tools,
-                PortfolioDecision,
-                max_rounds=knowledge_base_tool_max_rounds,
-                agent_name="PortfolioManager",
-            )
+        # One path, always. `knowledge_base_enabled` selects only *what the LLM
+        # is offered* (the wiki tool and a tool-loop budget), never *how the
+        # structured call is made*: with the knowledge base off we hand
+        # run_structured_with_tools no tools and a zero-round budget, so it
+        # skips bind_tools, never enters the loop, and degenerates to the single
+        # structured call this branch used to make by hand -- while still
+        # inheriting the shared fallback (#152) and schema-repair retry (#153).
+        #
+        # The previous shape kept a second, hand-rolled structured/except block
+        # here for the knowledge-base-off case. Every improvement to the shared
+        # helper had to be remembered and re-applied to it, and twice it wasn't
+        # (#105's gate bug, then #153's retry, which was dead code for every run
+        # with knowledge_base_enabled=False).
+        #
+        # Note the gate is *not* also conditioned on `structured_llm is not
+        # None`: run_structured_with_tools binds tools independently of
+        # structured-output support and handles an unusable structured binding
+        # internally, so gating on it here would silently skip tool binding (and
+        # make wiki_availability_note a lie to the LLM) on providers without
+        # structured output (issue #105).
+        messages = [HumanMessage(content=prompt)]
+        tools = [search_strategy_wiki] if knowledge_base_enabled else []
+        max_rounds = knowledge_base_tool_max_rounds if knowledge_base_enabled else 0
 
-            # Decide which output to use: structured result or fallback text
-            if structured_result is not None:
-                final_trade_decision = render_pm_decision(structured_result)
-                portfolio_structured_data = structured_result.dict()
-            else:
-                # fallback_text is guaranteed to be non-None when structured_result is None
-                final_trade_decision = fallback_text
-                portfolio_structured_data = None
+        structured_result, fallback_text, message_trace = run_structured_with_tools(
+            llm,
+            messages,
+            tools,
+            PortfolioDecision,
+            max_rounds=max_rounds,
+            agent_name="PortfolioManager",
+        )
+
+        # Decide which output to use: structured result or fallback text
+        if structured_result is not None:
+            final_trade_decision = render_pm_decision(structured_result)
+            portfolio_structured_data = structured_result.dict()
         else:
-            # Original direct path (no tools): only reached when knowledge_base_enabled
-            # is explicitly False.
-            if structured_llm is not None:
-                try:
-                    structured_result = structured_llm.invoke(prompt)
-                    final_trade_decision = render_pm_decision(structured_result)
-                    portfolio_structured_data = structured_result.dict()
-                except Exception:
-                    # Fall back to free-text generation
-                    final_trade_decision = llm.invoke(prompt).content
-                    portfolio_structured_data = None
-            else:
-                # Provider doesn't support structured output
-                final_trade_decision = llm.invoke(prompt).content
-                portfolio_structured_data = None
+            # fallback_text is guaranteed to be non-None when structured_result is None
+            final_trade_decision = fallback_text
+            portfolio_structured_data = None
 
         # Update risk_debate_state with the judge decision (same logic for both paths)
         new_risk_debate_state = {

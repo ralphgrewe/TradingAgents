@@ -337,8 +337,11 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         # Per #152, this is reused from the trace's final AIMessage, not from
         # an extra llm.invoke call.
         self.assertEqual(fallback_text, "Final response from tool loop")
-        # The trace ends in the AIMessage we reused
-        self.assertEqual(trace[-1].content, "Final response from tool loop")
+        # The tool loop's trace ends in the AIMessage we reused; the returned
+        # trace carries one extra message, the schema-repair instruction the
+        # single retry sent before falling back (issue #153).
+        self.assertEqual(trace[-2].content, "Final response from tool loop")
+        self.assertIn("Reply with ONLY valid JSON", trace[-1].content)
         # No extra llm.invoke call was made (the AIMessage was reused)
         mock_llm.invoke.assert_not_called()
         # Trace should still contain the messages
@@ -586,17 +589,22 @@ class RunStructuredWithToolsTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(fallback_text, "Best-effort HOLD, low confidence")
-        # Trace tail is a bare ToolMessage (loop exhausted mid tool-call) -- the
-        # fallback call must have been made against this exact final trace, not
-        # some earlier point.
-        self.assertIsInstance(trace[-1], ToolMessage)
-        # With retry enabled (issue #153), structured_llm is called twice:
-        # first attempt with original trace, then retry with repair instruction
+        # With retry enabled (issue #153) the returned trace ends with the
+        # schema-repair instruction, and the tool-loop trace it was appended to
+        # is trace[:-1] -- whose tail is the bare ToolMessage left behind when
+        # the loop was exhausted mid tool-call.
+        self.assertIn("Reply with ONLY valid JSON", trace[-1].content)
+        loop_trace = trace[:-1]
+        self.assertIsInstance(loop_trace[-1], ToolMessage)
+        # structured_llm is called twice: first on the tool-loop trace, then on
+        # that same trace plus the repair instruction.
         self.assertEqual(mock_structured_llm.invoke.call_count, 2)
-        # First call should be with just the trace
+        mock_structured_llm.invoke.assert_any_call(loop_trace)
         mock_structured_llm.invoke.assert_any_call(trace)
-        # Fallback should still be called once with just the trace
-        mock_llm.invoke.assert_called_once_with(trace)
+        # The free-text fallback must have been made against the tool-loop
+        # trace (ending in the ToolMessage), not some earlier point -- and not
+        # the repair-appended one, which would defeat the #152 reuse check.
+        mock_llm.invoke.assert_called_once_with(loop_trace)
 
     def test_double_failure_propagates_instead_of_silent_double_none(self):
         """Fix #5: when the structured call fails AND the free-text fallback

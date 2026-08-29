@@ -95,9 +95,18 @@ def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None
             investment_thesis="Balanced view; neither side carried the debate.",
         )
     structured = MagicMock()
-    structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or decision
-    )
+
+    def _capture(prompt):
+        # The PM always calls through run_structured_with_tools, which hands the
+        # structured LLM a message list (one HumanMessage when the knowledge
+        # base is disabled). Capture the rendered prompt text so callers can
+        # assert on prompt sections regardless of message shape.
+        captured["prompt"] = "\n".join(
+            getattr(message, "content", str(message)) for message in prompt
+        )
+        return decision
+
+    structured.invoke.side_effect = _capture
     llm = MagicMock()
     llm.with_structured_output.return_value = structured
     return llm

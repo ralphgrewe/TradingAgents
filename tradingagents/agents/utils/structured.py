@@ -23,6 +23,7 @@ each reinvent and diverge on that logic.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -58,25 +59,143 @@ def _normalize_content(content: Any) -> str:
     return str(content)
 
 
+def _resolve_schema_node(node: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """Inline a ``$ref`` into the node that references it.
+
+    Pydantic renders an enum-typed field as ``{"$ref": "#/$defs/Foo",
+    "description": ...}`` with the enum's ``"enum": [...]`` list living in
+    ``$defs``. Merging the definition into the referencing node (the node's own
+    keys winning, so the *field* description beats the enum class docstring)
+    gives one flat dict carrying both the legal values and the field's
+    instruction text.
+    """
+    ref = node.get("$ref")
+    if not isinstance(ref, str):
+        return node
+    definition = defs.get(ref.rsplit("/", 1)[-1])
+    if not isinstance(definition, dict):
+        return node
+    merged = dict(definition)
+    merged.update({key: value for key, value in node.items() if key != "$ref"})
+    return merged
+
+
+_MAX_SCHEMA_DESCRIPTION_DEPTH = 2
+
+_BOUND_PHRASES = {
+    "minimum": ">= {}",
+    "maximum": "<= {}",
+    "minLength": "at least {} character(s)",
+    "maxLength": "at most {} character(s)",
+    "minItems": "at least {} item(s)",
+    "maxItems": "at most {} item(s)",
+}
+
+
+def _render_bounds(node: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """Render the JSON-schema constraint keywords present on ``node``."""
+    return ", ".join(
+        _BOUND_PHRASES[key].format(node[key]) for key in keys if key in node
+    )
+
+
+def _describe_schema_type(
+    node: dict[str, Any], defs: dict[str, Any], *, depth: int = 0
+) -> str:
+    """Render one JSON-schema node as a short, human-readable type phrase.
+
+    Deliberately produces prose an LLM can act on ('one of: "Buy", "Sell"')
+    rather than a Python repr ("<enum 'SwingAction'>"), because this text is
+    fed straight back to the model as a repair instruction (issue #153).
+    ``depth`` bounds how far nested object/array shapes are expanded, so a
+    self-referential schema cannot send this into infinite recursion.
+    """
+    node = _resolve_schema_node(node, defs)
+
+    enum_values = node.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        rendered = ", ".join(json.dumps(value) for value in enum_values)
+        return f"one of: {rendered}"
+
+    variants = node.get("anyOf") or node.get("oneOf")
+    if isinstance(variants, list) and variants:
+        parts: list[str] = []
+        for variant in variants:
+            part = _describe_schema_type(variant, defs, depth=depth)
+            if part not in parts:
+                parts.append(part)
+        return " or ".join(parts) if parts else "any"
+
+    node_type = node.get("type")
+
+    if node_type == "array":
+        items = node.get("items")
+        inner = (
+            _describe_schema_type(items, defs, depth=depth + 1)
+            if isinstance(items, dict) and depth < _MAX_SCHEMA_DESCRIPTION_DEPTH
+            else "object" if isinstance(items, dict) else "any"
+        )
+        counts = _render_bounds(node, ("minItems", "maxItems"))
+        prefix = f"array ({counts})" if counts else "array"
+        return f"{prefix} of {inner}"
+
+    if node_type == "object":
+        properties = node.get("properties")
+        if (
+            isinstance(properties, dict)
+            and properties
+            and depth < _MAX_SCHEMA_DESCRIPTION_DEPTH
+        ):
+            inner_fields = ", ".join(
+                f"{name} ({_describe_schema_type(sub, defs, depth=depth + 1)})"
+                for name, sub in properties.items()
+                if isinstance(sub, dict)
+            )
+            if inner_fields:
+                return f"object with fields: {inner_fields}"
+        return "object"
+
+    if not isinstance(node_type, str):
+        return "any"
+
+    bounds = _render_bounds(node, ("minimum", "maximum", "minLength", "maxLength"))
+    return f"{node_type}, {bounds}" if bounds else node_type
+
+
 def _generate_repair_instruction(response_model: type[T]) -> str:
     """Generate a self-contained repair instruction from a Pydantic model.
 
-    Lists all required fields and their types, instructing the model to
-    produce JSON only with no prose. Used as a retry instruction when
-    structured output fails on the first attempt (issue #153).
+    Derived from ``response_model.model_json_schema()`` rather than from the
+    raw ``model_fields`` annotations (issue #153): the JSON schema is what
+    renders enum members as an explicit list of legal values and carries each
+    ``Field(description=...)`` -- which, per ``agents/schemas.py``, *are* the
+    model's output instructions. Reading ``.annotation`` instead produced
+    unusable lines like ``rating: <enum 'PortfolioRating'>``, telling the model
+    nothing about the values it is allowed to emit on precisely the fields
+    (``rating``/``action``) most likely to be malformed.
     """
-    fields = response_model.model_fields
-    field_specs: list[str] = []
+    schema = response_model.model_json_schema()
+    defs = schema.get("$defs", {}) or {}
+    properties = schema.get("properties", {}) or {}
+    required = set(schema.get("required", []) or [])
 
-    for field_name, field_info in fields.items():
-        # Render the type annotation in a readable form
-        annotation = field_info.annotation
-        type_str = str(annotation).replace("typing.", "")
-        field_specs.append(f"- {field_name}: {type_str}")
+    field_specs: list[str] = []
+    for field_name, raw_prop in properties.items():
+        prop = raw_prop if isinstance(raw_prop, dict) else {}
+        requiredness = "required" if field_name in required else "optional"
+        type_phrase = _describe_schema_type(prop, defs)
+        spec = f"- {field_name} ({requiredness}, {type_phrase})"
+
+        description = _resolve_schema_node(prop, defs).get("description")
+        if isinstance(description, str) and description.strip():
+            # Collapse whitespace so a multi-line docstring stays on one line.
+            spec += f": {' '.join(description.split())}"
+        field_specs.append(spec)
 
     fields_list = "\n".join(field_specs)
     return (
-        f"The response must be a JSON object with the following fields:\n"
+        f"Your previous reply could not be parsed into the required structure.\n"
+        f"Reply again with a JSON object matching this specification exactly:\n"
         f"{fields_list}\n"
         f"\n"
         f"Reply with ONLY valid JSON, no prose or explanation."
@@ -162,13 +281,23 @@ def run_structured_with_tools(
     does. A hard provider failure is surfaced as a real exception rather than
     being swallowed into a silent, signal-free "no output" return.
 
+    Callers with no tools to offer (e.g. the Portfolio Manager and Swing Trader
+    when ``knowledge_base_enabled`` is False) pass ``tools=[]`` and
+    ``max_rounds=0``: nothing is bound, the loop body never runs, and the helper
+    degenerates to a single structured call on ``messages`` plus the shared
+    fallback and schema-repair-retry logic. That is deliberate -- it is what
+    keeps the no-tools configuration from re-growing its own divergent copy of
+    the structured-output contract (issue #153).
+
     Args:
         llm: The LLM instance (will be wrapped with tools and structured output).
         messages: Initial message history (list of BaseMessage objects).
-        tools: List of LangChain tool objects to bind to the LLM.
+        tools: List of LangChain tool objects to bind to the LLM. Empty means no
+              tool binding happens at all.
         response_model: Pydantic model for structured output.
         max_rounds: Maximum tool-calling loop iterations (default 2, typically
-                   set via config["knowledge_base_tool_max_rounds"]).
+                   set via config["knowledge_base_tool_max_rounds"]). 0 skips the
+                   loop entirely.
         agent_name: Name for logging purposes (e.g., "PortfolioManager", "SwingTrader").
 
     Returns:
@@ -186,8 +315,12 @@ def run_structured_with_tools(
                         When the trace ends in a ``ToolMessage`` (e.g., tool loop exhausted
                         its rounds) or an empty/whitespace-only ``AIMessage``, path 2 is
                         used. None when the structured call succeeded.
-        - message_trace: The full message history including tool calls and results,
+        - message_trace: The full message history including tool calls, tool
+                        results and -- when a schema-repair retry was dispatched
+                        (issue #153) -- the repair instruction that was sent,
                         useful for prompt logging (e.g., via record_agent_prompt).
+                        It records what was *sent*; the free-text fallback's own
+                        response is not appended, as before.
 
     Raises:
         Exception: Whatever the free-text fallback ``llm.invoke`` raises, when the
@@ -210,8 +343,12 @@ def run_structured_with_tools(
         ...     decision_text = fallback_text  # guaranteed usable free text
         >>> # trace can be logged for debugging/analysis
     """
-    # Bind tools to the LLM
-    llm_with_tools = llm.bind_tools(tools)
+    # Bind tools to the LLM. With an empty ``tools`` list there is nothing to
+    # bind and some providers reject a zero-length tool list outright, so skip
+    # ``bind_tools`` entirely -- callers that have no tools (e.g. the Portfolio
+    # Manager / Swing Trader with ``knowledge_base_enabled=False``) then behave
+    # exactly like a plain ``llm``.
+    llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     # Try to bind structured output; graceful None if unsupported
     structured_llm = bind_structured(llm, response_model, agent_name)
@@ -301,6 +438,10 @@ def run_structured_with_tools(
     # failure still gets a real attempt instead of a silent None.
     structured_result: T | None = None
     fallback_text: str | None = None
+    # Set when a repair retry was dispatched, so the returned trace can record
+    # the repair round-trip without disturbing the fallback logic below (which
+    # deliberately reasons about the *tool-loop* trace's final message).
+    retry_trace: list[BaseMessage] | None = None
 
     if structured_llm is not None:
         try:
@@ -312,10 +453,9 @@ def run_structured_with_tools(
         except Exception as exc:
             # First attempt failed; attempt retry if enabled in config
             first_failure = exc
-            should_retry = False
-
-            if get_config().get("structured_output_repair_retry", True):
-                should_retry = True
+            should_retry = bool(
+                get_config().get("structured_output_repair_retry", True)
+            )
 
             if should_retry:
                 logger.warning(
@@ -401,5 +541,14 @@ def run_structured_with_tools(
                 "content-bearing AIMessage)",
                 agent_name,
             )
+
+    if retry_trace is not None:
+        # Surface the repair round-trip in the returned history (the docstring
+        # promises the *full* message history). Deliberately done after the
+        # fallback block: the #152 "reuse the model's final AIMessage" check
+        # reasons about how the tool loop ended, and appending a trailing
+        # HumanMessage before that check would silently force the extra
+        # free-text invoke it exists to avoid.
+        message_trace = retry_trace
 
     return structured_result, fallback_text, message_trace

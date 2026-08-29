@@ -1055,9 +1055,16 @@ class TestSwingTraderWithWikiTools:
         assert result["swing_structured_data"]["holding_period_days"] == 5
         assert "**Action**: Buy" in result["swing_trade_decision"]
 
-    def test_knowledge_base_disabled_uses_direct_structured_call(self):
-        """When knowledge_base_enabled=False, the swing trader calls structured_llm.invoke
-        directly, same as the pre-#106 behavior."""
+    def test_knowledge_base_disabled_still_routes_through_shared_helper(self):
+        """When knowledge_base_enabled=False, the swing trader still calls
+        run_structured_with_tools -- with no tools and max_rounds=0 (issue #153).
+
+        Before #153 this configuration took a hand-rolled
+        ``structured_llm.invoke``/except path that bypassed the shared helper
+        entirely, so the free-text fallback (#152) and the schema-repair retry
+        (#153) never applied to it. The single structured call is unchanged; it
+        just happens inside the shared helper now.
+        """
         from tradingagents.dataflows.config import set_config
 
         proposal = SwingDecision(
@@ -1073,28 +1080,116 @@ class TestSwingTraderWithWikiTools:
             thesis="Pullback entry in uptrend.",
         )
 
-        with patch(
-            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
-        ) as mock_run_tools:
-            set_config({"knowledge_base_enabled": False})
+        set_config({"knowledge_base_enabled": False})
 
-            structured = MagicMock()
-            structured.invoke.return_value = proposal
-            llm = MagicMock()
-            llm.with_structured_output.return_value = structured
+        structured = MagicMock()
+        structured.invoke.return_value = proposal
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        llm.bind_tools = MagicMock(
+            side_effect=AssertionError("bind_tools must not be called with no tools")
+        )
 
-            node = create_swing_trader(llm)
-            result = node(_make_swing_state())
+        node = create_swing_trader(llm)
+        result = node(_make_swing_state())
 
-        # run_structured_with_tools should not be called at all
-        mock_run_tools.assert_not_called()
-
-        # Direct structured call should have happened instead
+        # Exactly one structured call, made through the shared helper: no tools
+        # bound (asserted by the bind_tools side effect above) and no tool loop.
         structured.invoke.assert_called_once()
 
         # Result should still have structured data and correct rendering
         assert result["swing_structured_data"]["holding_period_days"] == 5
         assert "**Action**: Buy" in result["swing_trade_decision"]
+
+    def test_knowledge_base_disabled_passes_no_tools_and_zero_rounds(self):
+        """The knowledge-base-off configuration must reach the shared helper with
+        tools=[] and max_rounds=0, so no tool-loop behavior is introduced."""
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.HOLD,
+            conviction=0.4,
+            holding_period_days=3,
+            exit_conditions="No setup",
+            setup_type="none",
+            key_drivers=["Choppy tape [market]"],
+            thesis="Stand aside.",
+        )
+
+        with patch(
+            "tradingagents.agents.trader.swing_trader.run_structured_with_tools"
+        ) as mock_run_tools:
+            mock_run_tools.return_value = (proposal, None, [])
+
+            set_config({"knowledge_base_enabled": False, "knowledge_base_tool_max_rounds": 3})
+
+            llm = MagicMock()
+            node = create_swing_trader(llm)
+            node(_make_swing_state())
+
+        mock_run_tools.assert_called_once()
+        call_args = mock_run_tools.call_args
+        assert call_args[0][2] == []  # no tools
+        assert call_args[0][3] is SwingDecision
+        assert call_args[1]["max_rounds"] == 0
+
+    def test_retries_with_repair_instruction_when_kb_disabled(self):
+        """Issue #153: the schema-repair retry fires with knowledge_base_enabled=False.
+
+        That configuration used to take a hand-rolled ``structured_llm.invoke``
+        path that bypassed ``run_structured_with_tools``, so the retry never ran
+        there. The swing trader now always routes through the shared helper
+        (no tools, max_rounds=0), so the retry applies in both configurations.
+        """
+        from tradingagents.dataflows.config import set_config
+
+        proposal = SwingDecision(
+            action=SwingAction.SELL,
+            conviction=0.7,
+            holding_period_days=4,
+            entry_price=150.0,
+            stop_loss=155.0,
+            take_profit=138.0,
+            exit_conditions="Time stop after 4 days",
+            setup_type="catalyst",
+            key_drivers=["Guidance cut [news]"],
+            thesis="Fade the pop.",
+        )
+
+        structured_calls = []
+
+        def _structured_invoke(messages):
+            structured_calls.append(messages)
+            if len(structured_calls) == 1:
+                raise ValueError("Malformed JSON from a weak model")
+            return proposal
+
+        structured = MagicMock()
+        structured.invoke = _structured_invoke
+
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        llm.bind_tools = MagicMock(
+            side_effect=AssertionError("bind_tools must not be called with no tools")
+        )
+        llm.invoke = MagicMock(
+            side_effect=AssertionError("free-text fallback must not be reached")
+        )
+
+        set_config({"knowledge_base_enabled": False})
+
+        node = create_swing_trader(llm)
+        result = node(_make_swing_state())
+
+        # Exactly two structured attempts: the original and the repair retry.
+        assert len(structured_calls) == 2
+        # The retry appended a repair instruction naming the legal actions.
+        repair_instruction = structured_calls[1][-1].content
+        assert "Reply with ONLY valid JSON" in repair_instruction
+        assert '"Sell"' in repair_instruction
+        # The retry's result is what the node returned -- no free-text fallback.
+        assert "**Action**: Sell" in result["swing_trade_decision"]
+        assert result["swing_structured_data"]["setup_type"] == "catalyst"
 
     def test_knowledge_base_enabled_with_tool_call_then_structured_result(self):
         """When knowledge base is enabled and run_structured_with_tools executes a tool
