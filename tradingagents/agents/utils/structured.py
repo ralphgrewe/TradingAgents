@@ -27,12 +27,33 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _normalize_content(content: Any) -> str:
+    """Normalize message content (string or list of blocks) to a string.
+
+    Mirrors the logic from llm_call_log._message_text to handle both
+    plain strings and multimodal content blocks consistently.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content)
 
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
@@ -127,10 +148,14 @@ def run_structured_with_tools(
         Tuple of (structured_result, fallback_text, message_trace):
         - structured_result: Parsed Pydantic instance, or None if structured output
                             failed or is unsupported.
-        - fallback_text: Free-text content from a plain ``llm.invoke`` on the final
-                        message trace, always populated (never None) when
-                        ``structured_result`` is None (mirrors
-                        ``invoke_structured_or_freetext``'s fallback).
+        - fallback_text: Free-text content on fallback, always populated (never None) when
+                        ``structured_result`` is None. Sources are prioritized:
+                        1. If the trace ends in an ``AIMessage`` with non-empty content,
+                           that content is normalized and reused (no extra LLM call).
+                        2. Otherwise, a plain ``llm.invoke`` call on the final trace
+                           (mirrors ``invoke_structured_or_freetext``'s fallback).
+                        When the trace ends in a ``ToolMessage`` (e.g., tool loop exhausted
+                        its rounds) or an empty ``AIMessage``, path 2 is used.
                         None when the structured call succeeded.
         - message_trace: The full message history including tool calls and results,
                         useful for prompt logging (e.g., via record_agent_prompt).
@@ -268,22 +293,46 @@ def run_structured_with_tools(
         )
 
     if structured_result is None:
-        # Guarantee usable output: same free-text fallback the nodes get from
-        # invoke_structured_or_freetext, run on the same final message_trace
-        # (never a stale mid-loop trace) so it reflects everything the tool
-        # loop learned, including a trailing ToolMessage if max_rounds was
-        # exhausted while tools were still being requested.
+        # Guarantee usable output. Try to reuse the model's real answer if it's
+        # already sitting in the trace, then fall back to a fresh llm.invoke if needed.
         #
-        # Deliberately NOT wrapped in try/except. If this call also raises, the
-        # structured path *and* the fallback path have both failed -- there is no
-        # usable output left to return, and swallowing the exception here would
-        # hand the caller a silent (None, None, trace) that is indistinguishable
-        # from "the provider was fine, it just said nothing". Letting it
-        # propagate matches invoke_structured_or_freetext, matches how the
-        # graph nodes treat a dead provider elsewhere (abort, don't guess), and
-        # keeps the documented invariant that exactly one of structured_result /
-        # fallback_text is non-None on every return.
-        fallback_response = llm.invoke(message_trace)
-        fallback_text = fallback_response.content
+        # Priority 1: if the trace ends in an AIMessage with non-empty content, that
+        # is the model's final substantive response from the tool loop. Reuse it
+        # directly (no extra LLM call). This avoids the problem where invoking the
+        # LLM again on a trace ending in an assistant turn makes it emit a continuation
+        # of its own prior message, discarding the real answer.
+        #
+        # Priority 2 (fallback): if the trace ends in a ToolMessage (tool loop exhausted
+        # max_rounds while still receiving tool calls) or an empty AIMessage, invoke
+        # the plain LLM on the final trace for a fresh response. This path is NOT
+        # wrapped in try/except: if it also raises, the structured path *and* the
+        # fallback path have both failed. Swallowing that exception would hand the
+        # caller a silent (None, None, trace) indistinguishable from "provider was
+        # fine, it just said nothing". Letting it propagate matches invoke_structured_or_freetext,
+        # matches how the graph nodes treat a dead provider elsewhere (abort, don't
+        # guess), and keeps the documented invariant that exactly one of
+        # structured_result / fallback_text is non-None on every return.
+        if (
+            message_trace
+            and isinstance(message_trace[-1], AIMessage)
+            and message_trace[-1].content
+        ):
+            # Trace ends in an AIMessage with non-empty content: reuse it.
+            fallback_text = _normalize_content(message_trace[-1].content)
+            logger.debug(
+                "%s: reusing model's final AIMessage from tool loop as fallback "
+                "(no extra invoke)",
+                agent_name,
+            )
+        else:
+            # Trace ends in ToolMessage, empty AIMessage, or HumanMessage: invoke
+            # the LLM for a fresh response.
+            fallback_response = llm.invoke(message_trace)
+            fallback_text = _normalize_content(fallback_response.content)
+            logger.debug(
+                "%s: fallback invoked fresh LLM response (trace did not end in "
+                "content-bearing AIMessage)",
+                agent_name,
+            )
 
     return structured_result, fallback_text, message_trace

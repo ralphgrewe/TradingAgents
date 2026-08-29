@@ -293,23 +293,24 @@ class RunStructuredWithToolsTests(unittest.TestCase):
     def test_tool_loop_structured_output_fallback_on_failure(self):
         """Fix #1: when structured output fails, falls back to usable free text
         instead of returning None with nothing else -- caller gets a guaranteed
-        string, not just a None it has to handle itself."""
+        string, not just a None it has to handle itself.
+
+        Per issue #152, when the trace ends in an AIMessage with content, that
+        content is reused without making an extra llm.invoke call (which would
+        discard the real answer by forcing the model to emit a continuation
+        of its previous message)."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
         mock_tool.invoke = MagicMock(return_value="tool result")
 
         # LLM first returns response with no tool calls
-        final_response = AIMessage(content="Final response")
+        final_response = AIMessage(content="Final response from tool loop")
         final_response.tool_calls = []
 
         mock_llm_with_tools = MagicMock()
         mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
-
-        # Plain (untooled) fallback call on the raw llm -- this is what
-        # invoke_structured_or_freetext's fallback path also calls.
-        mock_llm.invoke = MagicMock(return_value=AIMessage(content="Free-text fallback answer"))
 
         # Structured LLM fails
         mock_structured_llm = MagicMock()
@@ -333,27 +334,32 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         # Structured output should be None due to failure...
         self.assertIsNone(result)
         # ...but the caller gets guaranteed usable free text instead of None.
-        self.assertEqual(fallback_text, "Free-text fallback answer")
-        # The fallback call ran on the final trace (post tool-loop), not some
-        # separately-constructed prompt.
-        mock_llm.invoke.assert_called_once_with(trace)
+        # Per #152, this is reused from the trace's final AIMessage, not from
+        # an extra llm.invoke call.
+        self.assertEqual(fallback_text, "Final response from tool loop")
+        # The trace ends in the AIMessage we reused
+        self.assertEqual(trace[-1].content, "Final response from tool loop")
+        # No extra llm.invoke call was made (the AIMessage was reused)
+        mock_llm.invoke.assert_not_called()
         # Trace should still contain the messages
         self.assertGreater(len(trace), 0)
 
     def test_tool_loop_with_structured_output_unsupported(self):
         """Fix #1: when structured output is unsupported (None), still falls back
-        to usable free text rather than returning None with no other output."""
+        to usable free text rather than returning None with no other output.
+
+        Per issue #152, when the trace ends in an AIMessage with content, that
+        content is reused without making an extra llm.invoke call."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
 
-        final_response = AIMessage(content="Final response")
+        final_response = AIMessage(content="Final response from unsupported path")
         final_response.tool_calls = []
 
         mock_llm_with_tools = MagicMock()
         mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
-        mock_llm.invoke = MagicMock(return_value=AIMessage(content="Unsupported-path fallback"))
 
         # Simulate unsupported structured output
         with patch(
@@ -369,11 +375,14 @@ class RunStructuredWithToolsTests(unittest.TestCase):
                 agent_name="TestAgent",
             )
 
-        # Structured output should be None
+        # Structured output should be None (unsupported)
         self.assertIsNone(result)
         # But a usable free-text fallback should be returned instead.
-        self.assertEqual(fallback_text, "Unsupported-path fallback")
-        # But trace should still be returned
+        # Per #152, this is reused from the trace's final AIMessage.
+        self.assertEqual(fallback_text, "Final response from unsupported path")
+        # No extra llm.invoke call was made (the AIMessage was reused)
+        mock_llm.invoke.assert_not_called()
+        # Trace should still be returned
         self.assertGreater(len(trace), 0)
 
     def test_tool_execution_with_dict_input(self):
@@ -589,16 +598,26 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         call also raises (e.g. a provider outage hitting both calls in the same
         turn), the fallback exception must propagate. Swallowing it would
         return (None, None, trace) -- no usable output and no way for the
-        caller to tell a dead provider apart from a silent model."""
+        caller to tell a dead provider apart from a silent model.
+
+        Per issue #152, the fallback invoke only happens when the trace does
+        NOT end in a content-bearing AIMessage. This test uses a scenario where
+        the tool loop exhausts max_rounds while tools were still requested,
+        leaving the trace ending in a ToolMessage (not an AIMessage), so the
+        fallback invoke is required."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
+        mock_tool.invoke = MagicMock(return_value="tool result")
 
-        final_response = AIMessage(content="Final response")
-        final_response.tool_calls = []
+        # Tool call response (will loop again since max_rounds is exhausted)
+        tool_call_response = AIMessage(
+            content="Calling tool",
+            tool_calls=[{"name": "test_tool", "args": {"input": "test"}, "id": "call_1"}],
+        )
 
         mock_llm_with_tools = MagicMock()
-        mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
+        mock_llm_with_tools.invoke = MagicMock(return_value=tool_call_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
 
         # Both the structured call and the plain free-text fallback are down.
@@ -621,7 +640,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
                     initial_messages,
                     [mock_tool],
                     MockDecision,
-                    max_rounds=2,
+                    max_rounds=1,  # Exhausted immediately after tool call
                     agent_name="TestAgent",
                 )
 
@@ -633,16 +652,26 @@ class RunStructuredWithToolsTests(unittest.TestCase):
     def test_double_failure_propagates_when_structured_unsupported(self):
         """Fix #5, other entry path: structured output unsupported (bind returns
         None) and the free-text fallback raises -- still propagates rather than
-        returning (None, None, trace)."""
+        returning (None, None, trace).
+
+        Per issue #152, the fallback invoke only happens when the trace does
+        NOT end in a content-bearing AIMessage. This test uses a scenario where
+        the tool loop exhausts max_rounds while tools were still requested,
+        leaving the trace ending in a ToolMessage (not an AIMessage), so the
+        fallback invoke is required."""
         mock_llm = MagicMock()
         mock_tool = MagicMock()
         mock_tool.name = "test_tool"
+        mock_tool.invoke = MagicMock(return_value="tool result")
 
-        final_response = AIMessage(content="Final response")
-        final_response.tool_calls = []
+        # Tool call response (will loop again since max_rounds is exhausted)
+        tool_call_response = AIMessage(
+            content="Calling tool",
+            tool_calls=[{"name": "test_tool", "args": {"input": "test"}, "id": "call_1"}],
+        )
 
         mock_llm_with_tools = MagicMock()
-        mock_llm_with_tools.invoke = MagicMock(return_value=final_response)
+        mock_llm_with_tools.invoke = MagicMock(return_value=tool_call_response)
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_with_tools)
 
         outage = RuntimeError("provider unreachable")
@@ -658,7 +687,7 @@ class RunStructuredWithToolsTests(unittest.TestCase):
                     initial_messages,
                     [mock_tool],
                     MockDecision,
-                    max_rounds=2,
+                    max_rounds=1,  # Exhausted immediately after tool call
                     agent_name="TestAgent",
                 )
 
