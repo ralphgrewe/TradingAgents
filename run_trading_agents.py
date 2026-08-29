@@ -190,7 +190,11 @@ from tradingagents.llm_call_log import LLMCallLogHandler
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.portfolio.runner import extract_rating, run_portfolio_mode
 from tradingagents.report_generator import save_report_to_disk
-from tradingagents.reporting import backfill_portfolio_adjustments, format_report_preview
+from tradingagents.reporting import (
+    backfill_portfolio_adjustments,
+    format_report_preview,
+    render_rebalance_summary,
+)
 from tradingagents.simulation import SimulationClientError
 
 # Single source of truth: the config-file keys that mirror an existing CLI
@@ -1052,48 +1056,13 @@ def main():
 
             # Write run-level markdown summary of the rebalance
             rebalance_summary_file = Path(args.report_dir) / f"portfolio-rebalance-{args.depot_id}.md"
-            details = envelope.get("details", {})
-            pre_snapshot = details.get("pre_snapshot", {})
-            post_snapshot = details.get("post_snapshot", {})
-            equity_change = details.get("equity_change", 0.0)
-            trades_executed = details.get("trades_executed", [])
-            rejected_orders = details.get("rejected_orders", [])
-
-            n_buys = sum(1 for t in trades_executed if t["side"] == "buy" and t["status"] != "rejected")
-            n_sells = sum(1 for t in trades_executed if t["side"] == "sell" and t["status"] != "rejected")
-            n_rejected = len(rejected_orders)
-
-            summary_md = f"""# Portfolio Rebalance Summary
-
-**Depot**: {args.depot_id}
-**Style**: {args.style}
-**Generated**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## Pre-Rebalance Snapshot
-- **Total Equity**: ${pre_snapshot.get("equity", 0):,.2f}
-- **Cash**: ${pre_snapshot.get("cash", 0):,.2f}
-- **Number of Positions**: {len(pre_snapshot.get("positions", {}))}
-
-## Post-Rebalance Snapshot
-- **Total Equity**: ${post_snapshot.get("equity", 0):,.2f}
-- **Cash**: ${post_snapshot.get("cash", 0):,.2f}
-- **Number of Positions**: {len(post_snapshot.get("positions", {}))}
-
-## Execution Summary
-- **Equity Change**: ${equity_change:,.2f}
-- **Buys**: {n_buys}
-- **Sells**: {n_sells}
-- **Rejected Orders**: {n_rejected}
-
-## Universe
-{len(details.get("universe", []))} tickers rebalanced.
-"""
-
-            if missing_ratings:
-                summary_md += f"\n**Note**: {len(missing_ratings)} ticker(s) had no rating and were excluded from the rebalance.\n"
-            if missing_prices:
-                summary_md += f"\n**Note**: {len(missing_prices)} ticker(s) had no usable price and were excluded from the rebalance.\n"
-
+            summary_md = render_rebalance_summary(
+                envelope=envelope,
+                depot_id=args.depot_id,
+                style=args.style,
+                missing_ratings=missing_ratings,
+                missing_prices=missing_prices,
+            )
             rebalance_summary_file.write_text(summary_md, encoding="utf-8")
             print(f"Rebalance summary saved to: {rebalance_summary_file}")
 

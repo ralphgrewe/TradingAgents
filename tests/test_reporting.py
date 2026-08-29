@@ -96,6 +96,93 @@ class TestWriteReportTree:
         complete = report_file.read_text()
         assert "Macro Fundamentals Analyst" in complete
 
+    def test_non_portfolio_run_report_is_unchanged_by_backfill_support(self, tmp_path):
+        """AC (issue #157): runs without --portfolio must be unaffected — no
+        adjustments section, no backfill pass, no new files.
+
+        ``write_report_tree`` itself is untouched by #157's diff (the backfill
+        pass lives entirely in ``backfill_portfolio_adjustments``, which is
+        opt-in and only ever called from ``run_trading_agents.py``'s
+        ``if args.portfolio:`` block). This test pins that: as long as
+        ``backfill_portfolio_adjustments`` is never invoked, the report tree
+        is byte-identical (module the run timestamp) to a plain pre-#157
+        run — no "### Proposed adjustments"/"### Dropped" markers, and no
+        `portfolio-rebalance-*.md` file appears anywhere.
+        """
+        save_path = tmp_path / "report"
+        report_file = write_report_tree(_final_state(), "AAPL", save_path)
+        complete = report_file.read_text(encoding="utf-8")
+        decision = (save_path / "5_portfolio" / "decision.md").read_text(encoding="utf-8")
+
+        # No backfill markers anywhere — backfill_portfolio_adjustments was
+        # never called, matching a non-portfolio run.
+        for marker in ("### Proposed adjustments", "### Executed", "### Dropped"):
+            assert marker not in complete
+            assert marker not in decision
+
+        # No run-level rebalance summary is produced by write_report_tree
+        # itself — that file only exists when --portfolio triggers it.
+        assert not list(save_path.parent.glob("portfolio-rebalance-*.md"))
+        assert decision == "Final portfolio decision."
+
+        # The full report content matches exactly what write_report_tree
+        # produces (fixed section order/text), modulo the "Generated: ..."
+        # timestamp line which is inherently non-deterministic.
+        import re
+
+        normalized = re.sub(r"Generated: [\d-]+ [\d:]+", "Generated: TIMESTAMP", complete)
+        assert normalized == (
+            "# Trading Analysis Report: AAPL\n"
+            "\n"
+            "Generated: TIMESTAMP\n"
+            "\n"
+            "## I. Analyst Team Reports\n"
+            "\n"
+            "### Market Analyst\n"
+            "Market looks bullish.\n"
+            "\n"
+            "### Sentiment Analyst\n"
+            "Sentiment is positive.\n"
+            "\n"
+            "### News Analyst\n"
+            "No major news.\n"
+            "\n"
+            "### Fundamentals Analyst\n"
+            "Fundamentals are solid.\n"
+            "\n"
+            "## II. Research Team Decision\n"
+            "\n"
+            "### Bull Researcher\n"
+            "Bull case text.\n"
+            "\n"
+            "### Bear Researcher\n"
+            "Bear case text.\n"
+            "\n"
+            "### Research Manager\n"
+            "Research manager verdict.\n"
+            "\n"
+            "## III. Trading Team Plan\n"
+            "\n"
+            "### Trader\n"
+            "Buy 10 shares.\n"
+            "\n"
+            "## IV. Risk Management Team Decision\n"
+            "\n"
+            "### Aggressive Analyst\n"
+            "Aggressive take.\n"
+            "\n"
+            "### Conservative Analyst\n"
+            "Conservative take.\n"
+            "\n"
+            "### Neutral Analyst\n"
+            "Neutral take.\n"
+            "\n"
+            "## V. Portfolio Manager Decision\n"
+            "\n"
+            "### Portfolio Manager\n"
+            "Final portfolio decision."
+        )
+
 
 class TestCliSaveReportToDisk:
     def test_delegates_tree_and_adds_json(self, tmp_path):
@@ -486,3 +573,107 @@ class TestBackfillPortfolioAdjustments:
         # MSFT's report directory wasn't provided, so it wasn't updated
         # (this is the expected behavior — per-ticker backfill happens
         # only for tickers that have report directories in per_ticker_report_dirs)
+
+    def _write_ticker_reports(self, tmp_path, ticker, pm_decision="**Rating**: X"):
+        """Create a minimal 5_portfolio/decision.md + complete_report.md pair for `ticker`."""
+        report_dir = tmp_path / f"{ticker}_2024-01-01_20240101_120000"
+        portfolio_subdir = report_dir / "5_portfolio"
+        portfolio_subdir.mkdir(parents=True)
+        (portfolio_subdir / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir / "complete_report.md").write_text(
+            f"# Trading Analysis Report: {ticker}\n\n"
+            "## V. Portfolio Manager Decision\n\n"
+            "### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+        return report_dir
+
+    def test_backfill_complete_report_is_scoped_to_its_own_ticker(self, tmp_path):
+        """Regression test (issue #157 escalation): complete_report.md must show
+        ONLY the current ticker's row/trade, not the whole universe's — the bug
+        landed in commit bc89728 reused an unfiltered, whole-universe rendering
+        for complete_report.md while decision.md was correctly filtered.
+        """
+        report_dir_aapl = self._write_ticker_reports(tmp_path, "AAPL")
+        report_dir_msft = self._write_ticker_reports(tmp_path, "MSFT")
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={
+                "AAPL": str(report_dir_aapl),
+                "MSFT": str(report_dir_msft),
+            },
+        )
+
+        complete_aapl = (report_dir_aapl / "complete_report.md").read_text(encoding="utf-8")
+        complete_msft = (report_dir_msft / "complete_report.md").read_text(encoding="utf-8")
+
+        # AAPL's complete_report.md shows AAPL's row and trade only.
+        assert "### Proposed adjustments (depot test-depot)" in complete_aapl
+        assert "| AAPL | BUY | 0.50 | 10 |" in complete_aapl
+        assert "| MSFT |" not in complete_aapl
+        assert "- AAPL: BUY 10 shares @ $149.50 — executed" in complete_aapl
+        assert "MSFT" not in complete_aapl.split("### Executed", 1)[1]
+
+        # MSFT's complete_report.md shows MSFT's row and (rejected) trade only.
+        assert "### Proposed adjustments (depot test-depot)" in complete_msft
+        assert "| MSFT | HOLD | 0.50 | 0 |" in complete_msft
+        assert "| AAPL |" not in complete_msft
+        assert "REJECTED: Min trade size 2 not met" in complete_msft
+        assert "AAPL" not in complete_msft.split("### Executed", 1)[1]
+
+    def test_backfill_complete_report_shows_dropped_ticker_explanation_only(self, tmp_path):
+        """Regression test (issue #157 escalation): a dropped ticker's
+        complete_report.md must show the drop-explanation line IN PLACE OF the
+        adjustments table (matching decision.md's behavior for the same case),
+        not the full table of other tickers' trades plus a "### Dropped" note.
+        """
+        report_dir_aapl = self._write_ticker_reports(tmp_path, "AAPL")
+        report_dir_tsla = self._write_ticker_reports(tmp_path, "TSLA")
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={
+                "AAPL": str(report_dir_aapl),
+                "TSLA": str(report_dir_tsla),
+            },
+            missing_ratings=[],
+            missing_prices=["TSLA"],
+        )
+
+        complete_aapl = (report_dir_aapl / "complete_report.md").read_text(encoding="utf-8")
+        complete_tsla = (report_dir_tsla / "complete_report.md").read_text(encoding="utf-8")
+
+        # AAPL (not dropped) still gets its normal, filtered table.
+        assert "### Proposed adjustments" in complete_aapl
+        assert "### Dropped" not in complete_aapl
+
+        # TSLA (dropped) gets ONLY the drop explanation — no table at all,
+        # and no leaked data from AAPL's proposed adjustments/executed trades.
+        assert "### Dropped" in complete_tsla
+        assert "no usable price" in complete_tsla
+        assert "### Proposed adjustments" not in complete_tsla
+        assert "### Executed" not in complete_tsla
+        assert "AAPL" not in complete_tsla
+
+    def test_backfill_complete_report_is_idempotent(self, tmp_path):
+        """Running backfill twice doesn't duplicate complete_report.md's section."""
+        report_dir = self._write_ticker_reports(tmp_path, "AAPL")
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+        first_complete = (report_dir / "complete_report.md").read_text(encoding="utf-8")
+
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+        second_complete = (report_dir / "complete_report.md").read_text(encoding="utf-8")
+
+        assert first_complete == second_complete
+        assert first_complete.count("### Proposed adjustments") == 1

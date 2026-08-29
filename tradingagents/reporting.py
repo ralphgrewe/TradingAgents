@@ -147,16 +147,6 @@ def backfill_portfolio_adjustments(
 
         return "\n".join(executed_lines) if executed_lines else "(none — HOLD)"
 
-    # Build the consolidated portfolio section (for complete_report.md)
-    table = render_table()
-    executed = render_executed()
-    portfolio_section = (
-        f"### Proposed adjustments (depot {depot_id})\n"
-        f"{table}\n\n"
-        f"### Executed\n"
-        f"{executed}"
-    )
-
     # For dropped tickers, collect explanations per ticker
     dropped_explanations = {}
     for ticker in missing_ratings:
@@ -166,15 +156,6 @@ def backfill_portfolio_adjustments(
         if ticker in per_ticker_report_dirs:
             dropped_explanations[ticker] = "no usable price (no quote or recorded price) — dropped from portfolio run"
 
-    dropped_section = ""
-    dropped_section_lines = []
-    for ticker, explanation in dropped_explanations.items():
-        dropped_section_lines.append(f"- {ticker}: {explanation}")
-    if dropped_section_lines:
-        dropped_section = (
-            "\n\n### Dropped\n" + "\n".join(dropped_section_lines)
-        )
-
     # Update each ticker's report files
     for ticker, report_dir in per_ticker_report_dirs.items():
         report_path = Path(report_dir)
@@ -182,42 +163,45 @@ def backfill_portfolio_adjustments(
         # Check if this ticker was dropped
         is_dropped = ticker in dropped_explanations
 
+        # Build the per-ticker backfill text once, shared by decision.md and
+        # complete_report.md so both files get equivalent, correctly-scoped
+        # content for this ticker (see issue #157 escalation: complete_report.md
+        # previously reused an unfiltered, whole-universe rendering here).
+        if is_dropped:
+            # Dropped ticker gets an explanatory line instead of a table.
+            backfill_text = (
+                f"\n\n### Dropped\n"
+                f"- {ticker}: {dropped_explanations[ticker]}"
+            )
+        else:
+            # Render table and executed list filtered to just this ticker.
+            ticker_table = render_table(ticker_filter=ticker)
+            ticker_executed = render_executed(ticker_filter=ticker)
+
+            backfill_text = (
+                f"\n\n### Proposed adjustments (depot {depot_id})\n"
+                f"{ticker_table}\n\n"
+                f"### Executed\n"
+                f"{ticker_executed}"
+            )
+
         # Update decision.md (5_portfolio/decision.md)
         decision_file = report_path / "5_portfolio" / "decision.md"
         if decision_file.exists():
             decision_text = decision_file.read_text(encoding="utf-8")
             # Check if already backfilled (idempotency)
-            if "### Proposed adjustments" in decision_text or "### Dropped" in decision_text:
-                continue
-
-            # Decision file gets the proposed adjustments and executed sections
-            if is_dropped:
-                # Dropped ticker gets an explanatory line
-                backfill_text = (
-                    f"\n\n### Dropped\n"
-                    f"- {ticker}: {dropped_explanations[ticker]}"
-                )
-            else:
-                # Successful ticker gets the proposed adjustments and executed sections
-                # Render table and executed list filtered to just this ticker
-                ticker_table = render_table(ticker_filter=ticker)
-                ticker_executed = render_executed(ticker_filter=ticker)
-
-                backfill_text = (
-                    f"\n\n### Proposed adjustments (depot {depot_id})\n"
-                    f"{ticker_table}\n\n"
-                    f"### Executed\n"
-                    f"{ticker_executed}"
-                )
-
-            decision_file.write_text(decision_text + backfill_text, encoding="utf-8")
+            already_backfilled = (
+                "### Proposed adjustments" in decision_text or "### Dropped" in decision_text
+            )
+            if not already_backfilled:
+                decision_file.write_text(decision_text + backfill_text, encoding="utf-8")
 
         # Update complete_report.md
         complete_file = report_path / "complete_report.md"
         if complete_file.exists():
             complete_text = complete_file.read_text(encoding="utf-8")
             # Check if already backfilled (idempotency)
-            if "### Proposed adjustments" in complete_text:
+            if "### Proposed adjustments" in complete_text or "### Dropped" in complete_text:
                 continue
 
             # Find and replace the "## V. Portfolio Manager Decision" section
@@ -248,18 +232,79 @@ def backfill_portfolio_adjustments(
             # Extract the PM decision section
             pm_section = complete_text[v_idx:section_end]
 
-            # The PM section currently has the judge_decision
-            # We insert the portfolio adjustments after the judge_decision
-            # Find where the judge_decision ends (it's typically after "### Portfolio Manager\n...")
-
-            # Insert the portfolio adjustments before the end of the section
-            updated_pm_section = pm_section + f"\n\n{portfolio_section}"
-            if dropped_section:
-                updated_pm_section += dropped_section
+            # Insert this ticker's (filtered) backfill text at the end of its
+            # own "## V." section — same text used for decision.md above.
+            updated_pm_section = pm_section + backfill_text
 
             # Replace the old section with the updated one
             complete_text = complete_text[:v_idx] + updated_pm_section + complete_text[section_end:]
             complete_file.write_text(complete_text, encoding="utf-8")
+
+
+def render_rebalance_summary(
+    envelope: dict,
+    depot_id: str,
+    style: str,
+    missing_ratings: list[str] | None = None,
+    missing_prices: list[str] | None = None,
+) -> str:
+    """Render the run-level markdown summary written next to the per-ticker reports.
+
+    ``envelope`` is the dict returned by ``run_portfolio_mode`` (same shape
+    consumed by :func:`backfill_portfolio_adjustments`). Written to
+    ``portfolio-rebalance-<depot_id>.md`` by the CLI after portfolio mode
+    completes.
+    """
+    # Local import: tradingagents.portfolio.runner pulls in tradingagents.graph
+    # (for SignalProcessor), which itself imports this module at package-init
+    # time — a module-level import here would be circular.
+    from tradingagents.portfolio.runner import count_buys_and_sells
+
+    missing_ratings = missing_ratings or []
+    missing_prices = missing_prices or []
+
+    details = envelope.get("details", {})
+    pre_snapshot = details.get("pre_snapshot", {})
+    post_snapshot = details.get("post_snapshot", {})
+    equity_change = details.get("equity_change", 0.0)
+    trades_executed = details.get("trades_executed", [])
+    rejected_orders = details.get("rejected_orders", [])
+
+    n_buys, n_sells = count_buys_and_sells(trades_executed)
+    n_rejected = len(rejected_orders)
+
+    summary_md = f"""# Portfolio Rebalance Summary
+
+**Depot**: {depot_id}
+**Style**: {style}
+**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+## Pre-Rebalance Snapshot
+- **Total Equity**: ${pre_snapshot.get("equity", 0):,.2f}
+- **Cash**: ${pre_snapshot.get("cash", 0):,.2f}
+- **Number of Positions**: {len(pre_snapshot.get("positions", {}))}
+
+## Post-Rebalance Snapshot
+- **Total Equity**: ${post_snapshot.get("equity", 0):,.2f}
+- **Cash**: ${post_snapshot.get("cash", 0):,.2f}
+- **Number of Positions**: {len(post_snapshot.get("positions", {}))}
+
+## Execution Summary
+- **Equity Change**: ${equity_change:,.2f}
+- **Buys**: {n_buys}
+- **Sells**: {n_sells}
+- **Rejected Orders**: {n_rejected}
+
+## Universe
+{len(details.get("universe", []))} tickers rebalanced.
+"""
+
+    if missing_ratings:
+        summary_md += f"\n**Note**: {len(missing_ratings)} ticker(s) had no rating and were excluded from the rebalance.\n"
+    if missing_prices:
+        summary_md += f"\n**Note**: {len(missing_prices)} ticker(s) had no usable price and were excluded from the rebalance.\n"
+
+    return summary_md
 
 
 def format_report_preview(report: str, max_len: int = 150) -> str:

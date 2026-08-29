@@ -68,6 +68,18 @@ def build_signals(ratings: dict[str, str]) -> dict[str, dict[str, str]]:
     return {ticker: rating_to_signal(rating) for ticker, rating in ratings.items()}
 
 
+def count_buys_and_sells(trades_executed: list[dict[str, Any]]) -> tuple[int, int]:
+    """Return ``(n_buys, n_sells)`` among non-rejected trades in ``trades_executed``.
+
+    Shared by ``run_portfolio_mode``'s summary string and
+    ``run_trading_agents.py``'s run-level rebalance summary, so the two call
+    sites can't drift out of sync on what counts as an executed buy/sell.
+    """
+    n_buys = sum(1 for t in trades_executed if t["side"] == "buy" and t["status"] != "rejected")
+    n_sells = sum(1 for t in trades_executed if t["side"] == "sell" and t["status"] != "rejected")
+    return n_buys, n_sells
+
+
 def _fetch_prices(
     client: SimulationClient,
     universe: list[str],
@@ -213,8 +225,7 @@ def run_portfolio_mode(
         }
 
     rejected_orders = [t for t in trades_executed if t["status"] == "rejected"]
-    n_buys = sum(1 for t in trades_executed if t["side"] == "buy" and t["status"] != "rejected")
-    n_sells = sum(1 for t in trades_executed if t["side"] == "sell" and t["status"] != "rejected")
+    n_buys, n_sells = count_buys_and_sells(trades_executed)
     n_holds = len(effective_universe) - len(trades_executed)
 
     details = {
