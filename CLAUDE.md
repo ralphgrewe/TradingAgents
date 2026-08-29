@@ -141,10 +141,12 @@ OpenAI-compatible providers (openai, xai, deepseek, qwen/qwen-cn, glm/glm-cn, mi
 ollama, openrouter, mistral) all share `OpenAIClient`; anthropic, google, azure, and perplexity
 each have a dedicated client. Provider-specific "thinking" knobs (`google_thinking_level`,
 `openai_reasoning_effort`, `anthropic_effort`) are applied per-provider in
-`TradingAgentsGraph._get_provider_kwargs`. The same method applies `ollama_num_ctx` (issue #149) for
-the `ollama` provider — forwarded through `OpenAIClient.get_llm` as `extra_body={"options":
-{"num_ctx": N}}`, Ollama's OpenAI-compatible endpoint's non-standard way of pinning context length
-per request. See "Oversize-prompt enforcement" under Configuration below for why this exists.
+`TradingAgentsGraph._get_provider_kwargs`. The same method applies `ollama_num_ctx` (issue #149) and
+`ollama_think` (issue #155) for the `ollama` provider — forwarded through `OpenAIClient.get_llm` as
+`extra_body={"options": {"num_ctx": N}, "think": True}` (or only the applicable field when just one
+is set), Ollama's OpenAI-compatible endpoint's non-standard way of pinning context length per request
+and enabling think mode. See "Oversize-prompt enforcement" under Configuration below for why
+`ollama_num_ctx` exists.
 
 ## Data vendors
 
@@ -349,6 +351,11 @@ call's callbacks, regardless of what callbacks the caller passed in:
   providers" above) and used as the *known* context window for `quick_think_llm`/`deep_think_llm` when
   `llm_provider` is `"ollama"`. When set, it wins outright — issue #154's per-request derivation below
   never runs, and behavior matches #149 exactly (same value on every call).
+- **`ollama_think`** (env: `TRADINGAGENTS_OLLAMA_THINK`, default `False`): enable think mode for Ollama
+  models. When set to `True`, the `think` field is forwarded to Ollama's OpenAI-compatible endpoint
+  (see "LLM providers" above) on every request, instructing models that support it (e.g. ministral-3:8b)
+  to perform explicit reasoning before answering. Only meaningful for `llm_provider == "ollama"`.
+  Composable with `ollama_num_ctx` and per-request derivation — both can be active at the same time.
 - **`context_window_overrides`** (config-only dict, `{model_name: context_window_tokens}`, default
   `{}`): lets any provider/model opt into the same check without this codebase guessing a limit it has
   no evidence for. Takes precedence over the `ollama_num_ctx`-derived entry for the same model name.

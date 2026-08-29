@@ -570,3 +570,79 @@ class TestOllamaChatOpenAIRequestPayload:
         ).get_llm()
         payload = llm._get_request_payload([HumanMessage(content="word " * 1000)])
         assert "extra_body" not in payload
+
+
+# ---------------------------------------------------------------------------
+# 6. Ollama think mode (issue #155)
+# ---------------------------------------------------------------------------
+
+
+class TestOllamaThinkMode:
+    def test_think_unset_no_think_in_body(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama", model="ministral-3:8b", api_key="placeholder"
+        ).get_llm()
+        payload = llm._get_request_payload([HumanMessage(content="hi")])
+        assert "think" not in payload.get("extra_body", {})
+
+    def test_think_set_appears_in_extra_body(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama",
+            model="ministral-3:8b",
+            ollama_think=True,
+            api_key="placeholder",
+        ).get_llm()
+        payload = llm._get_request_payload([HumanMessage(content="hi")])
+        assert payload.get("extra_body", {}).get("think") is True
+
+    def test_think_and_num_ctx_compose(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama",
+            model="ministral-3:8b",
+            num_ctx=16384,
+            ollama_think=True,
+            api_key="placeholder",
+        ).get_llm()
+        payload = llm._get_request_payload([HumanMessage(content="hi")])
+        extra_body = payload.get("extra_body", {})
+        assert extra_body.get("think") is True
+        assert extra_body.get("options", {}).get("num_ctx") == 16384
+
+    def test_think_preserved_through_derivation(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=100,
+            safety_margin=1.0,
+        )
+        llm = create_llm_client(
+            provider="ollama",
+            model="ministral-3:8b",
+            ollama_think=True,
+            ollama_num_ctx_derivation=derivation,
+            api_key="placeholder",
+        ).get_llm()
+        payload = llm._get_request_payload([HumanMessage(content="word " * 100)])
+        extra_body = payload.get("extra_body", {})
+        assert extra_body.get("think") is True
+        assert "num_ctx" in extra_body.get("options", {})
+
+    def test_non_ollama_provider_never_gets_think(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="openai",
+            model="gpt-4o",
+            ollama_think=True,  # ignored for non-ollama
+            api_key="placeholder",
+        ).get_llm()
+        payload = llm._get_request_payload([HumanMessage(content="hi")])
+        assert "think" not in payload.get("extra_body", {})

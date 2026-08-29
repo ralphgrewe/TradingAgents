@@ -347,6 +347,14 @@ class TradingAgentsGraph:
                 if derivation is not None:
                     kwargs["ollama_num_ctx_derivation"] = derivation
 
+            # Think mode for Ollama (issue #155): when enabled, requests
+            # the model to output thinking before answering. Forwarded to
+            # OpenAIClient.get_llm and attached to extra_body alongside
+            # num_ctx (see openai_client.OllamaChatOpenAI._get_request_payload).
+            ollama_think = self.config.get("ollama_think")
+            if ollama_think:
+                kwargs["ollama_think"] = True
+
         # Temperature is supported by all providers. Cast through float() so a
         # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config
         # default is None, so default_config.py's type-driven coercion can't

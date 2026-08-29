@@ -132,7 +132,7 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
 
 
 class OllamaChatOpenAI(NormalizedChatOpenAI):
-    """Ollama-specific override: per-request ``num_ctx`` derivation (issue #154).
+    """Ollama-specific overrides: per-request ``num_ctx`` derivation (issue #154) and think mode (issue #155).
 
     When an explicit ``ollama_num_ctx`` is configured, that value is baked
     into ``extra_body`` at construction time by ``OpenAIClient.get_llm`` (the
@@ -143,6 +143,10 @@ class OllamaChatOpenAI(NormalizedChatOpenAI):
     use) derives ``num_ctx`` from *this* request's own measured prompt size
     and attaches it to the outgoing request as the same non-standard
     ``extra_body.options.num_ctx`` field #149 already established.
+
+    Think mode (issue #155) is set via ``extra_body.think`` at construction
+    time by ``OpenAIClient.get_llm`` when ``ollama_think`` config is True,
+    and this override preserves it through per-request derivation.
 
     This only ever *attaches* a value: whether the derived requirement fits
     within ``ollama_num_ctx_max`` was already decided by
@@ -387,9 +391,19 @@ class OpenAIClient(BaseLLMClient):
         # TradingAgentsGraph._get_provider_kwargs) -- other OpenAI-compatible
         # providers don't get this kwarg passed to them at all, so they never
         # see an "options" field they might reject.
-        num_ctx = self.kwargs.get("num_ctx")
-        if num_ctx is not None:
-            llm_kwargs["extra_body"] = {"options": {"num_ctx": int(num_ctx)}}
+        # Ollama think mode (issue #155) follows the same pattern: sets
+        # extra_body["think"] alongside the options.num_ctx field. Only for
+        # ollama provider.
+        if self.provider == "ollama":
+            num_ctx = self.kwargs.get("num_ctx")
+            ollama_think = self.kwargs.get("ollama_think")
+            if num_ctx is not None or ollama_think:
+                extra_body = {"options": {}}
+                if num_ctx is not None:
+                    extra_body["options"]["num_ctx"] = int(num_ctx)
+                if ollama_think:
+                    extra_body["think"] = True
+                llm_kwargs["extra_body"] = extra_body
 
         # The subclass (provider quirks) comes from the registry spec.
         llm = chat_cls(**llm_kwargs)

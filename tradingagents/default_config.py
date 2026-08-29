@@ -33,6 +33,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OLLAMA_NUM_CTX":       "ollama_num_ctx",
     "TRADINGAGENTS_OLLAMA_NUM_CTX_MAX":   "ollama_num_ctx_max",
     "TRADINGAGENTS_OLLAMA_NUM_CTX_RESPONSE_HEADROOM": "ollama_num_ctx_response_headroom",
+    "TRADINGAGENTS_OLLAMA_THINK":         "ollama_think",
     "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED": "context_window_check_enabled",
     "TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN": "context_window_safety_margin",
     "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
@@ -131,6 +132,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    "ollama_think": False,              # enable think mode for Ollama models
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run
     # variation on models that honor it; reasoning models largely ignore it
