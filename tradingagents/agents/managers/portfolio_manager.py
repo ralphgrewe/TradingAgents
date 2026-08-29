@@ -151,8 +151,18 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         )
 
         # Check structured decision requirement (issue #156) before rendering
-        config = get_config()
         require_structured = config.get("portfolio_manager_require_structured_decision", True)
+
+        # Ticker/model identifiers for PortfolioDecisionError messages, computed once.
+        # `state` never carries a "ticker" key (see agent_states.py /
+        # propagation.py) — "company_of_interest" is the real field. For the
+        # model name, `_llm_type` is useless here: ChatOpenAI (which backs most
+        # of this codebase's providers) hard-codes it to "openai-chat"
+        # regardless of the configured model. `model_name` (ChatOpenAI/Azure)
+        # and `model` (Anthropic/Google/Perplexity) are the actual pydantic
+        # fields those langchain chat classes expose for the configured model.
+        ticker = state.get("company_of_interest", "unknown")
+        model_name = getattr(llm, "model_name", None) or getattr(llm, "model", None) or "unknown"
 
         # Decide which output to use: structured result or fallback text
         if structured_result is not None:
@@ -164,8 +174,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
                 if rating is None or rating not in RATINGS_5_TIER:
                     raise PortfolioDecisionError(
                         f"Portfolio Manager produced invalid rating {rating!r} "
-                        f"for {state.get('ticker', 'unknown')} "
-                        f"(model: {getattr(llm, '_llm_type', 'unknown')}, "
+                        f"for {ticker} "
+                        f"(model: {model_name}, "
                         f"expected one of {RATINGS_5_TIER}) — aborting ticker"
                     )
 
@@ -178,8 +188,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             # Structured decision is required but missing
             if require_structured:
                 raise PortfolioDecisionError(
-                    f"Portfolio Manager produced no structured decision for {state.get('ticker', 'unknown')} "
-                    f"(model: {getattr(llm, '_llm_type', 'unknown')}, "
+                    f"Portfolio Manager produced no structured decision for {ticker} "
+                    f"(model: {model_name}, "
                     f"structured_result was None, fallback: free text) — aborting ticker"
                 )
 
