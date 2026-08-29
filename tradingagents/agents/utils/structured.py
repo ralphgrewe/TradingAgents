@@ -9,7 +9,8 @@ canonical pattern:
    wrap is skipped and the agent uses free-text generation instead.
 2. At invocation, run the structured call and render the result back to
    markdown. If the structured call itself fails for any reason
-   (malformed JSON from a weak model, transient provider issue), fall
+   (malformed JSON from a weak model, transient provider issue, or a silent
+   ``None`` return when the model emits prose instead of a tool call), fall
    back to a plain ``llm.invoke`` so the pipeline never blocks.
 
 Centralising the pattern here keeps the agent factories small and ensures
@@ -236,10 +237,19 @@ def invoke_structured_or_freetext(
     if structured_llm is not None:
         try:
             result = structured_llm.invoke(prompt)
-            return render(result)
+            if result is None:
+                # Silent None return: model emitted prose instead of a tool call.
+                # Treat as a failure and fall back to free text (issue #160).
+                logger.warning(
+                    "%s: structured-output invocation returned None "
+                    "(model emitted no tool call); falling back to free text",
+                    agent_name,
+                )
+            else:
+                return render(result)
         except Exception as exc:
             logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
+                "%s: structured-output invocation failed (%s); falling back to free text",
                 agent_name, exc,
             )
 
@@ -269,6 +279,14 @@ def run_structured_with_tools(
     (structured output if supported, otherwise/on-failure a plain free-text
     ``llm.invoke``), so the caller does not have to reimplement the free-text
     fallback itself.
+
+    Structured output is considered to have failed in three cases:
+    (1) the structured LLM raises an exception, (2) the structured LLM returns
+    ``None`` without raising (e.g. model emits prose instead of a tool call),
+    or (3) structured output is not supported by the provider. In all three
+    cases, if ``structured_output_repair_retry`` is enabled, a schema-repair
+    retry is dispatched first (issue #153); if that also fails or is not enabled,
+    the fallback to free-text fires.
 
     Contract, stated precisely: **if this function returns, exactly one of
     ``structured_result`` / ``fallback_text`` is non-``None``.** There is no
@@ -446,10 +464,56 @@ def run_structured_with_tools(
     if structured_llm is not None:
         try:
             structured_result = structured_llm.invoke(message_trace)
-            logger.debug(
-                "%s: structured output succeeded after %d loop rounds",
-                agent_name, round_count,
-            )
+            if structured_result is None:
+                # Silent None return: model emitted prose instead of a tool call.
+                # Treat as a failure and trigger retry logic (issue #160).
+                first_failure = "returned None (model emitted no tool call)"
+                should_retry = bool(
+                    get_config().get("structured_output_repair_retry", True)
+                )
+
+                if should_retry:
+                    logger.warning(
+                        "%s: structured output failed after tool loop (%s); "
+                        "retrying once with schema-repair instruction",
+                        agent_name, first_failure,
+                    )
+
+                    # Append repair instruction to trace
+                    repair_instruction = _generate_repair_instruction(response_model)
+                    retry_trace = message_trace + [HumanMessage(content=repair_instruction)]
+
+                    try:
+                        structured_result = structured_llm.invoke(retry_trace)
+                        # Check retry result for None as well (issue #160)
+                        if structured_result is None:
+                            logger.warning(
+                                "%s: structured output retry also returned None; "
+                                "falling back to free text",
+                                agent_name,
+                            )
+                        else:
+                            logger.warning(
+                                "%s: structured output retry succeeded",
+                                agent_name,
+                            )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "%s: structured output retry also failed (%s); "
+                            "falling back to free text",
+                            agent_name, retry_exc,
+                        )
+                else:
+                    logger.warning(
+                        "%s: structured output failed after tool loop (%s); "
+                        "falling back to free text on the final trace (retry disabled)",
+                        agent_name, first_failure,
+                    )
+            else:
+                logger.debug(
+                    "%s: structured output succeeded after %d loop rounds",
+                    agent_name, round_count,
+                )
         except Exception as exc:
             # First attempt failed; attempt retry if enabled in config
             first_failure = exc
@@ -470,10 +534,18 @@ def run_structured_with_tools(
 
                 try:
                     structured_result = structured_llm.invoke(retry_trace)
-                    logger.warning(
-                        "%s: structured output retry succeeded",
-                        agent_name,
-                    )
+                    # Check retry result for None as well (issue #160)
+                    if structured_result is None:
+                        logger.warning(
+                            "%s: structured output retry also returned None; "
+                            "falling back to free text",
+                            agent_name,
+                        )
+                    else:
+                        logger.warning(
+                            "%s: structured output retry succeeded",
+                            agent_name,
+                        )
                 except Exception as retry_exc:
                     logger.warning(
                         "%s: structured output retry also failed (%s); "

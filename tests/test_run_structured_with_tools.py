@@ -822,3 +822,264 @@ class TestRepairInstructionRendering:
         assert instruction.rstrip().endswith(
             "Reply with ONLY valid JSON, no prose or explanation."
         )
+
+
+class TestNoneReturnHandling:
+    """Tests for handling None returns from structured output (issue #160).
+
+    When the model emits prose instead of a tool call, LangChain's
+    PydanticToolsParser returns None without raising an exception. This
+    must be treated as a failure triggering the same retry and fallback
+    paths as an exception.
+    """
+
+    def test_first_none_retry_succeeds(self, caplog):
+        """First call returns None, retry succeeds → structured result."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_repair_retry"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        structured_calls = []
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+
+            def mock_invoke(msg_list):
+                structured_calls.append(msg_list)
+                if len(structured_calls) == 1:
+                    # First call returns None (model emitted prose)
+                    return None
+                else:
+                    # Retry succeeds
+                    return SimpleResponse(decision="buy", confidence=0.9)
+
+            structured.invoke = mock_invoke
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        # Structured succeeded on retry, no fallback
+        assert result is not None
+        assert result.decision == "buy"
+        assert fallback_text is None
+        assert len(structured_calls) == 2
+        assert "returned None (model emitted no tool call)" in caplog.text
+        assert "retrying once with schema-repair instruction" in caplog.text
+        assert "structured output retry succeeded" in caplog.text
+
+    def test_first_none_retry_also_none(self, caplog):
+        """First call returns None, retry also returns None → fallback."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_repair_retry"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        structured_calls = []
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+
+            def mock_invoke(msg_list):
+                structured_calls.append(msg_list)
+                # Both calls return None
+                return None
+
+            structured.invoke = mock_invoke
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_fallback_invoke(msg_list):
+            return MagicMock(content="Fallback response.")
+
+        mock_llm.invoke = mock_fallback_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        # Both calls returned None, fallback was used
+        assert result is None
+        assert fallback_text == "Fallback response."
+        assert len(structured_calls) == 2
+        assert "returned None (model emitted no tool call)" in caplog.text
+        assert "structured output retry also returned None" in caplog.text
+
+    def test_first_none_retry_raises(self, caplog):
+        """First call returns None, retry raises → fallback."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_repair_retry"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        structured_calls = []
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+
+            def mock_invoke(msg_list):
+                structured_calls.append(msg_list)
+                if len(structured_calls) == 1:
+                    # First call returns None
+                    return None
+                else:
+                    # Retry raises
+                    raise ValueError("Retry failed")
+
+            structured.invoke = mock_invoke
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_fallback_invoke(msg_list):
+            return MagicMock(content="Fallback response.")
+
+        mock_llm.invoke = mock_fallback_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        # Fallback was used
+        assert result is None
+        assert fallback_text == "Fallback response."
+        assert len(structured_calls) == 2
+        assert "returned None (model emitted no tool call)" in caplog.text
+        assert "structured output retry also failed" in caplog.text
+
+    def test_first_none_retry_disabled(self, caplog):
+        """First call returns None, retry disabled → no retry, fallback."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_repair_retry"] = False
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        structured_calls = []
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+
+            def mock_invoke(msg_list):
+                structured_calls.append(msg_list)
+                # First call returns None
+                return None
+
+            structured.invoke = mock_invoke
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_fallback_invoke(msg_list):
+            return MagicMock(content="Fallback response.")
+
+        mock_llm.invoke = mock_fallback_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        # No retry because it's disabled
+        assert result is None
+        assert fallback_text == "Fallback response."
+        assert len(structured_calls) == 1  # Only the first call, no retry
+        assert "returned None (model emitted no tool call)" in caplog.text
+        assert "retry disabled" in caplog.text
+
+
+class TestInvokeStructuredOrFreetextNoneHandling:
+    """Tests for None handling in invoke_structured_or_freetext (issue #160)."""
+
+    def test_structured_returns_none_falls_back_to_freetext(self, caplog):
+        """When structured returns None, fall back to free text."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = None
+
+        mock_plain_llm = MagicMock()
+        mock_plain_llm.invoke.return_value = MagicMock(content="Free text response")
+
+        from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+        with caplog.at_level(logging.WARNING):
+            result = invoke_structured_or_freetext(
+                mock_structured_llm,
+                mock_plain_llm,
+                "Test prompt",
+                lambda x: x,
+                "TestAgent",
+            )
+
+        assert result == "Free text response"
+        assert "returned None" in caplog.text
+        assert "model emitted no tool call" in caplog.text
+        # Ensure there's no AttributeError logged
+        assert "AttributeError" not in caplog.text
+
+    def test_structured_returns_none_no_render_call(self, caplog):
+        """When structured returns None, render is not called (avoiding AttributeError)."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = None
+
+        mock_plain_llm = MagicMock()
+        mock_plain_llm.invoke.return_value = MagicMock(content="Free text response")
+
+        render_mock = MagicMock(side_effect=AttributeError("Should not be called"))
+
+        from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+        # This should NOT raise an AttributeError from render_mock
+        result = invoke_structured_or_freetext(
+            mock_structured_llm,
+            mock_plain_llm,
+            "Test prompt",
+            render_mock,
+            "TestAgent",
+        )
+
+        assert result == "Free text response"
+        # render should not have been called
+        render_mock.assert_not_called()
