@@ -724,8 +724,10 @@ class RunTradingAgentsConfigFileTests(_TempStockFileTestCase):
                 "BUY"
             )
             mock_portfolio.return_value = (
-                {"summary": "Portfolio rebalancing summary"},
-                "portfolio_report.json"
+                {"summary": "Portfolio rebalancing summary", "details": {}},
+                "portfolio_report.json",
+                [],  # missing_ratings
+                [],  # missing_prices
             )
 
             with patch('sys.argv', ['run_trading_agents.py', str(config_file)]):

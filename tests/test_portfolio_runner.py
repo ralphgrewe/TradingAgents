@@ -126,7 +126,7 @@ class TestRunPortfolioMode:
         )
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
 
-        envelope, report_file = run_portfolio_mode(
+        envelope, report_file, missing_ratings, missing_prices = run_portfolio_mode(
             universe=["AAA", "BBB"],
             ratings={"AAA": "Buy", "BBB": "Sell"},
             style="aggressive",
@@ -148,6 +148,10 @@ class TestRunPortfolioMode:
         assert report_file.exists()
         on_disk = json.loads(report_file.read_text())
         assert on_disk == envelope
+
+        # Verify missing_ratings and missing_prices are empty (all tickers succeeded)
+        assert missing_ratings == []
+        assert missing_prices == []
 
     def test_sells_execute_before_buys(self, tmp_path, monkeypatch):
         fake = FakeSimulationClient(
@@ -187,7 +191,7 @@ class TestRunPortfolioMode:
         )
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
 
-        envelope, _ = run_portfolio_mode(
+        envelope, _, missing_ratings, missing_prices = run_portfolio_mode(
             universe=["AAA"],
             ratings={"AAA": "Buy"},
             style="aggressive",
@@ -216,7 +220,7 @@ class TestRunPortfolioMode:
         )
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
 
-        envelope, _ = run_portfolio_mode(
+        envelope, _, missing_ratings, missing_prices = run_portfolio_mode(
             universe=["AAA", "BBB"],
             ratings={"AAA": "Hold", "BBB": "Buy"},
             style="aggressive",
@@ -228,6 +232,10 @@ class TestRunPortfolioMode:
         assert "AAA" in envelope["details"]["universe"]
         assert envelope["details"]["allocation"]["AAA"]["price"] == 100.0
 
+        # Verify missing_prices correctly reports BBB as dropped
+        assert missing_ratings == []
+        assert missing_prices == ["BBB"]
+
     def test_missing_rating_drops_ticker(self, tmp_path, monkeypatch):
         # CCC's pipeline run failed upstream (no rating supplied) -> dropped
         # from the portfolio run entirely, without touching the simulator for it.
@@ -238,7 +246,7 @@ class TestRunPortfolioMode:
         )
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
 
-        envelope, _ = run_portfolio_mode(
+        envelope, _, missing_ratings, missing_prices = run_portfolio_mode(
             universe=["AAA", "CCC"],
             ratings={"AAA": "Buy"},
             style="aggressive",
@@ -248,6 +256,10 @@ class TestRunPortfolioMode:
 
         assert envelope["details"]["universe"] == ["AAA"]
         assert all(o[0] != "CCC" for o in fake.orders)
+
+        # Verify missing_ratings correctly reports CCC as dropped
+        assert missing_ratings == ["CCC"]
+        assert missing_prices == []
 
     def test_missing_rating_from_portfolio_decision_error(self, tmp_path, monkeypatch, capsys):
         # Simulate the behavior when a ticker's pipeline fails with
@@ -260,7 +272,7 @@ class TestRunPortfolioMode:
         )
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
 
-        envelope, _ = run_portfolio_mode(
+        envelope, _, missing_ratings, missing_prices = run_portfolio_mode(
             universe=["AAA", "FAILED_TICKER"],
             ratings={"AAA": "Buy"},  # FAILED_TICKER is not in ratings
             style="aggressive",
@@ -277,6 +289,10 @@ class TestRunPortfolioMode:
         assert "no rating for FAILED_TICKER" in captured.out
         assert "pipeline run failed" in captured.out
         assert "dropping from portfolio run" in captured.out
+
+        # Verify missing_ratings correctly reports FAILED_TICKER as dropped
+        assert missing_ratings == ["FAILED_TICKER"]
+        assert missing_prices == []
 
     def test_unknown_style_raises(self, tmp_path, monkeypatch):
         fake = FakeSimulationClient()

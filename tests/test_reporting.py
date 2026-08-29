@@ -4,13 +4,16 @@ Covers issue #19: adopting upstream's ``write_report_tree`` for the markdown
 subfolder tree while layering our fork's ``trading_recommendation.json``
 structured export on top, in both `cli/main.py` and
 `tradingagents/report_generator.py`.
+
+Includes tests for issue #157: backfilling per-ticker reports with portfolio
+adjustments and executed orders after portfolio mode completes.
 """
 
 import json
 
 import pytest
 
-from tradingagents.reporting import write_report_tree
+from tradingagents.reporting import backfill_portfolio_adjustments, write_report_tree
 
 pytestmark = pytest.mark.unit
 
@@ -229,3 +232,257 @@ class TestTradingGraphSaveReports:
         report_file = graph.save_reports(_final_state(), "AAPL", save_path=explicit_path)
 
         assert report_file == explicit_path / "complete_report.md"
+
+
+class TestBackfillPortfolioAdjustments:
+    """Tests for backfilling per-ticker reports with portfolio adjustments (issue #157)."""
+
+    def _make_envelope(self, **details_overrides):
+        """Create a sample portfolio envelope like run_portfolio_mode returns."""
+        details = {
+            "depot_id": "test-depot",
+            "universe": ["AAPL", "MSFT"],
+            "signals": {
+                "AAPL": {"signal": "BUY", "confidence": "HIGH"},
+                "MSFT": {"signal": "HOLD", "confidence": "MEDIUM"},
+            },
+            "allocation": {
+                "AAPL": {
+                    "raw_weight": 0.5,
+                    "target_weight": 0.50,
+                    "target_shares": 10,
+                    "current_shares": 0,
+                    "delta": 10,
+                    "price": 150.0,
+                },
+                "MSFT": {
+                    "raw_weight": 0.5,
+                    "target_weight": 0.50,
+                    "target_shares": 5,
+                    "current_shares": 5,
+                    "delta": 0,
+                    "price": 300.0,
+                },
+            },
+            "trades_executed": [
+                {
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "quantity": 10,
+                    "status": "executed",
+                    "message": "Order executed at market price",
+                    "fill_price": 149.5,
+                },
+                {
+                    "symbol": "MSFT",
+                    "side": "buy",
+                    "quantity": 0,
+                    "status": "rejected",
+                    "message": "Min trade size 2 not met",
+                    "fill_price": None,
+                },
+            ],
+            "rejected_orders": [
+                {
+                    "symbol": "MSFT",
+                    "side": "buy",
+                    "quantity": 0,
+                    "status": "rejected",
+                    "message": "Min trade size 2 not met",
+                    "fill_price": None,
+                },
+            ],
+            "pre_snapshot": {
+                "equity": 10000.0,
+                "cash": 10000.0,
+                "positions": {},
+            },
+            "post_snapshot": {
+                "equity": 11495.0,
+                "cash": 8505.0,
+                "positions": {"AAPL": {"shares": 10, "price": 149.5, "market_value": 1495.0}},
+            },
+            "equity_change": 1495.0,
+        }
+        details.update(details_overrides)
+        return {"details": details}
+
+    def test_backfill_renders_proposed_adjustments_table(self, tmp_path):
+        """Backfill adds the proposed adjustments table to per-ticker reports."""
+        # Create initial reports with the standard structure
+        report_dir = tmp_path / "AAPL_2024-01-01_20240101_120000"
+        portfolio_subdir = report_dir / "5_portfolio"
+        portfolio_subdir.mkdir(parents=True)
+
+        # Write initial decision.md and complete_report.md
+        pm_decision = "**Rating**: Buy\n**Executive Summary**: Strong buy signal."
+        (portfolio_subdir / "decision.md").write_text(pm_decision, encoding="utf-8")
+        complete_report = (
+            "# Trading Analysis Report: AAPL\n\n"
+            "## V. Portfolio Manager Decision\n\n"
+            "### Portfolio Manager\n" + pm_decision
+        )
+        (report_dir / "complete_report.md").write_text(complete_report, encoding="utf-8")
+
+        # Backfill
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+
+        # Verify decision.md has the proposed adjustments table for this ticker only
+        decision_text = (portfolio_subdir / "decision.md").read_text(encoding="utf-8")
+        assert "### Proposed adjustments (depot test-depot)" in decision_text
+        # Per-ticker report should only show this ticker's row
+        assert "| AAPL | BUY | 0.50 | 10 |" in decision_text
+        # MSFT should NOT appear in AAPL's report
+        assert "| MSFT |" not in decision_text
+
+    def test_backfill_shows_executed_trades_with_fill_price(self, tmp_path):
+        """Backfill shows executed trades with fill price in the Executed section."""
+        report_dir = tmp_path / "AAPL_2024-01-01_20240101_120000"
+        portfolio_subdir = report_dir / "5_portfolio"
+        portfolio_subdir.mkdir(parents=True)
+
+        pm_decision = "**Rating**: Buy"
+        (portfolio_subdir / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+
+        decision_text = (portfolio_subdir / "decision.md").read_text(encoding="utf-8")
+        assert "### Executed" in decision_text
+        assert "- AAPL: BUY 10 shares @ $149.50 — executed" in decision_text
+
+    def test_backfill_shows_rejected_orders_with_message(self, tmp_path):
+        """Backfill shows rejected orders with their rejection message."""
+        # Use MSFT which has a rejected order in the envelope
+        report_dir = tmp_path / "MSFT_2024-01-01_20240101_120000"
+        portfolio_subdir = report_dir / "5_portfolio"
+        portfolio_subdir.mkdir(parents=True)
+
+        pm_decision = "**Rating**: Hold"
+        (portfolio_subdir / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"MSFT": str(report_dir)},
+        )
+
+        decision_text = (portfolio_subdir / "decision.md").read_text(encoding="utf-8")
+        assert "REJECTED: Min trade size 2 not met" in decision_text
+
+    def test_backfill_is_idempotent(self, tmp_path):
+        """Running backfill twice doesn't duplicate the portfolio section."""
+        report_dir = tmp_path / "AAPL_2024-01-01_20240101_120000"
+        portfolio_subdir = report_dir / "5_portfolio"
+        portfolio_subdir.mkdir(parents=True)
+
+        pm_decision = "**Rating**: Buy"
+        (portfolio_subdir / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+
+        first_decision = (portfolio_subdir / "decision.md").read_text(encoding="utf-8")
+
+        # Backfill again
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir)},
+        )
+
+        second_decision = (portfolio_subdir / "decision.md").read_text(encoding="utf-8")
+
+        # Should be identical (no duplicate append)
+        assert first_decision == second_decision
+        assert first_decision.count("### Proposed adjustments") == 1
+
+    def test_backfill_shows_dropped_tickers_with_explanation(self, tmp_path):
+        """Backfill shows tickers dropped due to missing rating or price in their report."""
+        # Create report directories for both AAPL (successful) and TSLA (dropped due to price)
+        report_dir_aapl = tmp_path / "AAPL_2024-01-01_20240101_120000"
+        portfolio_subdir_aapl = report_dir_aapl / "5_portfolio"
+        portfolio_subdir_aapl.mkdir(parents=True)
+
+        report_dir_tsla = tmp_path / "TSLA_2024-01-01_20240101_120001"
+        portfolio_subdir_tsla = report_dir_tsla / "5_portfolio"
+        portfolio_subdir_tsla.mkdir(parents=True)
+
+        pm_decision = "**Rating**: Buy"
+        (portfolio_subdir_aapl / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir_aapl / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        (portfolio_subdir_tsla / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir_tsla / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        envelope = self._make_envelope()
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir_aapl), "TSLA": str(report_dir_tsla)},
+            missing_ratings=[],
+            missing_prices=["TSLA"],
+        )
+
+        # AAPL (successful) should have the normal proposed adjustments section
+        decision_aapl = (portfolio_subdir_aapl / "decision.md").read_text(encoding="utf-8")
+        assert "### Proposed adjustments" in decision_aapl
+
+        # TSLA (dropped) should have the dropped explanation
+        decision_tsla = (portfolio_subdir_tsla / "decision.md").read_text(encoding="utf-8")
+        assert "### Dropped" in decision_tsla
+        assert "no usable price" in decision_tsla
+
+    def test_backfill_only_updates_tickers_in_per_ticker_dirs(self, tmp_path):
+        """Backfill only processes tickers that have report directories."""
+        report_dir_aapl = tmp_path / "AAPL_2024-01-01_20240101_120000"
+        portfolio_subdir_aapl = report_dir_aapl / "5_portfolio"
+        portfolio_subdir_aapl.mkdir(parents=True)
+
+        pm_decision = "**Rating**: Buy"
+        (portfolio_subdir_aapl / "decision.md").write_text(pm_decision, encoding="utf-8")
+        (report_dir_aapl / "complete_report.md").write_text(
+            "# Report\n\n## V. Portfolio Manager Decision\n\n### Portfolio Manager\n" + pm_decision,
+            encoding="utf-8",
+        )
+
+        envelope = self._make_envelope()
+        # Only pass AAPL in per_ticker_report_dirs, even though envelope has MSFT
+        backfill_portfolio_adjustments(
+            envelope=envelope,
+            per_ticker_report_dirs={"AAPL": str(report_dir_aapl)},
+        )
+
+        # AAPL should have been updated
+        decision_text = (portfolio_subdir_aapl / "decision.md").read_text(encoding="utf-8")
+        assert "### Proposed adjustments" in decision_text
+
+        # MSFT's report directory wasn't provided, so it wasn't updated
+        # (this is the expected behavior — per-ticker backfill happens
+        # only for tickers that have report directories in per_ticker_report_dirs)

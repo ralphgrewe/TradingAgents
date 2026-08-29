@@ -150,7 +150,7 @@ def run_portfolio_mode(
     style: str,
     depot_id: str,
     report_dir: Path,
-) -> tuple[dict[str, Any], Path]:
+) -> tuple[dict[str, Any], Path, list[str], list[str]]:
     """Run the portfolio-level rebalance and write the run report to disk.
 
     Args:
@@ -166,14 +166,17 @@ def run_portfolio_mode(
             (alongside the existing per-ticker reports).
 
     Returns:
-        ``(envelope, report_file)`` — the envelope dict that was written
-        and the path it was written to.
+        ``(envelope, report_file, missing_ratings, missing_prices)`` where:
+        - envelope: the envelope dict that was written
+        - report_file: the path it was written to
+        - missing_ratings: list of tickers with no rating (pipeline failed)
+        - missing_prices: list of tickers dropped due to no usable price
     """
     if style not in STYLE_PARAMS:
         raise ValueError(f"Unknown portfolio style: {style!r} (expected one of {list(STYLE_PARAMS)})")
 
-    missing = [t for t in universe if t not in ratings]
-    for ticker in missing:
+    missing_ratings = [t for t in universe if t not in ratings]
+    for ticker in missing_ratings:
         print(f"Warning: no rating for {ticker} (pipeline run failed?) — dropping from portfolio run")
     signal_universe = [t for t in universe if t in ratings]
     signals = build_signals({t: ratings[t] for t in signal_universe})
@@ -192,8 +195,8 @@ def run_portfolio_mode(
             "positions": pre_positions,
         }
 
-        prices, dropped = _fetch_prices(client, signal_universe, pre_positions)
-        effective_universe = [t for t in signal_universe if t not in dropped]
+        prices, missing_prices = _fetch_prices(client, signal_universe, pre_positions)
+        effective_universe = [t for t in signal_universe if t not in missing_prices]
         signals = {t: signals[t] for t in effective_universe}
 
         allocation = compute_allocation(
@@ -244,4 +247,4 @@ def run_portfolio_mode(
     report_file = report_dir / f"portfolio-manager-{depot_id}.json"
     report_file.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
 
-    return envelope, report_file
+    return envelope, report_file, missing_ratings, missing_prices

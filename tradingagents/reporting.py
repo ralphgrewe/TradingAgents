@@ -46,6 +46,222 @@ def _try_parse_envelope(report: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def backfill_portfolio_adjustments(
+    envelope: dict,
+    per_ticker_report_dirs: dict[str, str],
+    missing_ratings: list[str] | None = None,
+    missing_prices: list[str] | None = None,
+) -> None:
+    """Backfill per-ticker reports with portfolio adjustments and executed orders.
+
+    Called after portfolio mode completes to update each ticker's `5_portfolio/decision.md`
+    and the `## V.` section of its `complete_report.md` with:
+    - Proposed adjustments table (ticker, signal, target weight, Δ shares)
+    - Executed trades list (with status, fill price, message)
+    - Rejected orders shown explicitly with their messages
+    - Dropped tickers (no rating or no price) shown with explanatory line
+
+    Args:
+        envelope: The dict returned by run_portfolio_mode() containing:
+            - details.depot_id, details.universe, details.signals, details.allocation,
+              details.trades_executed, details.rejected_orders
+        per_ticker_report_dirs: {ticker: path_to_report_dir} mapping from the per-ticker
+            loop that already ran. Only tickers present in this dict have their reports updated.
+        missing_ratings: Tickers that had no rating (pipeline failed). Their reports
+            get an explanatory line instead of a table.
+        missing_prices: Tickers that had no usable price (dropped inside run_portfolio_mode).
+            Their reports get an explanatory line instead of a table.
+
+    Idempotency: Running this function twice on the same report directory is safe.
+    The function detects if the portfolio section is already present (by checking for
+    the "### Proposed adjustments" marker) and skips that ticker if found, avoiding
+    duplicate or nested appends.
+    """
+    missing_ratings = missing_ratings or []
+    missing_prices = missing_prices or []
+
+    details = envelope.get("details", {})
+    depot_id = details.get("depot_id", "unknown")
+    universe = details.get("universe", [])
+    signals = details.get("signals", {})
+    allocation = details.get("allocation", {})
+    trades_executed = details.get("trades_executed", [])
+
+    # Build a map of tickers to their trades (for the "Executed" section)
+    ticker_trades_map = {}
+    for trade in trades_executed:
+        symbol = trade.get("symbol")
+        if symbol:
+            if symbol not in ticker_trades_map:
+                ticker_trades_map[symbol] = []
+            ticker_trades_map[symbol].append(trade)
+
+    # Helper function to render proposed adjustments table for a specific ticker or full universe
+    def render_table(ticker_filter=None):
+        """Render the proposed adjustments table, optionally filtered to one ticker."""
+        table_lines = [
+            "| ticker | signal | target wt | Δ shares |",
+            "|--------|--------|-----------|----------|",
+        ]
+        tickers_to_show = [ticker_filter] if ticker_filter else universe
+        for t in tickers_to_show:
+            if t not in universe:
+                continue
+            signal_data = signals.get(t, {})
+            signal = signal_data.get("signal", "HOLD")
+            alloc = allocation.get(t, {})
+            target_wt = alloc.get("target_weight", 0.0)
+            delta = alloc.get("delta", 0)
+            table_lines.append(f"| {t} | {signal} | {target_wt:.2f} | {delta} |")
+        return "\n".join(table_lines)
+
+    # Helper function to render executed trades for a specific ticker or full universe
+    def render_executed(ticker_filter=None):
+        """Render the executed trades section, optionally filtered to one ticker."""
+        executed_lines = []
+        tickers_to_show = [ticker_filter] if ticker_filter else universe
+        for t in tickers_to_show:
+            if t not in universe:
+                continue
+            trades = ticker_trades_map.get(t, [])
+            if not trades:
+                executed_lines.append(f"- {t}: (no trade)")
+                continue
+
+            for trade in trades:
+                side = trade.get("side", "unknown").upper()
+                quantity = trade.get("quantity", 0)
+                status = trade.get("status", "unknown")
+                fill_price = trade.get("fill_price")
+                message = trade.get("message", "")
+
+                if status == "rejected":
+                    executed_lines.append(
+                        f"- {t}: {side} {quantity} shares — REJECTED: {message}"
+                    )
+                else:
+                    price_str = f" @ ${fill_price:.2f}" if fill_price else ""
+                    executed_lines.append(
+                        f"- {t}: {side} {quantity} shares{price_str} — {status}"
+                    )
+
+        return "\n".join(executed_lines) if executed_lines else "(none — HOLD)"
+
+    # Build the consolidated portfolio section (for complete_report.md)
+    table = render_table()
+    executed = render_executed()
+    portfolio_section = (
+        f"### Proposed adjustments (depot {depot_id})\n"
+        f"{table}\n\n"
+        f"### Executed\n"
+        f"{executed}"
+    )
+
+    # For dropped tickers, collect explanations per ticker
+    dropped_explanations = {}
+    for ticker in missing_ratings:
+        if ticker in per_ticker_report_dirs:
+            dropped_explanations[ticker] = "no rating (pipeline run failed) — dropped from portfolio run"
+    for ticker in missing_prices:
+        if ticker in per_ticker_report_dirs:
+            dropped_explanations[ticker] = "no usable price (no quote or recorded price) — dropped from portfolio run"
+
+    dropped_section = ""
+    dropped_section_lines = []
+    for ticker, explanation in dropped_explanations.items():
+        dropped_section_lines.append(f"- {ticker}: {explanation}")
+    if dropped_section_lines:
+        dropped_section = (
+            "\n\n### Dropped\n" + "\n".join(dropped_section_lines)
+        )
+
+    # Update each ticker's report files
+    for ticker, report_dir in per_ticker_report_dirs.items():
+        report_path = Path(report_dir)
+
+        # Check if this ticker was dropped
+        is_dropped = ticker in dropped_explanations
+
+        # Update decision.md (5_portfolio/decision.md)
+        decision_file = report_path / "5_portfolio" / "decision.md"
+        if decision_file.exists():
+            decision_text = decision_file.read_text(encoding="utf-8")
+            # Check if already backfilled (idempotency)
+            if "### Proposed adjustments" in decision_text or "### Dropped" in decision_text:
+                continue
+
+            # Decision file gets the proposed adjustments and executed sections
+            if is_dropped:
+                # Dropped ticker gets an explanatory line
+                backfill_text = (
+                    f"\n\n### Dropped\n"
+                    f"- {ticker}: {dropped_explanations[ticker]}"
+                )
+            else:
+                # Successful ticker gets the proposed adjustments and executed sections
+                # Render table and executed list filtered to just this ticker
+                ticker_table = render_table(ticker_filter=ticker)
+                ticker_executed = render_executed(ticker_filter=ticker)
+
+                backfill_text = (
+                    f"\n\n### Proposed adjustments (depot {depot_id})\n"
+                    f"{ticker_table}\n\n"
+                    f"### Executed\n"
+                    f"{ticker_executed}"
+                )
+
+            decision_file.write_text(decision_text + backfill_text, encoding="utf-8")
+
+        # Update complete_report.md
+        complete_file = report_path / "complete_report.md"
+        if complete_file.exists():
+            complete_text = complete_file.read_text(encoding="utf-8")
+            # Check if already backfilled (idempotency)
+            if "### Proposed adjustments" in complete_text:
+                continue
+
+            # Find and replace the "## V. Portfolio Manager Decision" section
+            # The current section is just "## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{judge_decision}"
+            # We need to extend it with the proposed adjustments and executed sections
+
+            # Use a marker to find where to insert the portfolio adjustments
+            v_section_marker = "## V. Portfolio Manager Decision"
+            if v_section_marker not in complete_text:
+                continue
+
+            # Find the PM decision section start
+            v_idx = complete_text.find(v_section_marker)
+            if v_idx == -1:
+                continue
+
+            # The section contains "### Portfolio Manager" followed by the judge_decision
+            # We want to find the end of that section and insert our portfolio adjustments
+            # Look for the next "## " (next section) or end of file
+            after_v = complete_text[v_idx + len(v_section_marker):]
+            next_section = after_v.find("\n## ")
+            if next_section == -1:
+                # This is the last section
+                section_end = len(complete_text)
+            else:
+                section_end = v_idx + len(v_section_marker) + next_section
+
+            # Extract the PM decision section
+            pm_section = complete_text[v_idx:section_end]
+
+            # The PM section currently has the judge_decision
+            # We insert the portfolio adjustments after the judge_decision
+            # Find where the judge_decision ends (it's typically after "### Portfolio Manager\n...")
+
+            # Insert the portfolio adjustments before the end of the section
+            updated_pm_section = pm_section + f"\n\n{portfolio_section}"
+            if dropped_section:
+                updated_pm_section += dropped_section
+
+            # Replace the old section with the updated one
+            complete_text = complete_text[:v_idx] + updated_pm_section + complete_text[section_end:]
+            complete_file.write_text(complete_text, encoding="utf-8")
+
+
 def format_report_preview(report: str, max_len: int = 150) -> str:
     """Return a short, human-readable one-line preview of an analyst report field.
 
