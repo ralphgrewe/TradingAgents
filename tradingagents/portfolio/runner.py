@@ -45,6 +45,13 @@ def extract_rating(final_state: dict[str, Any]) -> str:
     the deterministic heuristic parser over ``final_trade_decision`` markdown
     when structured data isn't available (e.g. the provider doesn't support
     structured output and the agent fell back to free text).
+
+    Note: As of issue #156, a completely failed Portfolio Manager decision
+    (no structured output or invalid rating when
+    ``portfolio_manager_require_structured_decision=True``) aborts the ticker
+    with ``PortfolioDecisionError`` and never reaches this function. The
+    ``SignalProcessor`` fallback below therefore only handles legitimate
+    free-text fallback scenarios, not failed decisions.
     """
     structured = final_state.get("portfolio_structured_data") or {}
     rating = structured.get("rating")

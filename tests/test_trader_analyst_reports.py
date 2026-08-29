@@ -705,7 +705,12 @@ class TestPortfolioManagerPromptAssembly:
 
     @pytest.fixture(autouse=True)
     def _disable_knowledge_base(self):
-        set_config({"knowledge_base_enabled": False})
+        # Issue #156: also disable the structured decision requirement since we're
+        # testing the fallback path with bind_structured returning None
+        set_config({
+            "knowledge_base_enabled": False,
+            "portfolio_manager_require_structured_decision": False,
+        })
 
     def test_pm_includes_analyst_reports_in_prompt(self):
         """Portfolio manager prompt should include all four analyst reports."""

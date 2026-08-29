@@ -405,6 +405,26 @@ server above: `run_trading_agents.py`'s per-ticker `except Exception` already tr
 other run-aborting error (flushes the call log, prints the error, exits) with no code change needed
 for that behavior.
 
+### Portfolio Manager structured decision requirement (issue #156)
+
+The Portfolio Manager produces decisions via structured output (`PortfolioDecision` schema). When a
+provider does not support structured output or the LLM fails to produce valid output, the node falls
+back to free-text generation and attempts to parse the prose. A completely failed decision —
+`portfolio_structured_data` is `None` or the `rating` is invalid — is now a hard failure, following
+the same precedent as `MemoryMCPConnectionError` and `PromptContextOverflowError`.
+
+- **`portfolio_manager_require_structured_decision`** (env: `TRADINGAGENTS_PORTFOLIO_MANAGER_REQUIRE_STRUCTURED_DECISION`,
+  default `True`): when enabled, the Portfolio Manager node aborts the ticker with `PortfolioDecisionError`
+  if the structured decision is missing or invalid (rating not in the 5-tier scale). When disabled, the
+  node falls back to the pre-#156 behavior and attempts to extract a rating from the free-text fallback
+  via `SignalProcessor` parsing.
+
+When a ticker aborts with `PortfolioDecisionError`, the exception propagates to `run_trading_agents.py`'s
+per-ticker `except Exception` handler, which treats it like any other run-aborting error (flushes the
+call log, prints the error, and continues to the next ticker). The failing ticker is absent from
+`portfolio_ratings` passed to `run_portfolio_mode`, which drops it with its existing "pipeline run failed"
+warning rather than trading on a parsed guess.
+
 ### Accessing configuration in code
 
 Inside agents and tools, call `get_config()` from `tradingagents.dataflows.config` to read the

@@ -756,11 +756,18 @@ class TestPortfolioManagerInjection:
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
-        produced, so the pipeline never blocks."""
+        produced, so the pipeline never blocks. Issue #156: disables the
+        structured decision requirement to verify fallback behavior."""
+        from tradingagents.dataflows.config import set_config
+
         plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
+        llm.bind_tools.return_value = llm  # For tool loop path
+
+        set_config({"portfolio_manager_require_structured_decision": False})
+
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
         assert result["final_trade_decision"] == plain_response

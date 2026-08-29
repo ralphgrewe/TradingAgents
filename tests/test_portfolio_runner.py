@@ -249,6 +249,35 @@ class TestRunPortfolioMode:
         assert envelope["details"]["universe"] == ["AAA"]
         assert all(o[0] != "CCC" for o in fake.orders)
 
+    def test_missing_rating_from_portfolio_decision_error(self, tmp_path, monkeypatch, capsys):
+        # Simulate the behavior when a ticker's pipeline fails with
+        # PortfolioDecisionError (issue #156) — it won't be in the ratings dict
+        # passed to run_portfolio_mode, so it's dropped as "pipeline run failed".
+        fake = FakeSimulationClient(
+            existing_depots=["d"],
+            prices={"AAA": 100.0, "FAILED_TICKER": 50.0},
+            portfolios={"d": {"cash": 100_000.0, "total_equity": 100_000.0, "positions": {}}},
+        )
+        monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)
+
+        envelope, _ = run_portfolio_mode(
+            universe=["AAA", "FAILED_TICKER"],
+            ratings={"AAA": "Buy"},  # FAILED_TICKER is not in ratings
+            style="aggressive",
+            depot_id="d",
+            report_dir=tmp_path,
+        )
+
+        # FAILED_TICKER is dropped from the portfolio run
+        assert envelope["details"]["universe"] == ["AAA"]
+        assert all(o[0] != "FAILED_TICKER" for o in fake.orders)
+
+        # The warning was printed
+        captured = capsys.readouterr()
+        assert "no rating for FAILED_TICKER" in captured.out
+        assert "pipeline run failed" in captured.out
+        assert "dropping from portfolio run" in captured.out
+
     def test_unknown_style_raises(self, tmp_path, monkeypatch):
         fake = FakeSimulationClient()
         monkeypatch.setattr(runner_module, "SimulationClient", lambda: fake)

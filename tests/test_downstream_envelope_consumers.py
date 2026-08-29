@@ -642,6 +642,10 @@ class TestPortfolioManagerWikiToolIntegration:
         `test_pm_fallback_when_structured_output_unsupported`, which implied it
         covered the unsupported+kb-enabled combination but never actually set
         knowledge_base_enabled=True.
+
+        Issue #156: this test disables the structured decision requirement to
+        verify fallback behavior. Issue #156 also covers abort behavior when
+        structured output is required.
         """
         from tradingagents.dataflows.config import set_config
 
@@ -655,7 +659,10 @@ class TestPortfolioManagerWikiToolIntegration:
             content="**Rating**: Sell\n\n**Executive Summary**: Risk/reward unfavorable.\n\n**Investment Thesis**: Too much downside risk."
         )
 
-        set_config({"knowledge_base_enabled": False})
+        set_config({
+            "knowledge_base_enabled": False,
+            "portfolio_manager_require_structured_decision": False,  # Allow fallback (issue #156)
+        })
 
         pm = create_portfolio_manager(llm)
         state = _envelope_state()
@@ -695,6 +702,10 @@ class TestPortfolioManagerWikiToolIntegration:
         run_structured_with_tools (tools bound via llm.bind_tools), which internally
         discovers structured output isn't supported and falls back to free text on
         its own -- rather than skipping tool binding entirely.
+
+        Issue #156: this test disables the structured decision requirement to
+        verify the tool-loop gate behavior. Issue #156 also covers abort behavior
+        when structured output is required but unsupported.
         """
         from tradingagents.dataflows.config import set_config
 
@@ -727,7 +738,10 @@ class TestPortfolioManagerWikiToolIntegration:
 
         llm.invoke.side_effect = [no_tool_call_response, fallback_response]
 
-        set_config({"knowledge_base_enabled": True})
+        set_config({
+            "knowledge_base_enabled": True,
+            "portfolio_manager_require_structured_decision": False,  # Allow fallback (issue #156)
+        })
 
         pm = create_portfolio_manager(llm)
         state = _envelope_state()

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
+from tradingagents.agents.managers.exceptions import PortfolioDecisionError
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -26,6 +27,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     is_present_text,
 )
+from tradingagents.agents.utils.rating import RATINGS_5_TIER
 from tradingagents.agents.utils.structured import run_structured_with_tools
 from tradingagents.agents.utils.wiki_tools import search_strategy_wiki
 from tradingagents.dataflows.config import get_config
@@ -148,14 +150,38 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             agent_name="PortfolioManager",
         )
 
+        # Check structured decision requirement (issue #156) before rendering
+        config = get_config()
+        require_structured = config.get("portfolio_manager_require_structured_decision", True)
+
         # Decide which output to use: structured result or fallback text
         if structured_result is not None:
-            final_trade_decision = render_pm_decision(structured_result)
             portfolio_structured_data = structured_result.dict()
+
+            # Validate rating if required
+            if require_structured:
+                rating = portfolio_structured_data.get("rating")
+                if rating is None or rating not in RATINGS_5_TIER:
+                    raise PortfolioDecisionError(
+                        f"Portfolio Manager produced invalid rating {rating!r} "
+                        f"for {state.get('ticker', 'unknown')} "
+                        f"(model: {getattr(llm, '_llm_type', 'unknown')}, "
+                        f"expected one of {RATINGS_5_TIER}) — aborting ticker"
+                    )
+
+            final_trade_decision = render_pm_decision(structured_result)
         else:
             # fallback_text is guaranteed to be non-None when structured_result is None
             final_trade_decision = fallback_text
             portfolio_structured_data = None
+
+            # Structured decision is required but missing
+            if require_structured:
+                raise PortfolioDecisionError(
+                    f"Portfolio Manager produced no structured decision for {state.get('ticker', 'unknown')} "
+                    f"(model: {getattr(llm, '_llm_type', 'unknown')}, "
+                    f"structured_result was None, fallback: free text) — aborting ticker"
+                )
 
         # Update risk_debate_state with the judge decision (same logic for both paths)
         new_risk_debate_state = {

@@ -50,6 +50,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LLM_CALL_LOG_ENABLED": "llm_call_log_enabled",
     "TRADINGAGENTS_LLM_CALL_LOG_PROMPTS": "llm_call_log_prompts",
     "TRADINGAGENTS_STRUCTURED_OUTPUT_REPAIR_RETRY": "structured_output_repair_retry",
+    "TRADINGAGENTS_PORTFOLIO_MANAGER_REQUIRE_STRUCTURED_DECISION": "portfolio_manager_require_structured_decision",
 }
 
 
@@ -277,6 +278,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # call). Never retries when structured_llm is None (provider doesn't
     # support structured output).
     "structured_output_repair_retry": True,
+    # Portfolio Manager structured decision requirement (issue #156): when True,
+    # abort the ticker with PortfolioDecisionError if the Portfolio Manager
+    # produces no usable structured decision (missing portfolio_structured_data
+    # or invalid rating). Set to False to accept degraded output and fall back
+    # to SignalProcessor parsing (pre-#156 behavior).
+    "portfolio_manager_require_structured_decision": True,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
