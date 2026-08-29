@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.llm_call_log import OllamaNumCtxDerivation, _count_prompt_tokens, _message_text
 
 from .api_key_env import get_api_key_env
@@ -44,10 +45,26 @@ class NormalizedChatOpenAI(ChatOpenAI):
                 f"{self.model_name} has no structured-output method available; "
                 f"agent factories will fall back to free-text generation."
             )
-        method = method or caps.preferred_structured_method
-        # When the model rejects tool_choice, suppress langchain's hardcoded
-        # value. The schema is still bound as a tool — exactly what
-        # DeepSeek's official tool-calling examples do.
+
+        # Precedence for method resolution:
+        # 1. Explicit argument from caller (already in ``method``)
+        # 2. Config value if not "auto"
+        # 3. Provider-level override (in subclasses like OllamaChatOpenAI)
+        # 4. Capability table's preferred_structured_method
+        # 5. Default (covered by caps.preferred_structured_method)
+
+        if method is None:
+            config_method = get_config().get("structured_output_method", "auto")
+            # "auto" falls through to provider override (in subclasses) or capability table
+            method = (
+                config_method
+                if config_method != "auto"
+                else caps.preferred_structured_method
+            )
+
+        # When the method is function_calling and the model rejects tool_choice,
+        # suppress langchain's hardcoded value. The schema is still bound as a
+        # tool — exactly what DeepSeek's official tool-calling examples do.
         if method == "function_calling" and not caps.supports_tool_choice:
             kwargs.setdefault("tool_choice", None)
         return super().with_structured_output(schema, method=method, **kwargs)
@@ -156,7 +173,24 @@ class OllamaChatOpenAI(NormalizedChatOpenAI):
     when it doesn't fit -- so by the time this method runs for a given
     request, the derived value is already known to be <= ``num_ctx_max``
     (the ``min()`` below is a defensive clamp, not live enforcement).
+
+    Structured output method (issue #161): when structured_output_method is
+    "auto", Ollama defaults to json_schema instead of function_calling, since
+    Ollama's OpenAI-compatibility layer does not honor tool_choice directives
+    and function_calling can silently return None when the model writes prose.
     """
+
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        # When method is not explicitly provided and config is "auto",
+        # override the default from "function_calling" (the permissive default)
+        # to "json_schema" (grammar-constrained at decode time).
+        if method is None:
+            config_method = get_config().get("structured_output_method", "auto")
+            if config_method == "auto":
+                # Provider-level override: Ollama → json_schema
+                method = "json_schema"
+
+        return super().with_structured_output(schema, method=method, **kwargs)
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)

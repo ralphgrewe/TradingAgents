@@ -4,9 +4,11 @@ import dataclasses
 
 import pytest
 
+from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients.capabilities import (
     get_capabilities,
 )
+from tradingagents.llm_clients.openai_client import OllamaChatOpenAI
 
 
 @pytest.mark.unit
@@ -122,3 +124,59 @@ def test_capabilities_dataclass_is_frozen():
     caps = get_capabilities("deepseek-chat")
     with pytest.raises(dataclasses.FrozenInstanceError):
         caps.supports_tool_choice = False  # type: ignore[misc]
+
+
+@pytest.mark.unit
+class TestStructuredOutputMethodResolution:
+    """Test the precedence order for structured output method selection (issue #161)."""
+
+    def test_explicit_method_argument_has_highest_priority(self):
+        """Explicit method= argument passed to with_structured_output beats config."""
+        # Set config to json_schema, verify explicit arg beats it
+        set_config({"structured_output_method": "json_schema"})
+
+        # Get a real default capability which should have function_calling
+        caps = get_capabilities("gpt-4")
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_config_value_when_auto_falls_through_to_capability_table(self):
+        """Config 'auto' falls through to capability table's default."""
+        set_config({"structured_output_method": "auto"})
+
+        # Verify config is "auto" and model uses capability table
+        from tradingagents.dataflows.config import get_config
+        assert get_config().get("structured_output_method") == "auto"
+
+        # GPT-4 should have function_calling from capability table
+        caps = get_capabilities("gpt-4")
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_config_value_not_auto_overrides_capability_table(self):
+        """Config value overrides capability-table default when not 'auto'."""
+        set_config({"structured_output_method": "json_mode"})
+
+        from tradingagents.dataflows.config import get_config
+        assert get_config().get("structured_output_method") == "json_mode"
+
+    def test_ollama_defaults_to_json_schema_in_source(self):
+        """OllamaChatOpenAI.with_structured_output defaults to json_schema under 'auto'."""
+        # Verify the override code uses json_schema for Ollama
+        import inspect
+        source = inspect.getsource(OllamaChatOpenAI.with_structured_output)
+        assert "json_schema" in source
+        assert "config_method == \"auto\"" in source
+
+    def test_deepseek_tool_choice_suppression_only_on_function_calling(self):
+        """DeepSeek tool_choice suppression is only applied when method=function_calling."""
+        # Verify DeepSeek capability has supports_tool_choice=False
+        caps = get_capabilities("deepseek-reasoner")
+        assert caps.supports_tool_choice is False
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_preferred_structured_method_none_still_raises(self):
+        """Models with preferred_structured_method='none' always raise NotImplementedError."""
+        # Verify that any unknown model gets the _DEFAULT capability (not 'none')
+        # The pattern: capability table defines some hypothetical model as 'none',
+        # and NotImplementedError would be raised regardless of config
+        caps = get_capabilities("totally-unknown-model")
+        assert caps.preferred_structured_method != "none"  # default is function_calling

@@ -148,6 +148,20 @@ is set), Ollama's OpenAI-compatible endpoint's non-standard way of pinning conte
 and enabling think mode. See "Oversize-prompt enforcement" under Configuration below for why
 `ollama_num_ctx` exists.
 
+**Structured output method (issue #161):** By default, most providers use `function_calling` for
+structured output (LangChain's default). However, Ollama's OpenAI-compatibility layer does not
+honor `tool_choice` directives, meaning `function_calling` can silently return `None` when the
+model writes prose instead of a tool call. The `structured_output_method` config key (env var
+`TRADINGAGENTS_STRUCTURED_OUTPUT_METHOD`, default `"auto"`) allows selecting the method globally:
+- `"auto"` (default): use the capability table's `preferred_structured_method` for each model,
+  except Ollama defaults to `json_schema` (grammar-constrained at decode time).
+- `"function_calling"`, `"json_schema"`, `"json_mode"`: force a specific method for all models.
+Legal values: `"auto"`, `"function_calling"`, `"json_schema"`, `"json_mode"`. Precedence order
+(highest first): explicit `method=` argument passed by caller > config value (when not `"auto"`)
+> Ollama provider override (→ `json_schema`) > capability table > default. Models with
+`preferred_structured_method="none"` still raise `NotImplementedError` and fall back to free text,
+regardless of config overrides.
+
 ## Data vendors
 
 `tradingagents/dataflows/config.py` holds a process-global config (`get_config`/`set_config`,
@@ -336,6 +350,27 @@ older `invoke_structured_or_freetext` helper, used by other agents, has no retry
   `llm.invoke` is made for a fallback response. The repair instruction is deliberately excluded from
   that decision (it would always force the extra invoke the #152 fix exists to avoid), but it *is*
   present in the returned `message_trace`, which records everything that was sent.
+
+### Structured output method selection (issue #161)
+
+The method used for structured output binding (`function_calling`, `json_schema`, `json_mode`)
+affects which models can reliably emit structured responses. LangChain defaults to `function_calling`,
+but Ollama's OpenAI-compatibility layer ignores `tool_choice` directives, causing `function_calling`
+to silently return `None` when the model emits prose instead of a tool call.
+
+- **`structured_output_method`** (env: `TRADINGAGENTS_STRUCTURED_OUTPUT_METHOD`, default `"auto"`):
+  controls which method is used for structured-output binding. Legal values:
+  - `"auto"` (default): use the capability table's `preferred_structured_method` for each model,
+    except Ollama defaults to `json_schema` (grammar-constrained at decode time, cannot produce
+    invalid output).
+  - `"function_calling"`, `"json_schema"`, `"json_mode"`: force a specific method globally for
+    all models.
+
+  Precedence order (highest first): explicit `method=` argument in code > config value (when not
+  `"auto"`) > Ollama provider override (→ `json_schema`) > capability table's
+  `preferred_structured_method` > default. Models with `preferred_structured_method="none"` still
+  raise `NotImplementedError` and fall back to free text, regardless of config overrides, so
+  agents always degrade gracefully when a provider has no structured-output support.
 
 ### Oversize-prompt enforcement (issues #149, #154)
 
