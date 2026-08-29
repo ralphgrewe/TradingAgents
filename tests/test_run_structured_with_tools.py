@@ -18,6 +18,8 @@ from pydantic import BaseModel
 
 from tradingagents.agents.schemas import PortfolioDecision, SwingDecision
 from tradingagents.agents.utils.structured import (
+    _extract_structured_from_text,
+    _find_balanced_braces,
     _generate_repair_instruction,
     _normalize_content,
     run_structured_with_tools,
@@ -1083,3 +1085,416 @@ class TestInvokeStructuredOrFreetextNoneHandling:
         assert result == "Free text response"
         # render should not have been called
         render_mock.assert_not_called()
+
+
+class TestFindBalancedBraces:
+    """Tests for _find_balanced_braces helper (issue #162)."""
+
+    def test_simple_object_extracted(self):
+        """Simple object with no strings is extracted."""
+        text = 'Some text {"key": "value"} more text'
+        result = _find_balanced_braces(text)
+        assert result == '{"key": "value"}'
+
+    def test_nested_objects_extracted(self):
+        """Nested objects are properly matched."""
+        text = 'Preamble {"outer": {"inner": "value"}} epilogue'
+        result = _find_balanced_braces(text)
+        assert result == '{"outer": {"inner": "value"}}'
+
+    def test_braces_in_string_values_ignored(self):
+        """Braces inside string values don't affect matching."""
+        text = 'Start {"key": "value with { and }"} end'
+        result = _find_balanced_braces(text)
+        assert result == '{"key": "value with { and }"}'
+
+    def test_escaped_quotes_handled(self):
+        """Escaped quotes in strings are handled correctly."""
+        text = 'Text {"key": "value with \\"quote\\""} more'
+        result = _find_balanced_braces(text)
+        assert result == '{"key": "value with \\"quote\\""}'
+
+    def test_no_braces_returns_none(self):
+        """Text with no braces returns None."""
+        result = _find_balanced_braces("Just some regular text")
+        assert result is None
+
+    def test_unbalanced_braces_returns_none(self):
+        """Unbalanced braces return None."""
+        result = _find_balanced_braces("Some text {incomplete")
+        assert result is None
+
+    def test_first_balanced_object_returned(self):
+        """When multiple objects exist, the first balanced one is returned."""
+        text = '{"first": 1} some text {"second": 2}'
+        result = _find_balanced_braces(text)
+        assert result == '{"first": 1}'
+
+
+class TestExtractStructuredFromText:
+    """Tests for _extract_structured_from_text helper (issue #162)."""
+
+    def test_bare_json_extracted(self):
+        """Bare JSON object is extracted and validated."""
+        json_text = '{"decision": "buy", "confidence": 0.95}'
+        result = _extract_structured_from_text(json_text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "buy"
+        assert result.confidence == 0.95
+
+    def test_json_with_whitespace_extracted(self):
+        """Bare JSON with surrounding whitespace is extracted."""
+        json_text = '  {"decision": "hold", "confidence": 0.5}  \n'
+        result = _extract_structured_from_text(json_text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "hold"
+        assert result.confidence == 0.5
+
+    def test_fenced_json_block_extracted(self):
+        """Fenced ```json block is extracted."""
+        text = """
+Here's the analysis:
+
+```json
+{"decision": "sell", "confidence": 0.85}
+```
+
+End of analysis.
+"""
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "sell"
+        assert result.confidence == 0.85
+
+    def test_bare_fence_block_extracted(self):
+        """Bare ``` block (no json marker) is extracted."""
+        text = """
+Analysis below:
+
+```
+{"decision": "buy", "confidence": 0.75}
+```
+
+That's my analysis.
+"""
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "buy"
+        assert result.confidence == 0.75
+
+    def test_json_in_prose_extracted(self):
+        """JSON embedded in prose is extracted."""
+        text = (
+            "Based on the analysis, my recommendation is: "
+            '{"decision": "buy", "confidence": 0.88} '
+            "This is my final decision."
+        )
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "buy"
+        assert result.confidence == 0.88
+
+    def test_json_with_nested_objects_extracted(self):
+        """JSON with nested objects and braces in strings is handled."""
+        text = (
+            "Analysis: "
+            '{"decision": "hold", "confidence": 0.5} '
+            "Complex data involved."
+        )
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "hold"
+
+    def test_invalid_json_returns_none(self):
+        """Malformed JSON that cannot be parsed returns None."""
+        text = '{"decision": "buy", confidence: 0.95}'  # Missing quotes on confidence
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is None
+
+    def test_valid_json_invalid_schema_returns_none(self):
+        """JSON that parses but fails schema validation returns None."""
+        # Use PortfolioDecision which has strict validation (enum rating)
+        text = '{"rating": "invalid_rating", "executive_summary": "test"}'
+        result = _extract_structured_from_text(text, PortfolioDecision)
+        assert result is None
+
+    def test_empty_string_returns_none(self):
+        """Empty or whitespace-only text returns None."""
+        assert _extract_structured_from_text("", SimpleResponse) is None
+        assert _extract_structured_from_text("   ", SimpleResponse) is None
+        assert _extract_structured_from_text("\n", SimpleResponse) is None
+
+    def test_no_json_returns_none(self):
+        """Text with no JSON at all returns None."""
+        text = "This is just prose with no JSON whatsoever."
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is None
+
+    def test_priority_bare_json_over_prose(self):
+        """Bare JSON (priority 1) is preferred over prose JSON (priority 4)."""
+        # Both are valid, but bare JSON at the start should win
+        text = '{"decision": "buy", "confidence": 0.9} analysis text {"decision": "hold", "confidence": 0.5}'
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "buy"  # First (bare) wins
+        assert result.confidence == 0.9
+
+    def test_priority_fenced_over_prose(self):
+        """Fenced block (priority 2) is preferred over embedded prose (priority 4)."""
+        text = """
+Intro text with {"decision": "sell", "confidence": 0.3}
+
+```json
+{"decision": "buy", "confidence": 0.95}
+```
+
+More text.
+"""
+        result = _extract_structured_from_text(text, SimpleResponse)
+        assert result is not None
+        assert result.decision == "buy"  # Fenced wins over embedded
+        assert result.confidence == 0.95
+
+
+class TestStructuredOutputTextExtraction:
+    """Tests for text extraction in run_structured_with_tools (issue #162)."""
+
+    def test_extraction_enabled_by_default(self):
+        """Text extraction is enabled by default."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_text_extraction"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+            # All structured attempts fail
+            structured.invoke.side_effect = ValueError("Parsing failed")
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_invoke(msg_list):
+            # Return fallback text with embedded JSON
+            return MagicMock(
+                content='My analysis: {"decision": "buy", "confidence": 0.92}'
+            )
+
+        mock_llm.invoke = mock_invoke
+
+        messages = [HumanMessage(content="Test")]
+        result, fallback_text, trace = run_structured_with_tools(
+            mock_llm,
+            messages,
+            [],
+            SimpleResponse,
+            max_rounds=1,
+            agent_name="TestAgent",
+        )
+
+        # Extraction should succeed
+        assert result is not None
+        assert result.decision == "buy"
+        assert result.confidence == 0.92
+        assert fallback_text is None
+
+    def test_extraction_disabled_by_config(self, caplog):
+        """When extraction is disabled, fallback is returned unchanged."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_text_extraction"] = False
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+            structured.invoke.side_effect = ValueError("Parsing failed")
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_invoke(msg_list):
+            return MagicMock(
+                content='My analysis: {"decision": "buy", "confidence": 0.92}'
+            )
+
+        mock_llm.invoke = mock_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        # With extraction disabled, fallback should be returned as-is
+        assert result is None
+        assert (
+            fallback_text
+            == 'My analysis: {"decision": "buy", "confidence": 0.92}'
+        )
+        # No extraction success message
+        assert "recovered from free-text fallback via text extraction" not in caplog.text
+
+    def test_extraction_logs_success_at_warning(self, caplog):
+        """Successful extraction is logged at WARNING level with agent name."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_text_extraction"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+            structured.invoke.side_effect = ValueError("Parsing failed")
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_invoke(msg_list):
+            return MagicMock(
+                content='{"decision": "sell", "confidence": 0.78}'
+            )
+
+        mock_llm.invoke = mock_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="MyAgent",
+            )
+
+        assert result is not None
+        assert fallback_text is None
+        # Check for the exact message format
+        assert "MyAgent" in caplog.text
+        assert "recovered from free-text fallback via text extraction" in caplog.text
+
+    def test_structured_and_retry_fail_extraction_succeeds(self, caplog):
+        """End-to-end: structured + retry fail, extraction recovers."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_repair_retry"] = True
+        config["structured_output_text_extraction"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        structured_calls = []
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+
+            def mock_invoke(msg_list):
+                structured_calls.append(msg_list)
+                # Both structured and retry fail
+                raise ValueError("Parsing failed")
+
+            structured.invoke = mock_invoke
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_fallback_invoke(msg_list):
+            # Return fallback with extractable JSON in a fence
+            return MagicMock(
+                content="""
+My recommendation after careful analysis:
+
+```json
+{"decision": "buy", "confidence": 0.89}
+```
+
+This is based on fundamental analysis.
+"""
+            )
+
+        mock_llm.invoke = mock_fallback_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="PM",
+            )
+
+        # Should have 2 structured calls (initial + retry)
+        assert len(structured_calls) == 2
+        # Extraction should succeed
+        assert result is not None
+        assert result.decision == "buy"
+        assert result.confidence == 0.89
+        assert fallback_text is None
+        # Should log both the retry and the extraction
+        assert "retrying once with schema-repair instruction" in caplog.text
+        assert "recovered from free-text fallback via text extraction" in caplog.text
+
+    def test_extraction_with_fenced_json_block(self, caplog):
+        """Extraction works with ```json fenced blocks."""
+        from tradingagents.dataflows.config import get_config, set_config
+        config = get_config().copy()
+        config["structured_output_text_extraction"] = True
+        set_config(config)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+
+        def _with_structured_output(schema):
+            structured = MagicMock()
+            structured.invoke.side_effect = ValueError("Parsing failed")
+            return structured
+
+        mock_llm.with_structured_output = _with_structured_output
+
+        def mock_invoke(msg_list):
+            return MagicMock(
+                content="""
+Based on my analysis:
+
+```json
+{"decision": "hold", "confidence": 0.65}
+```
+
+I recommend holding.
+"""
+            )
+
+        mock_llm.invoke = mock_invoke
+
+        messages = [HumanMessage(content="Test")]
+        with caplog.at_level(logging.WARNING):
+            result, fallback_text, trace = run_structured_with_tools(
+                mock_llm,
+                messages,
+                [],
+                SimpleResponse,
+                max_rounds=1,
+                agent_name="TestAgent",
+            )
+
+        assert result is not None
+        assert result.decision == "hold"
+        assert result.confidence == 0.65
+        assert fallback_text is None
+        assert "recovered from free-text fallback via text extraction" in caplog.text

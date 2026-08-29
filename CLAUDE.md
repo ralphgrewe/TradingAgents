@@ -372,6 +372,39 @@ to silently return `None` when the model emits prose instead of a tool call.
   raise `NotImplementedError` and fall back to free text, regardless of config overrides, so
   agents always degrade gracefully when a provider has no structured-output support.
 
+### Structured output text extraction (issue #162)
+
+The recovery ladder for structured output is now: structured call → (after #160) schema-repair retry
+→ free-text fallback → **LLM-free text extraction** (new, issue #162) → abort. The final rung attempts
+to build a `response_model` instance directly from the free-text fallback using deterministic text
+matching (no LLM call), recovering the decision the model already produced when structured calls failed.
+
+Text extraction tries candidates in priority order:
+1. Bare JSON (the whole string parses as a JSON object)
+2. Fenced ```json … ``` block
+3. Bare ``` … ``` fenced block (any content)
+4. First balanced `{…}` object embedded in surrounding prose (respects string literals)
+
+Each candidate is validated against `response_model`; the first that validates wins. Extraction is
+designed to be fast and deterministic — no LLM calls, no latency penalty — and handles the common case
+where a structured call fails but the free-text fallback contains a perfectly good JSON response.
+
+- **`structured_output_text_extraction`** (env: `TRADINGAGENTS_STRUCTURED_OUTPUT_TEXT_EXTRACTION`,
+  default `True`): enable/disable text extraction. When disabled, behaviour is byte-for-byte
+  pre-#162 (fall back to free text and abort). When enabled and extraction succeeds, the extracted
+  structured result replaces the fallback so the ticker proceeds with a valid decision.
+- Successful extractions are logged at WARNING level so a run that only survived via extraction is
+  visible in the logs rather than looking like a clean structured success. The log message includes
+  the agent name for context (e.g., "PortfolioManager recovered from free-text fallback via text
+  extraction").
+- No per-node changes are required; both the Portfolio Manager and Swing Trader benefit automatically
+  since both go through `run_structured_with_tools`.
+
+This rung is a complement to the schema-repair retry (#153): where the retry asks the model "try
+again" at an LLM call, extraction recovers the answer the model **already gave** at zero cost. Issue
+#161 (Ollama → `json_schema`) is expected to make this path rarely fire in practice; it stays worth
+having as the last line of defence for other providers and for schema-validation failures.
+
 ### Oversize-prompt enforcement (issues #149, #154)
 
 `docs/analysis/prompt-truncation-diagnosis.md` (issue #148) found that a prompt exceeding a local

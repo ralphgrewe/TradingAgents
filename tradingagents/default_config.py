@@ -52,6 +52,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_STRUCTURED_OUTPUT_REPAIR_RETRY": "structured_output_repair_retry",
     "TRADINGAGENTS_PORTFOLIO_MANAGER_REQUIRE_STRUCTURED_DECISION": "portfolio_manager_require_structured_decision",
     "TRADINGAGENTS_STRUCTURED_OUTPUT_METHOD": "structured_output_method",
+    "TRADINGAGENTS_STRUCTURED_OUTPUT_TEXT_EXTRACTION": "structured_output_text_extraction",
 }
 
 
@@ -292,6 +293,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # instead of function_calling. Can be overridden via env var
     # TRADINGAGENTS_STRUCTURED_OUTPUT_METHOD.
     "structured_output_method": "auto",
+    # Structured output text extraction (issue #162): when True, attempt to
+    # extract and parse a structured response from the free-text fallback
+    # using deterministic text matching (no LLM call). This is the final rung
+    # before giving up: bare JSON → fenced block → embedded braces in prose.
+    # Successful extractions are logged at WARNING level. Set to False to
+    # disable extraction (pre-#162 behavior).
+    "structured_output_text_extraction": True,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.

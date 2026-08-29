@@ -257,6 +257,132 @@ def invoke_structured_or_freetext(
     return response.content
 
 
+def _find_balanced_braces(text: str) -> str | None:
+    """Find the first balanced JSON object in text by brace matching.
+
+    Respects string literals (braces inside strings don't affect depth).
+    Returns the substring from first { to its matching }, or None if no
+    valid balanced object is found.
+    """
+    depth = 0
+    in_string = False
+    escape_next = False
+    start_index = -1
+
+    for i, char in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == '\\' and in_string:
+            escape_next = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == '{':
+            if depth == 0:
+                start_index = i
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0 and start_index >= 0:
+                return text[start_index:i + 1]
+
+    return None
+
+
+def _extract_structured_from_text(text: str, response_model: type[T]) -> T | None:
+    """Extract a structured response from free-text fallback.
+
+    Attempts to build a response_model instance from free text using no LLM
+    calls. Tries, in order:
+    1. Parse the whole text as bare JSON
+    2. Extract and parse a ```json ... ``` fenced block
+    3. Extract and parse a bare ``` ... ``` fenced block
+    4. Find the first balanced { } object embedded in prose
+
+    Each candidate is validated against response_model; the first that
+    validates wins. Returns None if nothing validates (never raises).
+
+    This is the final rung of the recovery ladder before giving up entirely.
+    Issue #162.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    # Try 1: bare JSON
+    try:
+        parsed = json.loads(text)
+        result = response_model.model_validate(parsed)
+        return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try 2: fenced ```json ... ```
+    lines = text.split('\n')
+    in_json_block = False
+    json_block_lines = []
+
+    for line in lines:
+        if line.strip().startswith('```json'):
+            in_json_block = True
+            json_block_lines = []
+        elif in_json_block and line.strip().startswith('```'):
+            in_json_block = False
+            if json_block_lines:
+                json_text = '\n'.join(json_block_lines)
+                try:
+                    parsed = json.loads(json_text)
+                    result = response_model.model_validate(parsed)
+                    return result
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        elif in_json_block:
+            json_block_lines.append(line)
+
+    # Try 3: bare ``` ... ``` (any content)
+    in_fence = False
+    fence_lines = []
+
+    for line in lines:
+        if line.strip() == '```' or line.strip().startswith('```'):
+            if in_fence:
+                in_fence = False
+                fence_text = '\n'.join(fence_lines)
+                # Try to parse as JSON
+                try:
+                    parsed = json.loads(fence_text)
+                    result = response_model.model_validate(parsed)
+                    return result
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                fence_lines = []
+            else:
+                in_fence = True
+                fence_lines = []
+        elif in_fence:
+            fence_lines.append(line)
+
+    # Try 4: find first balanced {} object in prose
+    balanced_braces = _find_balanced_braces(text)
+    if balanced_braces:
+        try:
+            parsed = json.loads(balanced_braces)
+            result = response_model.model_validate(parsed)
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Nothing worked
+    return None
+
+
 def run_structured_with_tools(
     llm: Any,
     messages: list[BaseMessage],
@@ -586,5 +712,24 @@ def run_structured_with_tools(
         # HumanMessage before that check would silently force the extra
         # free-text invoke it exists to avoid.
         message_trace = retry_trace
+
+    # Final rung: attempt to extract structured output from fallback_text
+    # (issue #162). If extraction succeeds, return the structured result
+    # instead of the free-text fallback. The documented invariant holds
+    # unchanged: exactly one of structured_result / fallback_text is non-None.
+    if structured_result is None and fallback_text is not None:
+        should_extract = bool(
+            get_config().get("structured_output_text_extraction", True)
+        )
+
+        if should_extract:
+            extracted = _extract_structured_from_text(fallback_text, response_model)
+            if extracted is not None:
+                logger.warning(
+                    "%s: structured output recovered from free-text fallback via text extraction",
+                    agent_name,
+                )
+                structured_result = extracted
+                fallback_text = None
 
     return structured_result, fallback_text, message_trace
