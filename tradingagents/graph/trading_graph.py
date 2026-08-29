@@ -25,7 +25,11 @@ from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.llm_call_log import ContextWindowGuardHandler, LLMCallLogHandler
+from tradingagents.llm_call_log import (
+    ContextWindowGuardHandler,
+    LLMCallLogHandler,
+    OllamaNumCtxDerivation,
+)
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.memory.mcp_client import MemoryMCPClient
 from tradingagents.reporting import write_report_tree
@@ -214,6 +218,36 @@ class TradingAgentsGraph:
                 f"{', '.join(sorted(valid_values))}"
             )
 
+    def _build_ollama_num_ctx_derivation(self) -> OllamaNumCtxDerivation | None:
+        """Build the issue #154 per-request ``num_ctx`` derivation policy.
+
+        Applies only when the configured provider is ``"ollama"`` and no
+        explicit ``ollama_num_ctx`` override is set -- that key, when set, is
+        forwarded verbatim by ``_get_provider_kwargs`` (unchanged #149
+        behaviour) and no derivation happens at all, per #154's explicit
+        escape hatch. Returns ``None`` in every other case (a different
+        provider, an explicit ``ollama_num_ctx``, or no models configured),
+        which every #154 code path (``ContextWindowGuardHandler``,
+        ``LLMCallLogHandler``, ``OllamaChatOpenAI``) treats as "derivation
+        does not apply to this run" -- exactly today's pre-#154 behaviour.
+        """
+        provider = self.config.get("llm_provider", "").lower()
+        if provider != "ollama" or self.config.get("ollama_num_ctx"):
+            return None
+
+        models = frozenset(
+            m for m in (self.config.get("quick_think_llm"), self.config.get("deep_think_llm")) if m
+        )
+        if not models:
+            return None
+
+        return OllamaNumCtxDerivation(
+            models=models,
+            num_ctx_max=int(self.config.get("ollama_num_ctx_max", 32768)),
+            response_headroom=int(self.config.get("ollama_num_ctx_response_headroom", 0)),
+            safety_margin=float(self.config.get("context_window_safety_margin", 1.3)),
+        )
+
     def _build_context_window_guard(self) -> ContextWindowGuardHandler:
         """Build the issue #149 oversize-prompt guard from ``self.config``.
 
@@ -226,6 +260,15 @@ class TradingAgentsGraph:
         overrides win over the ollama-derived value for the same model name).
         A model with no entry either way is passed through unchecked by
         ``ContextWindowGuardHandler`` -- see that class's docstring.
+
+        Issue #154: when ``ollama_num_ctx`` is left unset, ``context_windows``
+        stays empty for the ollama-served models (nothing to `.setdefault`
+        above) and ``_build_ollama_num_ctx_derivation`` instead builds a
+        per-request derivation policy, handed to both the guard (which aborts
+        when a request's derived requirement exceeds ``ollama_num_ctx_max``)
+        and, below, whichever ``LLMCallLogHandler`` is found in
+        ``self.callbacks`` (so successful-call records carry the ``num_ctx``
+        that was actually sent).
 
         The guard writes its JSONL audit record through whichever
         ``LLMCallLogHandler`` is present in ``self.callbacks`` (found by
@@ -244,15 +287,20 @@ class TradingAgentsGraph:
                 context_windows.setdefault(self.config.get("quick_think_llm"), num_ctx)
                 context_windows.setdefault(self.config.get("deep_think_llm"), num_ctx)
 
+        ollama_num_ctx_derivation = self._build_ollama_num_ctx_derivation()
+
         log_handler = next(
             (cb for cb in self.callbacks if isinstance(cb, LLMCallLogHandler)), None
         )
+        if log_handler is not None:
+            log_handler.ollama_num_ctx_derivation = ollama_num_ctx_derivation
 
         return ContextWindowGuardHandler(
             context_windows=context_windows,
             safety_margin=float(self.config.get("context_window_safety_margin", 1.3)),
             enabled=bool(self.config.get("context_window_check_enabled", True)),
             log_handler=log_handler,
+            ollama_num_ctx_derivation=ollama_num_ctx_derivation,
         )
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
@@ -281,10 +329,23 @@ class TradingAgentsGraph:
             # docs/analysis/prompt-truncation-diagnosis.md. int() tolerates a
             # string value here (e.g. from TRADINGAGENTS_OLLAMA_NUM_CTX,
             # which _coerce leaves as a raw string when the default is None
-            # -- same pattern as "temperature" below).
+            # -- same pattern as "temperature" below). When set, it wins
+            # outright and no per-request derivation happens (issue #154).
             num_ctx = self.config.get("ollama_num_ctx")
             if num_ctx:
                 kwargs["num_ctx"] = int(num_ctx)
+            else:
+                # Per-request num_ctx derivation (issue #154): forwarded to
+                # OpenAIClient.get_llm, which attaches it to the constructed
+                # OllamaChatOpenAI instance for its _get_request_payload hook
+                # to consult on every call. None (no models configured, or
+                # this isn't actually the ollama provider -- can't happen
+                # inside this branch, but _build_ollama_num_ctx_derivation
+                # is the single source of truth either way) forwards nothing,
+                # same as today's pre-#154 behaviour.
+                derivation = self._build_ollama_num_ctx_derivation()
+                if derivation is not None:
+                    kwargs["ollama_num_ctx_derivation"] = derivation
 
         # Temperature is supported by all providers. Cast through float() so a
         # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config

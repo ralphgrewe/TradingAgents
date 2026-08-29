@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
+from tradingagents.llm_call_log import OllamaNumCtxDerivation, _count_prompt_tokens, _message_text
+
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
@@ -129,6 +131,55 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
         return chat_result
 
 
+class OllamaChatOpenAI(NormalizedChatOpenAI):
+    """Ollama-specific override: per-request ``num_ctx`` derivation (issue #154).
+
+    When an explicit ``ollama_num_ctx`` is configured, that value is baked
+    into ``extra_body`` at construction time by ``OpenAIClient.get_llm`` (the
+    #149 behaviour, unchanged) and this override does nothing. Otherwise,
+    ``get_llm`` attaches an ``OllamaNumCtxDerivation`` policy to
+    ``self._ollama_num_ctx_derivation``, and ``_get_request_payload`` (the
+    same per-request hook ``DeepSeekChatOpenAI``/``MinimaxChatOpenAI`` above
+    use) derives ``num_ctx`` from *this* request's own measured prompt size
+    and attaches it to the outgoing request as the same non-standard
+    ``extra_body.options.num_ctx`` field #149 already established.
+
+    This only ever *attaches* a value: whether the derived requirement fits
+    within ``ollama_num_ctx_max`` was already decided by
+    ``ContextWindowGuardHandler`` (``tradingagents/llm_call_log.py``), which
+    runs from the callback path *before* ``_generate``/``_get_request_payload``
+    are reached and raises ``PromptContextOverflowError`` to abort the run
+    when it doesn't fit -- so by the time this method runs for a given
+    request, the derived value is already known to be <= ``num_ctx_max``
+    (the ``min()`` below is a defensive clamp, not live enforcement).
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        derivation: OllamaNumCtxDerivation | None = getattr(
+            self, "_ollama_num_ctx_derivation", None
+        )
+        if derivation is None or not derivation.applies_to(self.model_name):
+            return payload
+
+        messages = _input_to_messages(input_)
+        prompt_text = "".join(_message_text(m) for m in messages)
+        # Ollama is always served through ChatOpenAI (this class's base), so
+        # the tiktoken-family estimator applies unconditionally here -- see
+        # llm_call_log.py's "Tokenizer strategy" for why "openai-chat" is the
+        # right llm_type for the whole OpenAI-compatible provider family.
+        token_count, _method = _count_prompt_tokens(prompt_text, self.model_name, "openai-chat")
+        needed = derivation.needed_tokens(token_count)
+        num_ctx = min(needed, derivation.num_ctx_max)
+
+        extra_body = dict(payload.get("extra_body") or {})
+        options = dict(extra_body.get("options") or {})
+        options["num_ctx"] = num_ctx
+        extra_body["options"] = options
+        payload["extra_body"] = extra_body
+        return payload
+
+
 class MinimaxChatOpenAI(NormalizedChatOpenAI):
     """MiniMax-specific overrides on top of the OpenAI-compatible client.
 
@@ -219,7 +270,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
-                               key_optional=True, placeholder_key="ollama"),
+                               key_optional=True, placeholder_key="ollama", chat_class=OllamaChatOpenAI),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
     "openai_compatible": ProviderSpec(
         require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI
@@ -341,7 +392,21 @@ class OpenAIClient(BaseLLMClient):
             llm_kwargs["extra_body"] = {"options": {"num_ctx": int(num_ctx)}}
 
         # The subclass (provider quirks) comes from the registry spec.
-        return chat_cls(**llm_kwargs)
+        llm = chat_cls(**llm_kwargs)
+
+        # Per-request num_ctx derivation (issue #154): only reached when no
+        # explicit num_ctx was set above (TradingAgentsGraph._get_provider_kwargs
+        # never forwards both at once -- num_ctx wins outright when present).
+        # Not a ChatOpenAI/pydantic field (it has no OpenAI-API meaning of its
+        # own), so it's attached as a private instance attribute rather than a
+        # constructor kwarg; OllamaChatOpenAI._get_request_payload reads it
+        # back per request. Harmless to set on any chat_cls -- only
+        # OllamaChatOpenAI's _get_request_payload ever looks at it.
+        derivation = self.kwargs.get("ollama_num_ctx_derivation")
+        if derivation is not None:
+            llm._ollama_num_ctx_derivation = derivation
+
+        return llm
 
     def validate_model(self) -> bool:
         """Validate model for the provider."""

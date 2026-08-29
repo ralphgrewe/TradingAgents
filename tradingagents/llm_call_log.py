@@ -156,9 +156,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -419,6 +421,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
         dump_prompts: bool = False,
         ticker: str | None = None,
         date: str | None = None,
+        ollama_num_ctx_derivation: OllamaNumCtxDerivation | None = None,
     ) -> None:
         super().__init__()
         self.log_path = Path(log_path) if log_path is not None else None
@@ -439,6 +442,13 @@ class LLMCallLogHandler(BaseCallbackHandler):
         self._records: list[dict[str, Any]] = []
         self._ticker = ticker
         self._date = date
+        # issue #154: when set (by TradingAgentsGraph, once it finds this
+        # handler among its callbacks), successful-call records get an
+        # "ollama_num_ctx" field naming the num_ctx value actually derived
+        # and sent for that request, so truncation can be audited after the
+        # fact. None (the default) means "not applicable to this run" --
+        # every record's "ollama_num_ctx" field is then None.
+        self.ollama_num_ctx_derivation = ollama_num_ctx_derivation
 
     # -- run context ----------------------------------------------------------
 
@@ -474,6 +484,24 @@ class LLMCallLogHandler(BaseCallbackHandler):
 
     # -- call-start handlers -------------------------------------------------
 
+    def _derive_ollama_num_ctx(self, model: str, token_count: int) -> int | None:
+        """Return the #154-derived ``num_ctx`` for this request, or ``None``.
+
+        Purely for audit visibility in the JSONL record below -- this handler
+        never aborts a call. ``ContextWindowGuardHandler`` (wired into the
+        same callbacks list, see ``TradingAgentsGraph``) already raises before
+        dispatch when the identical computation would exceed
+        ``num_ctx_max``, so by the time a call reaches ``_finish`` (a
+        successful or provider-failed call, never an aborted one), ``needed``
+        is always <= ``num_ctx_max`` and the ``min()`` below is a no-op safety
+        clamp rather than a live enforcement path.
+        """
+        derivation = self.ollama_num_ctx_derivation
+        if derivation is None or not derivation.applies_to(model):
+            return None
+        needed = derivation.needed_tokens(token_count)
+        return min(needed, derivation.num_ctx_max)
+
     def _record_start(
         self,
         run_id: Any,
@@ -484,6 +512,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
         token_count: int,
         token_count_method: str,
         messages: list[BaseMessage] | None = None,
+        ollama_num_ctx: int | None = None,
     ) -> None:
         with self._lock:
             self._pending[str(run_id)] = {
@@ -495,6 +524,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
                 "token_count": token_count,
                 "token_count_method": token_count_method,
                 "messages": messages if self.dump_prompts else None,
+                "ollama_num_ctx": ollama_num_ctx,
             }
 
     def on_chat_model_start(
@@ -524,6 +554,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             token_count=token_count,
             token_count_method=token_count_method,
             messages=flat_messages if self.dump_prompts else None,
+            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count),
         )
 
     def on_llm_start(
@@ -555,6 +586,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             token_count=token_count,
             token_count_method=token_count_method,
             messages=messages,
+            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count),
         )
 
     # -- call-end handlers ----------------------------------------------------
@@ -614,6 +646,10 @@ class LLMCallLogHandler(BaseCallbackHandler):
             "duration_seconds": round(duration_seconds, 3),
             "error": error,
             "prompt_dump_path": prompt_dump_path,
+            # issue #154: the num_ctx actually derived/sent for this request,
+            # or None when derivation doesn't apply to this run/model (e.g.
+            # non-ollama providers, or an explicit ollama_num_ctx override).
+            "ollama_num_ctx": start.get("ollama_num_ctx"),
         }
 
         with self._lock:
@@ -703,6 +739,9 @@ class LLMCallLogHandler(BaseCallbackHandler):
             "duration_seconds": 0.0,
             "error": error,
             "prompt_dump_path": None,
+            # The call was never dispatched, so no num_ctx was ever sent --
+            # see "ollama_num_ctx" on the success-path record in _finish.
+            "ollama_num_ctx": None,
         }
 
         with self._lock:
@@ -811,6 +850,64 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 # A model not in that mapping is passed through unchecked -- guessing a limit
 # this codebase has no evidence for is explicitly out of scope (see #149's
 # "Out of scope" and the parent #146 issue's provider-coverage note).
+#
+# Issue #154 adds a second, dynamic flavour of this same check for the common
+# case where ``ollama_num_ctx`` is left unset: rather than compare against a
+# fixed known window, ``num_ctx`` is *derived* per request from that request's
+# own measured prompt size --
+#   needed  = ceil(prompt_tokens_estimated * context_window_safety_margin)
+#             + ollama_num_ctx_response_headroom
+#   num_ctx = min(needed, ollama_num_ctx_max)
+# -- and the run aborts (same ``PromptContextOverflowError``, same JSONL audit
+# path) when ``needed`` exceeds ``ollama_num_ctx_max``. ``OllamaNumCtxDerivation``
+# below is the small config snapshot ``TradingAgentsGraph`` builds once and
+# hands to both this handler (which aborts) and ``LLMCallLogHandler`` (which
+# records the value actually sent for a successful call) -- and to
+# ``OllamaChatOpenAI._get_request_payload``
+# (``tradingagents/llm_clients/openai_client.py``), which independently runs
+# the identical arithmetic to attach the derived ``num_ctx`` to the outgoing
+# request. Three call sites share one formula instead of three independent
+# ones so they can't drift apart. An explicit ``ollama_num_ctx`` still wins
+# outright: when set, ``TradingAgentsGraph`` never builds an
+# ``OllamaNumCtxDerivation`` at all, and every #154 code path is a no-op.
+
+
+@dataclass(frozen=True)
+class OllamaNumCtxDerivation:
+    """Per-request Ollama ``num_ctx`` derivation policy (issue #154).
+
+    Built once by ``TradingAgentsGraph._build_ollama_num_ctx_derivation`` from
+    config and shared, unchanged, across ``ContextWindowGuardHandler`` (which
+    aborts the run when a prompt's derived requirement exceeds
+    ``num_ctx_max``), ``LLMCallLogHandler`` (which records the value actually
+    sent for successful calls), and ``OllamaChatOpenAI._get_request_payload``
+    (which attaches it to the outgoing request) -- see the module-section note
+    above for why the same object is threaded through all three.
+
+    Only ever constructed when the run's provider is ``"ollama"`` and no
+    explicit ``ollama_num_ctx`` override is configured; ``models`` is the set
+    of model names (``quick_think_llm``/``deep_think_llm``) this policy
+    applies to for the current run.
+    """
+
+    models: frozenset[str]
+    num_ctx_max: int
+    response_headroom: int
+    safety_margin: float
+
+    def applies_to(self, model: str) -> bool:
+        """Whether ``model`` is one of this run's ollama-served models."""
+        return model in self.models
+
+    def needed_tokens(self, prompt_tokens_estimated: int) -> int:
+        """Return ``ceil(prompt_tokens_estimated * safety_margin) + response_headroom``.
+
+        This is the context length a request needs to hold its prompt plus
+        room for a response, *before* clamping to ``num_ctx_max`` -- callers
+        compare it against ``num_ctx_max`` themselves (to decide whether to
+        abort) or clamp it (to decide what to actually send).
+        """
+        return math.ceil(prompt_tokens_estimated * self.safety_margin) + self.response_headroom
 
 
 class PromptContextOverflowError(RuntimeError):
@@ -822,6 +919,18 @@ class PromptContextOverflowError(RuntimeError):
     fields needed both for the actionable error message below and for the
     JSONL audit record ``ContextWindowGuardHandler`` writes via
     ``LLMCallLogHandler.log_precheck_error`` before re-raising.
+
+    Two flavours, selected by which optional kwargs are passed:
+
+    - The original #149 flavour: a prompt exceeds a *fixed* known
+      ``context_window`` (``ollama_num_ctx`` set explicitly, or a
+      ``context_window_overrides`` entry).
+    - The #154 flavour: ``ollama_num_ctx`` is derived per request and the
+      derived requirement exceeds the ``ollama_num_ctx_max`` ceiling --
+      passed via ``ollama_num_ctx_max``/``ollama_num_ctx_response_headroom``
+      instead of ``context_window``. ``self.context_window`` is still set (to
+      ``ollama_num_ctx_max``) either way, so callers only ever need to read
+      that one attribute for "the ceiling that was exceeded".
     """
 
     def __init__(
@@ -831,32 +940,62 @@ class PromptContextOverflowError(RuntimeError):
         model: str,
         prompt_tokens_estimated: int,
         token_count_method: str,
-        context_window: int,
         safety_margin: float,
+        context_window: int | None = None,
+        ollama_num_ctx_max: int | None = None,
+        ollama_num_ctx_response_headroom: int | None = None,
     ) -> None:
         self.agent = agent
         self.model = model
         self.prompt_tokens_estimated = prompt_tokens_estimated
         self.token_count_method = token_count_method
-        self.context_window = context_window
         self.safety_margin = safety_margin
-        self.adjusted_tokens = int(prompt_tokens_estimated * safety_margin)
 
-        message = (
-            f"Prompt for agent '{agent}' (model '{model}') is estimated at "
-            f"{prompt_tokens_estimated} tokens ({token_count_method}); with the "
-            f"configured {safety_margin:g}x safety margin that is ~"
-            f"{self.adjusted_tokens} tokens, which exceeds the known context "
-            f"window of {context_window} tokens for this model. The run has "
-            "been aborted instead of risking a decision made from a silently "
-            "truncated prompt (issue #149). To fix: raise the model's context "
-            "window (see docs/local-models.md 'Context-Length Knobs', e.g. "
-            "TRADINGAGENTS_OLLAMA_NUM_CTX for Ollama) or reduce this prompt's "
-            "size (fewer debate/risk-discussion rounds, shorter memory "
-            "injection, fewer selected analysts). To disable this check "
-            "entirely (not recommended), set "
-            "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false."
-        )
+        if ollama_num_ctx_max is not None:
+            # issue #154: per-request derivation, no static context_window.
+            self.adjusted_tokens = math.ceil(prompt_tokens_estimated * safety_margin)
+            self.response_headroom = ollama_num_ctx_response_headroom or 0
+            self.needed_tokens = self.adjusted_tokens + self.response_headroom
+            self.context_window = ollama_num_ctx_max
+
+            message = (
+                f"Prompt for agent '{agent}' (model '{model}') is estimated at "
+                f"{prompt_tokens_estimated} tokens ({token_count_method}); with the "
+                f"configured {safety_margin:g}x safety margin plus a "
+                f"{self.response_headroom}-token response headroom, this request "
+                f"needs ~{self.needed_tokens} tokens of context, which exceeds "
+                f"ollama_num_ctx_max ({ollama_num_ctx_max}). The run has been "
+                "aborted instead of risking a decision made from a silently "
+                "truncated prompt (issue #154). To fix: raise "
+                "TRADINGAGENTS_OLLAMA_NUM_CTX_MAX (see docs/local-models.md "
+                "'Context-Length Knobs'), reduce this prompt's size (fewer "
+                "debate/risk-discussion rounds, shorter memory injection, fewer "
+                "selected analysts), or pin an explicit TRADINGAGENTS_OLLAMA_NUM_CTX "
+                "to bypass derivation entirely. To disable this check entirely "
+                "(not recommended), set TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false."
+            )
+        else:
+            # #149's original fixed-window flavour, unchanged.
+            self.adjusted_tokens = int(prompt_tokens_estimated * safety_margin)
+            self.response_headroom = None
+            self.needed_tokens = None
+            self.context_window = context_window
+
+            message = (
+                f"Prompt for agent '{agent}' (model '{model}') is estimated at "
+                f"{prompt_tokens_estimated} tokens ({token_count_method}); with the "
+                f"configured {safety_margin:g}x safety margin that is ~"
+                f"{self.adjusted_tokens} tokens, which exceeds the known context "
+                f"window of {context_window} tokens for this model. The run has "
+                "been aborted instead of risking a decision made from a silently "
+                "truncated prompt (issue #149). To fix: raise the model's context "
+                "window (see docs/local-models.md 'Context-Length Knobs', e.g. "
+                "TRADINGAGENTS_OLLAMA_NUM_CTX for Ollama) or reduce this prompt's "
+                "size (fewer debate/risk-discussion rounds, shorter memory "
+                "injection, fewer selected analysts). To disable this check "
+                "entirely (not recommended), set "
+                "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false."
+            )
         super().__init__(message)
 
 
@@ -897,45 +1036,37 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
         safety_margin: float = 1.3,
         enabled: bool = True,
         log_handler: LLMCallLogHandler | None = None,
+        ollama_num_ctx_derivation: OllamaNumCtxDerivation | None = None,
     ) -> None:
         super().__init__()
         self.context_windows = dict(context_windows or {})
         self.safety_margin = safety_margin
         self.enabled = enabled
         self.log_handler = log_handler
+        # issue #154: per-request derivation policy, built by TradingAgentsGraph
+        # only when ollama_num_ctx is left unset -- see the module-section note
+        # above ``OllamaNumCtxDerivation``. None means "no derivation": every
+        # model is checked (if at all) purely via ``context_windows`` above,
+        # exactly as before #154.
+        self.ollama_num_ctx_derivation = ollama_num_ctx_derivation
 
-    def _check(
+    def _abort(
         self,
+        error: PromptContextOverflowError,
         *,
         agent: str,
         model: str,
         message_count: int,
         prompt_chars: int,
-        prompt_text: str,
-        llm_type: str | None,
+        token_count: int,
+        token_count_method: str,
     ) -> None:
-        if not self.enabled:
-            return
-        context_window = self.context_windows.get(model)
-        if context_window is None:
-            # Unknown model: no known limit to check against, so pass
-            # through unchecked rather than guess (see module-section note).
-            return
+        """Write the JSONL audit record (best-effort) then raise ``error``.
 
-        token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
-        adjusted = token_count * self.safety_margin
-        if adjusted <= context_window:
-            return
-
-        error = PromptContextOverflowError(
-            agent=agent,
-            model=model,
-            prompt_tokens_estimated=token_count,
-            token_count_method=token_count_method,
-            context_window=context_window,
-            safety_margin=self.safety_margin,
-        )
-
+        Shared by both branches of ``_check`` (the #149 fixed-window flavour
+        and the #154 derived-ceiling flavour) so the audit-write-then-raise
+        sequence, and its failure handling, exist in exactly one place.
+        """
         if self.log_handler is not None:
             try:
                 self.log_handler.log_precheck_error(
@@ -956,6 +1087,77 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
 
         raise error
 
+    def _check(
+        self,
+        *,
+        agent: str,
+        model: str,
+        message_count: int,
+        prompt_chars: int,
+        prompt_text: str,
+        llm_type: str | None,
+    ) -> None:
+        if not self.enabled:
+            return
+
+        derivation = self.ollama_num_ctx_derivation
+        if derivation is not None and derivation.applies_to(model):
+            # issue #154: derive num_ctx from this request's own prompt size
+            # instead of comparing against a fixed window.
+            token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
+            needed = derivation.needed_tokens(token_count)
+            if needed <= derivation.num_ctx_max:
+                return
+
+            error = PromptContextOverflowError(
+                agent=agent,
+                model=model,
+                prompt_tokens_estimated=token_count,
+                token_count_method=token_count_method,
+                safety_margin=derivation.safety_margin,
+                ollama_num_ctx_max=derivation.num_ctx_max,
+                ollama_num_ctx_response_headroom=derivation.response_headroom,
+            )
+            self._abort(
+                error,
+                agent=agent,
+                model=model,
+                message_count=message_count,
+                prompt_chars=prompt_chars,
+                token_count=token_count,
+                token_count_method=token_count_method,
+            )
+            return
+
+        context_window = self.context_windows.get(model)
+        if context_window is None:
+            # Unknown model: no known limit to check against, so pass
+            # through unchecked rather than guess (see module-section note).
+            return
+
+        token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
+        adjusted = token_count * self.safety_margin
+        if adjusted <= context_window:
+            return
+
+        error = PromptContextOverflowError(
+            agent=agent,
+            model=model,
+            prompt_tokens_estimated=token_count,
+            token_count_method=token_count_method,
+            context_window=context_window,
+            safety_margin=self.safety_margin,
+        )
+        self._abort(
+            error,
+            agent=agent,
+            model=model,
+            message_count=message_count,
+            prompt_chars=prompt_chars,
+            token_count=token_count,
+            token_count_method=token_count_method,
+        )
+
     def on_chat_model_start(
         self,
         serialized: dict[str, Any],
@@ -967,7 +1169,7 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if not self.enabled or not self.context_windows:
+        if not self.enabled or (not self.context_windows and self.ollama_num_ctx_derivation is None):
             return
         flat_messages = [m for batch in messages for m in batch]
         prompt_text = "".join(_message_text(m) for m in flat_messages)
@@ -992,7 +1194,7 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if not self.enabled or not self.context_windows:
+        if not self.enabled or (not self.context_windows and self.ollama_num_ctx_derivation is None):
             return
         prompt_text = "".join(prompts)
         model = _extract_model_name(serialized, kwargs)

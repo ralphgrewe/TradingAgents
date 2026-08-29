@@ -31,6 +31,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_RESEARCH_EVIDENCE_TOKEN_BUDGET": "research_evidence_token_budget",
     "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
     "TRADINGAGENTS_OLLAMA_NUM_CTX":       "ollama_num_ctx",
+    "TRADINGAGENTS_OLLAMA_NUM_CTX_MAX":   "ollama_num_ctx_max",
+    "TRADINGAGENTS_OLLAMA_NUM_CTX_RESPONSE_HEADROOM": "ollama_num_ctx_response_headroom",
     "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED": "context_window_check_enabled",
     "TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN": "context_window_safety_margin",
     "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
@@ -159,6 +161,32 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # context_window_check_enabled). Only meaningful for provider "ollama".
     # See docs/local-models.md "Context-Length Knobs" for sizing guidance.
     "ollama_num_ctx": None,
+    # Derived-num_ctx ceiling (issue #154): when ollama_num_ctx above is left
+    # unset (the common/recommended case), num_ctx is instead derived PER
+    # REQUEST from that request's own measured prompt size --
+    #   needed  = ceil(prompt_tokens_estimated * context_window_safety_margin)
+    #             + ollama_num_ctx_response_headroom
+    #   num_ctx = min(needed, ollama_num_ctx_max)
+    # -- so every agent's prompt (not just the ones that happen to fit under a
+    # single static value) reaches Ollama untruncated. This is the ceiling on
+    # that derived value: when `needed` exceeds it, the run aborts with
+    # PromptContextOverflowError instead of sending a prompt that would be
+    # silently truncated. 32768 is a context length most locally-served
+    # Ministral/Llama-class 7-8B models can serve without exceeding typical
+    # consumer-GPU VRAM; raise it if your Ollama daemon has the VRAM for a
+    # bigger window. Only meaningful for provider "ollama", and only when
+    # ollama_num_ctx above is unset -- an explicit ollama_num_ctx always wins
+    # outright and this derivation does not run at all.
+    "ollama_num_ctx_max": 32768,
+    # Generation headroom (issue #154): tokens reserved on top of the derived
+    # prompt requirement so the model actually has room to write its response
+    # -- Ollama's num_ctx bounds prompt + completion together, not just the
+    # prompt, so sizing num_ctx to the prompt alone would truncate the
+    # response instead. 2048 comfortably covers the longest response observed
+    # in docs/analysis/prompt-truncation-diagnosis.md (a round-1 Portfolio
+    # Manager reply measured at 1006 tokens) with margin for longer
+    # rounds/models.
+    "ollama_num_ctx_response_headroom": 2048,
     # Oversize-prompt enforcement (issue #149): before an LLM call is
     # dispatched, ContextWindowGuardHandler (tradingagents/llm_call_log.py)
     # compares the #147 tiktoken/heuristic prompt-size estimate --

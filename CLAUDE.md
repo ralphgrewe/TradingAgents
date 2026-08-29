@@ -298,7 +298,7 @@ than automatic prompt injection. See `docs/design/llm-wiki.md` for the design ra
 schema, ingestion pipeline, and extensibility guidance for wiring the wiki into other agents
 (trader, researchers, risk team).
 
-### Oversize-prompt enforcement (issue #149)
+### Oversize-prompt enforcement (issues #149, #154)
 
 `docs/analysis/prompt-truncation-diagnosis.md` (issue #148) found that a prompt exceeding a local
 Ollama model's actual (VRAM-tiered auto-fit, not fixed) context window can be silently truncated with
@@ -307,30 +307,59 @@ be used to detect this (it locks to a wrong constant past a size threshold). `Tr
 addresses this by attaching `ContextWindowGuardHandler` (`tradingagents/llm_call_log.py`) to every LLM
 call's callbacks, regardless of what callbacks the caller passed in:
 
-- **`ollama_num_ctx`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX`, default `None`/unset): explicit context
-  length forwarded to Ollama's OpenAI-compatible endpoint per request (see "LLM providers" above) and
-  used as the *known* context window for `quick_think_llm`/`deep_think_llm` when `llm_provider` is
-  `"ollama"`. Left unset, Ollama's own invisible auto-fit still governs and this check has nothing to
-  compare against for the ollama provider.
+- **`ollama_num_ctx`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX`, default `None`/unset): explicit,
+  *fixed* context length forwarded to Ollama's OpenAI-compatible endpoint on every request (see "LLM
+  providers" above) and used as the *known* context window for `quick_think_llm`/`deep_think_llm` when
+  `llm_provider` is `"ollama"`. When set, it wins outright — issue #154's per-request derivation below
+  never runs, and behavior matches #149 exactly (same value on every call).
 - **`context_window_overrides`** (config-only dict, `{model_name: context_window_tokens}`, default
   `{}`): lets any provider/model opt into the same check without this codebase guessing a limit it has
   no evidence for. Takes precedence over the `ollama_num_ctx`-derived entry for the same model name.
 - **`context_window_safety_margin`** (env: `TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN`, default
   `1.3`): multiplier applied to the #147 `prompt_tokens_estimated` figure before comparing it to the
-  known window, since #148's calibration found that estimate under-counts the real (provider-native)
-  tokenizer's output on the Ollama/Ministral corpus by roughly 1.3x–1.9x.
+  known window (or, in #154's derivation, before adding response headroom), since #148's calibration
+  found that estimate under-counts the real (provider-native) tokenizer's output on the
+  Ollama/Ministral corpus by roughly 1.3x–1.9x.
 - **`context_window_check_enabled`** (env: `TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED`, default
-  `True`): the escape hatch. Enforcement is on by default, but only actually enforces something once a
-  context window is known (`ollama_num_ctx` or `context_window_overrides`) — an unknown model always
-  passes through unchecked, so out of the box (neither set) this is a no-op.
+  `True`): the escape hatch for the *abort*. It does not disable #154's derivation/sending of
+  `num_ctx` itself (see below) — only whether an oversize request aborts the run instead of being
+  sent anyway.
 
-A model with no known context window is never checked. When a checked prompt's adjusted estimate
-exceeds the known window, the run aborts with `PromptContextOverflowError` (naming the agent, model,
-measured/adjusted prompt size, and limit) before the call is dispatched, and the failure is also
-written to that ticker's `llm_calls.jsonl` with the same error-record shape a failed call gets. This
-follows the same hard-fail precedent as the memory MCP server above: `run_trading_agents.py`'s
-per-ticker `except Exception` already treats this like any other run-aborting error (flushes the call
-log, prints the error, exits) with no code change needed for that behavior.
+**Issue #154 — per-request derivation.** Leaving `ollama_num_ctx` unset no longer means "unchecked and
+uncontrolled": for the `ollama` provider, `num_ctx` is instead derived **per request** from that
+request's own measured prompt size, so every agent's prompt — not just whichever ones happen to fit
+under one static value picked for the whole run — reaches Ollama untruncated:
+
+```
+needed  = ceil(prompt_tokens_estimated * context_window_safety_margin) + ollama_num_ctx_response_headroom
+num_ctx = min(needed, ollama_num_ctx_max)
+```
+
+- **`ollama_num_ctx_max`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX_MAX`, default `32768`): ceiling on the
+  derived value. When a request's `needed` exceeds it, the call is not dispatched.
+- **`ollama_num_ctx_response_headroom`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX_RESPONSE_HEADROOM`,
+  default `2048`): tokens reserved on top of the prompt requirement so the model has room to write its
+  response — Ollama's `num_ctx` bounds prompt + completion together, not just the prompt.
+
+`TradingAgentsGraph._build_ollama_num_ctx_derivation` builds an `OllamaNumCtxDerivation` (in
+`tradingagents/llm_call_log.py`) from these three values plus `quick_think_llm`/`deep_think_llm`, and
+the *same* object is shared by three collaborators so their arithmetic can't drift apart:
+`ContextWindowGuardHandler` (aborts before dispatch when `needed > ollama_num_ctx_max`),
+`LLMCallLogHandler` (records the derived `num_ctx` on the successful call's `llm_calls.jsonl` record,
+under the `ollama_num_ctx` field, so truncation can be audited after the fact), and
+`OllamaChatOpenAI._get_request_payload` (`tradingagents/llm_clients/openai_client.py` — the per-request
+hook, alongside the `_get_request_payload` overrides `DeepSeekChatOpenAI`/`MinimaxChatOpenAI` already
+use for their own provider quirks) which actually attaches the derived value to the outgoing request
+as `extra_body={"options": {"num_ctx": N}}`.
+
+A model with no known context window (fixed or derived) is never checked. When a checked prompt's
+adjusted estimate exceeds the known window/ceiling, the run aborts with `PromptContextOverflowError`
+(naming the agent, model, measured/adjusted prompt size, and the limit that was exceeded) before the
+call is dispatched, and the failure is also written to that ticker's `llm_calls.jsonl` with the same
+error-record shape a failed call gets. This follows the same hard-fail precedent as the memory MCP
+server above: `run_trading_agents.py`'s per-ticker `except Exception` already treats this like any
+other run-aborting error (flushes the call log, prints the error, exits) with no code change needed
+for that behavior.
 
 ### Accessing configuration in code
 
