@@ -738,10 +738,11 @@ def get_analysis_date():
 def save_report_to_disk(final_state, ticker: str, save_path: Path):
     """Save the complete analysis report and structured JSON export to disk.
 
-    Delegates the markdown report tree (``1_analysts/`` … ``5_portfolio/`` plus
-    ``complete_report.md``) to the shared ``write_report_tree`` helper, then
-    layers our ``trading_recommendation.json`` structured export on top for
-    downstream backtesting consumers.
+    Delegates the report tree (``1_analysts/`` … ``5_portfolio/`` plus the
+    consolidated ``complete_report.pdf`` and its ``complete_report.sections.json``
+    sidecar, issue #165) to the shared ``write_report_tree`` helper, then layers
+    our ``trading_recommendation.json`` structured export on top for downstream
+    backtesting consumers.
     """
     report_file = write_report_tree(final_state, ticker, save_path)
 

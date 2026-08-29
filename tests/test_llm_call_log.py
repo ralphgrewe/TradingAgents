@@ -558,7 +558,7 @@ def test_batch_run_writes_one_log_per_ticker_report_dir(tmp_path, monkeypatch):
         patch("run_trading_agents.TradingAgentsGraph", side_effect=_build_graph),
         patch(
             "run_trading_agents.save_report_to_disk",
-            side_effect=lambda state, ticker, path: (Path(path) / "report.md", {}),
+            side_effect=lambda state, ticker, path: (Path(path) / "report.pdf", {}),
         ),
         patch(
             "sys.argv",

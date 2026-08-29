@@ -4,8 +4,8 @@ TradingAgents MCP Server
 
 Exposes:
 - analyze_stock(ticker, date) — runs a full multi-agent trading analysis and
-  returns the complete report (markdown) plus structured JSON on success, or
-  an error message on failure.
+  returns the complete report (as text extracted from the rendered PDF, issue
+  #165) plus structured JSON on success, or an error message on failure.
 - memory_store_decision / memory_resolve_pending / memory_get_past_context /
   memory_get_statistics — thin pass-throughs to the shared SQLite memory
   core (`tradingagents/memory/`, see CLAUDE.md "Persistence"), so MCP
@@ -102,7 +102,11 @@ mcp = FastMCP(
 # ── lazy-load heavy dependencies only when the tool is actually called ───────
 def _run_analysis(ticker: str, date: str) -> tuple[str, dict]:
     """
-    Run TradingAgents and return (report_markdown, structured_data).
+    Run TradingAgents and return (report_text, structured_data, decision).
+
+    ``report_text`` is plain text extracted (via pypdf) from the rendered
+    ``complete_report.pdf`` (issue #165) — the tool's return type is a string,
+    so the PDF's binary content isn't handed back directly.
     All intermediate output is suppressed (stdout + stderr → /dev/null).
     """
     with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
@@ -136,9 +140,12 @@ def _run_analysis(ticker: str, date: str) -> tuple[str, dict]:
         report_file, structured_data = save_report_to_disk(
             final_state, ticker, report_dir
         )
-        report_md = report_file.read_text(encoding="utf-8")
+        from pypdf import PdfReader
 
-    return report_md, structured_data, decision
+        reader = PdfReader(str(report_file))
+        report_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    return report_text, structured_data, decision
 
 
 # ── shared start/success/error logging for tool wrappers ────────────────────
@@ -185,14 +192,15 @@ def analyze_stock(ticker: str, date: str) -> str:
                 e.g. "2024-05-10". Data up to this date is used.
 
     Returns:
-        On success: full analysis report as markdown + structured JSON summary.
+        On success: full analysis report (text extracted from the rendered
+                    PDF, issue #165) + structured JSON summary.
         On error:   A string starting with "ERROR:" describing what went wrong.
     """
     ticker = ticker.strip().upper()
 
     try:
         with _log_tool_call("analyze_stock", ticker=ticker, date=date):
-            report_md, structured_data, decision = _run_analysis(ticker, date)
+            report_text, structured_data, decision = _run_analysis(ticker, date)
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
 
@@ -204,7 +212,7 @@ def analyze_stock(ticker: str, date: str) -> str:
         [
             f"## Final Decision: {decision}",
             "---",
-            report_md,
+            report_text,
             "---",
             "## Structured Summary",
             structured_block,

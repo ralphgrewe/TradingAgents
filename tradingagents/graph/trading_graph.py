@@ -571,9 +571,10 @@ class TradingAgentsGraph:
                 self._memory_client = None
 
     def save_reports(self, final_state, ticker, save_path=None) -> Path:
-        """Write the markdown report tree for a completed run, like the CLI does.
+        """Write the report tree for a completed run, like the CLI does.
 
-        Programmatic callers get the same on-disk reports the CLI produces. Pass
+        Programmatic callers get the same on-disk reports the CLI produces,
+        including the consolidated ``complete_report.pdf`` (issue #165). Pass
         an explicit ``save_path`` or let it default under ``results_dir``.
         """
         if save_path is None:

@@ -372,7 +372,7 @@ class RunTradingAgentDateHandlingTests(_TempStockFileTestCase):
                 "BUY"
             )
             mock_save_report.return_value = (
-                "report.md",
+                "report.pdf",
                 {"rating": "BUY", "action": "BUY", "entry_price": 100.0, "stop_loss": 90.0},
             )
 

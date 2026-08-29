@@ -13,6 +13,7 @@ those helpers directly plus their use in `write_report_tree`, the CLI's
 import json
 
 import pytest
+from pypdf import PdfReader
 
 from tradingagents.reporting import (
     format_report_markdown,
@@ -21,6 +22,11 @@ from tradingagents.reporting import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def _extract_pdf_text(pdf_path) -> str:
+    reader = PdfReader(str(pdf_path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _envelope(summary="Bullish trend", signal="BUY", confidence="HIGH", **details):
@@ -99,21 +105,28 @@ class TestWriteReportTreeWithEnvelopes:
         assert json.loads(sentiment_text)["signal"] == "BUY"
 
     def test_complete_report_renders_envelopes_readably(self, tmp_path):
-        """The consolidated report fences JSON envelopes, including sentiment (#71)."""
+        """The consolidated report (a PDF since #165) renders JSON envelopes
+        readably — a Signal/confidence header plus the raw envelope content —
+        including sentiment (#71). The PDF renderer detects and renders
+        envelopes itself (see report_pdf.py), rather than write_report_tree
+        pre-formatting them with format_report_markdown's ```json fencing, so
+        this asserts the renderer's own convention instead of the markdown one.
+        """
         save_path = tmp_path / "report"
         report_file = write_report_tree(self._final_state(), "NVDA", save_path)
-        complete = report_file.read_text()
+        complete = _extract_pdf_text(report_file)
 
-        assert "```json" in complete
-        assert "**Signal:** BUY" in complete
+        assert "Signal: BUY" in complete
         assert "Sentiment is upbeat on social media." in complete
+        # Raw envelope JSON came through too (via Preformatted).
+        assert '"signal": "BUY"' in complete
 
     def test_prose_only_state_unaffected(self, tmp_path):
         """Non-JSON reports (pre-existing behavior) render exactly as before."""
         save_path = tmp_path / "report"
         state = {"market_report": "Market looks bullish."}
         report_file = write_report_tree(state, "MSFT", save_path)
-        assert "Market looks bullish." in report_file.read_text()
+        assert "Market looks bullish." in _extract_pdf_text(report_file)
 
 
 class TestCliMessageBufferWithEnvelopes:

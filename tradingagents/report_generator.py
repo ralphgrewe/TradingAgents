@@ -4,9 +4,11 @@ Report generation module for TradingAgents.
 
 This module layers a structured ``trading_recommendation.json`` export (plus a
 ``summary.txt``, with regex-based fallback parsing when structured agent
-output isn't available) on top of the shared markdown report tree written by
-``tradingagents.reporting.write_report_tree``. Used by entry points that need
-the richer JSON/summary export (``mcp_server.py``, ``run_trading_agents.py``);
+output isn't available) on top of the shared report tree written by
+``tradingagents.reporting.write_report_tree`` — which since issue #165 writes
+a consolidated ``complete_report.pdf`` (plus its ``complete_report.sections.json``
+sidecar) rather than a markdown file. Used by entry points that need the
+richer JSON/summary export (``mcp_server.py``, ``run_trading_agents.py``);
 ``cli/main.py`` has its own, simpler structured-export step.
 """
 
@@ -149,7 +151,8 @@ def save_report_to_disk(final_state: dict[str, Any], ticker: str, save_path: Pat
         summary_file = save_path / "summary.txt"
         summary_file.write_text(summary_content, encoding="utf-8")
 
-    # Markdown report tree (1_analysts/ … 5_portfolio/ plus complete_report.md)
-    # is shared with the CLI and the programmatic API via write_report_tree.
+    # Report tree (1_analysts/ … 5_portfolio/ plus complete_report.pdf +
+    # complete_report.sections.json) is shared with the CLI and the
+    # programmatic API via write_report_tree.
     report_file = write_report_tree(final_state, ticker, save_path)
     return report_file, structured_data

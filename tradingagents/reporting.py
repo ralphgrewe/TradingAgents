@@ -1,9 +1,17 @@
 """Reusable report-tree writer shared by the CLI and the programmatic API.
 
 Writes a run's per-section files (analysts, research, trading, risk, portfolio)
-plus a consolidated ``complete_report.md`` under ``save_path``. The CLI and
-``TradingAgentsGraph.save_reports`` both call this, so a headless / API run
-produces the same on-disk report tree a CLI run does.
+plus a consolidated ``complete_report.pdf`` under ``save_path`` (issue #165,
+rendered via ``tradingagents.report_pdf.render_complete_report_pdf`` from #164).
+The CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless /
+API run produces the same on-disk report tree a CLI run does.
+
+Alongside the PDF, a ``complete_report.sections.json`` sidecar captures the
+same ordered section/subsection data that was rendered, as plain JSON. This is
+an internal implementation detail (not a documented user-facing deliverable):
+it exists so ``backfill_portfolio_adjustments`` can locate and update section V
+("Portfolio Manager Decision") after portfolio mode runs without needing to
+parse a PDF back into text, then re-render the PDF from the updated data.
 
 Since #30-#32 and #71, ``market_report``/``fundamentals_report``/``news_report``/
 ``sentiment_report`` are all JSON envelope strings (``skill``/``ticker``/``date``/
@@ -12,7 +20,13 @@ saved as ``.json`` files; every other text field handled here (debate history,
 trader plan, final decision) intentionally remains prose and is saved as ``.md``.
 The ``format_report_*`` helpers below detect which shape a given field is and
 render/preview it accordingly, so mixed-format reports flow through the same
-code path without special-casing per analyst.
+code path without special-casing per analyst. ``write_report_tree`` itself
+passes raw field values (prose or JSON-envelope strings) straight into the PDF
+section data rather than pre-formatting them with ``format_report_markdown`` —
+``render_complete_report_pdf`` detects and renders JSON envelopes itself (see
+``report_pdf.py``'s module docstring). ``format_report_markdown`` remains in
+use by the CLI's live-updating panels (``cli/main.py``), which still render
+markdown.
 """
 
 import json
@@ -46,6 +60,49 @@ def _try_parse_envelope(report: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+_SECTIONS_SIDECAR_NAME = "complete_report.sections.json"
+_PORTFOLIO_SECTION_TITLE = "V. Portfolio Manager Decision"
+
+
+def _section_to_dict(section) -> dict:
+    """Convert one ``ReportSection`` to a JSON-serializable dict.
+
+    Extra keys (e.g. ``portfolio_backfilled``, added by
+    ``backfill_portfolio_adjustments``) live alongside ``title``/``subsections``
+    in the on-disk dict but are never dataclass fields — :func:`_section_from_dict`
+    ignores anything beyond ``title``/``subsections`` when rebuilding a
+    ``ReportSection`` for rendering.
+    """
+    return {
+        "title": section.title,
+        "subsections": [
+            {"agent_name": sub.agent_name, "content": sub.content}
+            for sub in section.subsections
+        ],
+    }
+
+
+def _section_from_dict(data: dict):
+    """Rebuild a ``ReportSection`` dataclass from its sidecar dict representation."""
+    from tradingagents.report_pdf import ReportSection, ReportSubsection
+
+    return ReportSection(
+        title=data["title"],
+        subsections=[
+            ReportSubsection(agent_name=sub["agent_name"], content=sub["content"])
+            for sub in data.get("subsections", [])
+        ],
+    )
+
+
+def _write_sections_sidecar(save_path: Path, ticker: str, sections: list) -> Path:
+    """Write the ``complete_report.sections.json`` sidecar next to the PDF."""
+    sidecar_path = save_path / _SECTIONS_SIDECAR_NAME
+    data = {"ticker": ticker, "sections": [_section_to_dict(s) for s in sections]}
+    sidecar_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return sidecar_path
+
+
 def backfill_portfolio_adjustments(
     envelope: dict,
     per_ticker_report_dirs: dict[str, str],
@@ -54,12 +111,17 @@ def backfill_portfolio_adjustments(
 ) -> None:
     """Backfill per-ticker reports with portfolio adjustments and executed orders.
 
-    Called after portfolio mode completes to update each ticker's `5_portfolio/decision.md`
-    and the `## V.` section of its `complete_report.md` with:
+    Called after portfolio mode completes to update each ticker's
+    `5_portfolio/decision.md` and the "V. Portfolio Manager Decision" section
+    of its structured `complete_report.sections.json` sidecar (issue #165;
+    previously the `## V.` section of a `complete_report.md` text file) with:
     - Proposed adjustments table (ticker, signal, target weight, Δ shares)
     - Executed trades list (with status, fill price, message)
     - Rejected orders shown explicitly with their messages
     - Dropped tickers (no rating or no price) shown with explanatory line
+
+    After updating the sidecar, `complete_report.pdf` is re-rendered from the
+    updated section data so the two files stay in sync.
 
     Args:
         envelope: The dict returned by run_portfolio_mode() containing:
@@ -73,10 +135,14 @@ def backfill_portfolio_adjustments(
             Their reports get an explanatory line instead of a table.
 
     Idempotency: Running this function twice on the same report directory is safe.
-    The function detects if the portfolio section is already present (by checking for
-    the "### Proposed adjustments" marker) and skips that ticker if found, avoiding
-    duplicate or nested appends.
+    `decision.md` keeps its existing text-substring check (looking for the
+    "### Proposed adjustments"/"### Dropped" marker text). The sidecar instead
+    carries an explicit `"portfolio_backfilled": true` marker on the V section's
+    dict once backfilled, which is checked before mutating it again — the
+    structured equivalent of the same idempotency guarantee.
     """
+    from tradingagents.report_pdf import render_complete_report_pdf
+
     missing_ratings = missing_ratings or []
     missing_prices = missing_prices or []
 
@@ -164,9 +230,10 @@ def backfill_portfolio_adjustments(
         is_dropped = ticker in dropped_explanations
 
         # Build the per-ticker backfill text once, shared by decision.md and
-        # complete_report.md so both files get equivalent, correctly-scoped
-        # content for this ticker (see issue #157 escalation: complete_report.md
-        # previously reused an unfiltered, whole-universe rendering here).
+        # the complete_report.sections.json sidecar so both get equivalent,
+        # correctly-scoped content for this ticker (see issue #157 escalation:
+        # complete_report.md previously reused an unfiltered, whole-universe
+        # rendering here).
         if is_dropped:
             # Dropped ticker gets an explanatory line instead of a table.
             backfill_text = (
@@ -196,49 +263,46 @@ def backfill_portfolio_adjustments(
             if not already_backfilled:
                 decision_file.write_text(decision_text + backfill_text, encoding="utf-8")
 
-        # Update complete_report.md
-        complete_file = report_path / "complete_report.md"
-        if complete_file.exists():
-            complete_text = complete_file.read_text(encoding="utf-8")
-            # Check if already backfilled (idempotency)
-            if "### Proposed adjustments" in complete_text or "### Dropped" in complete_text:
-                continue
+        # Update complete_report.sections.json + re-render complete_report.pdf
+        sidecar_file = report_path / _SECTIONS_SIDECAR_NAME
+        if not sidecar_file.exists():
+            continue
 
-            # Find and replace the "## V. Portfolio Manager Decision" section
-            # The current section is just "## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{judge_decision}"
-            # We need to extend it with the proposed adjustments and executed sections
+        sidecar_data = json.loads(sidecar_file.read_text(encoding="utf-8"))
+        sections_data = sidecar_data.get("sections", [])
 
-            # Use a marker to find where to insert the portfolio adjustments
-            v_section_marker = "## V. Portfolio Manager Decision"
-            if v_section_marker not in complete_text:
-                continue
+        # Find the "V. Portfolio Manager Decision" section dict.
+        pm_section_data = next(
+            (s for s in sections_data if s.get("title") == _PORTFOLIO_SECTION_TITLE),
+            None,
+        )
+        if pm_section_data is None:
+            continue
 
-            # Find the PM decision section start
-            v_idx = complete_text.find(v_section_marker)
-            if v_idx == -1:
-                continue
+        # Check if already backfilled (idempotency) — structured equivalent of
+        # decision.md's "### Proposed adjustments"/"### Dropped" substring check.
+        if pm_section_data.get("portfolio_backfilled"):
+            continue
 
-            # The section contains "### Portfolio Manager" followed by the judge_decision
-            # We want to find the end of that section and insert our portfolio adjustments
-            # Look for the next "## " (next section) or end of file
-            after_v = complete_text[v_idx + len(v_section_marker):]
-            next_section = after_v.find("\n## ")
-            if next_section == -1:
-                # This is the last section
-                section_end = len(complete_text)
-            else:
-                section_end = v_idx + len(v_section_marker) + next_section
+        subsections = pm_section_data.get("subsections", [])
+        if not subsections:
+            continue
 
-            # Extract the PM decision section
-            pm_section = complete_text[v_idx:section_end]
+        # Append this ticker's (filtered) backfill text to the last subsection
+        # (normally the sole "Portfolio Manager" entry) — same text used for
+        # decision.md above.
+        subsections[-1]["content"] = subsections[-1].get("content", "") + backfill_text
+        pm_section_data["portfolio_backfilled"] = True
 
-            # Insert this ticker's (filtered) backfill text at the end of its
-            # own "## V." section — same text used for decision.md above.
-            updated_pm_section = pm_section + backfill_text
+        sidecar_file.write_text(json.dumps(sidecar_data, indent=2), encoding="utf-8")
 
-            # Replace the old section with the updated one
-            complete_text = complete_text[:v_idx] + updated_pm_section + complete_text[section_end:]
-            complete_file.write_text(complete_text, encoding="utf-8")
+        # Re-render the PDF from the updated section data so both files agree.
+        rebuilt_sections = [_section_from_dict(s) for s in sections_data]
+        render_complete_report_pdf(
+            sidecar_data.get("ticker", ticker),
+            rebuilt_sections,
+            report_path / "complete_report.pdf",
+        )
 
 
 def render_rebalance_summary(
@@ -346,10 +410,22 @@ def format_report_markdown(report: str) -> str:
 
 
 def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
-    """Save a completed run's reports to ``save_path``; return the complete-report path."""
+    """Save a completed run's reports to ``save_path``; return the complete-report PDF path.
+
+    Writes the same per-agent files under ``1_analysts/`` … ``5_portfolio/`` as
+    before, plus a consolidated ``complete_report.pdf`` (issue #165, rendered by
+    ``tradingagents.report_pdf.render_complete_report_pdf``) and its
+    ``complete_report.sections.json`` structured-data sidecar.
+    """
+    from tradingagents.report_pdf import (
+        ReportSection,
+        ReportSubsection,
+        render_complete_report_pdf,
+    )
+
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
-    sections = []
+    sections: list[ReportSection] = []
 
     # 1. Analysts
     analysts_dir = save_path / "1_analysts"
@@ -385,13 +461,17 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
         (analysts_dir / f"macro_news{ext}").write_text(final_state["macro_news_report"], encoding="utf-8")
         analyst_parts.append(("Macro News Analyst", final_state["macro_news_report"]))
     if analyst_parts:
-        # Individual per-analyst .md files above keep the raw field (JSON
-        # envelope or prose) so they stay machine-parseable; the consolidated
-        # report below renders JSON envelopes fenced for readability.
-        content = "\n\n".join(
-            f"### {name}\n{format_report_markdown(text)}" for name, text in analyst_parts
+        # Individual per-analyst .md/.json files above keep the raw field
+        # (JSON envelope or prose) so they stay machine-parseable; the PDF
+        # renderer detects and renders JSON envelopes itself (see
+        # report_pdf.py's module docstring), so the raw text is passed
+        # straight through here rather than pre-formatted.
+        sections.append(
+            ReportSection(
+                "I. Analyst Team Reports",
+                [ReportSubsection(name, text) for name, text in analyst_parts],
+            )
         )
-        sections.append(f"## I. Analyst Team Reports\n\n{content}")
 
     # 2. Research
     if final_state.get("investment_debate_state"):
@@ -411,15 +491,24 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             (research_dir / "manager.md").write_text(debate["judge_decision"], encoding="utf-8")
             research_parts.append(("Research Manager", debate["judge_decision"]))
         if research_parts:
-            content = "\n\n".join(f"### {name}\n{text}" for name, text in research_parts)
-            sections.append(f"## II. Research Team Decision\n\n{content}")
+            sections.append(
+                ReportSection(
+                    "II. Research Team Decision",
+                    [ReportSubsection(name, text) for name, text in research_parts],
+                )
+            )
 
     # 3. Trading
     if final_state.get("trader_investment_plan"):
         trading_dir = save_path / "3_trading"
         trading_dir.mkdir(exist_ok=True)
         (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"], encoding="utf-8")
-        sections.append(f"## III. Trading Team Plan\n\n### Trader\n{final_state['trader_investment_plan']}")
+        sections.append(
+            ReportSection(
+                "III. Trading Team Plan",
+                [ReportSubsection("Trader", final_state["trader_investment_plan"])],
+            )
+        )
 
     # 4. Risk Management
     if final_state.get("risk_debate_state"):
@@ -439,17 +528,29 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             (risk_dir / "neutral.md").write_text(risk["neutral_history"], encoding="utf-8")
             risk_parts.append(("Neutral Analyst", risk["neutral_history"]))
         if risk_parts:
-            content = "\n\n".join(f"### {name}\n{text}" for name, text in risk_parts)
-            sections.append(f"## IV. Risk Management Team Decision\n\n{content}")
+            sections.append(
+                ReportSection(
+                    "IV. Risk Management Team Decision",
+                    [ReportSubsection(name, text) for name, text in risk_parts],
+                )
+            )
 
         # 5. Portfolio Manager
         if risk.get("judge_decision"):
             portfolio_dir = save_path / "5_portfolio"
             portfolio_dir.mkdir(exist_ok=True)
             (portfolio_dir / "decision.md").write_text(risk["judge_decision"], encoding="utf-8")
-            sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
+            sections.append(
+                ReportSection(
+                    _PORTFOLIO_SECTION_TITLE,
+                    [ReportSubsection("Portfolio Manager", risk["judge_decision"])],
+                )
+            )
 
-    # Write consolidated report
-    header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
-    return save_path / "complete_report.md"
+    # Write the consolidated PDF report plus its structured-data sidecar
+    # (issue #165) — the sidecar lets backfill_portfolio_adjustments locate
+    # and update section V without parsing the PDF back into text.
+    pdf_path = save_path / "complete_report.pdf"
+    render_complete_report_pdf(ticker, sections, pdf_path)
+    _write_sections_sidecar(save_path, ticker, sections)
+    return pdf_path
