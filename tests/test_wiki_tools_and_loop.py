@@ -590,7 +590,12 @@ class RunStructuredWithToolsTests(unittest.TestCase):
         # fallback call must have been made against this exact final trace, not
         # some earlier point.
         self.assertIsInstance(trace[-1], ToolMessage)
-        mock_structured_llm.invoke.assert_called_once_with(trace)
+        # With retry enabled (issue #153), structured_llm is called twice:
+        # first attempt with original trace, then retry with repair instruction
+        self.assertEqual(mock_structured_llm.invoke.call_count, 2)
+        # First call should be with just the trace
+        mock_structured_llm.invoke.assert_any_call(trace)
+        # Fallback should still be called once with just the trace
         mock_llm.invoke.assert_called_once_with(trace)
 
     def test_double_failure_propagates_instead_of_silent_double_none(self):

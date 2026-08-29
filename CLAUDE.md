@@ -298,6 +298,26 @@ than automatic prompt injection. See `docs/design/llm-wiki.md` for the design ra
 schema, ingestion pipeline, and extensibility guidance for wiring the wiki into other agents
 (trader, researchers, risk team).
 
+### Structured output repair retry (issue #153)
+
+When the Portfolio Manager or Swing Trader's first structured output call fails (typically due to
+malformed JSON from a weak model), the system can automatically retry exactly once with an explicit
+schema-repair instruction appended to the trace before falling back to free text. This improves
+recovery rates for small local models that frequently produce nearly-correct JSON and correct it
+when told plainly what shape is required.
+
+- **`structured_output_repair_retry`** (env: `TRADINGAGENTS_STRUCTURED_OUTPUT_REPAIR_RETRY`, default
+  `True`): enable/disable the retry. When enabled and the first structured call fails, the system
+  appends a self-contained instruction listing all required fields and their types (derived from the
+  Pydantic response model) and states that the reply must be JSON only, with no prose. The retry
+  attempt and its outcome (success or failure) are logged at WARNING level. When disabled or when the
+  provider does not support structured output (structured_llm is None), no retry happens — the fallback
+  to free text fires immediately on the first failure.
+
+- If the retry also fails, behaviour is identical to the post-#152 fallback: the trace's last
+  `AIMessage` content is reused if it's non-empty and non-whitespace-only, otherwise a fresh
+  `llm.invoke` call is made for a fallback response.
+
 ### Oversize-prompt enforcement (issues #149, #154)
 
 `docs/analysis/prompt-truncation-diagnosis.md` (issue #148) found that a prompt exceeding a local

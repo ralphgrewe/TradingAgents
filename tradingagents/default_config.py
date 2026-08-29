@@ -48,6 +48,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MACRO_NEWS_CATEGORY_CAP": "macro_news_category_cap",
     "TRADINGAGENTS_LLM_CALL_LOG_ENABLED": "llm_call_log_enabled",
     "TRADINGAGENTS_LLM_CALL_LOG_PROMPTS": "llm_call_log_prompts",
+    "TRADINGAGENTS_STRUCTURED_OUTPUT_REPAIR_RETRY": "structured_output_repair_retry",
 }
 
 
@@ -266,6 +267,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # to disk under prompts/ subdirectory. Disabled by default since dumps
     # are large and may contain fetched data users don't always want written.
     "llm_call_log_prompts": False,
+    # Structured output repair retry (issue #153): when the first structured
+    # output call fails, retry exactly once with an explicit schema-repair
+    # instruction appended to the trace, before falling back to free text.
+    # Small models often produce nearly-correct JSON and correct it when told
+    # plainly what shape is required. Set to False to disable (no extra LLM
+    # call). Never retries when structured_llm is None (provider doesn't
+    # support structured output).
+    "structured_output_repair_retry": True,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.

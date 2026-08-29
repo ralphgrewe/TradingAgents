@@ -27,7 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,31 @@ def _normalize_content(content: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return str(content)
+
+
+def _generate_repair_instruction(response_model: type[T]) -> str:
+    """Generate a self-contained repair instruction from a Pydantic model.
+
+    Lists all required fields and their types, instructing the model to
+    produce JSON only with no prose. Used as a retry instruction when
+    structured output fails on the first attempt (issue #153).
+    """
+    fields = response_model.model_fields
+    field_specs: list[str] = []
+
+    for field_name, field_info in fields.items():
+        # Render the type annotation in a readable form
+        annotation = field_info.annotation
+        type_str = str(annotation).replace("typing.", "")
+        field_specs.append(f"- {field_name}: {type_str}")
+
+    fields_list = "\n".join(field_specs)
+    return (
+        f"The response must be a JSON object with the following fields:\n"
+        f"{fields_list}\n"
+        f"\n"
+        f"Reply with ONLY valid JSON, no prose or explanation."
+    )
 
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
@@ -283,11 +308,44 @@ def run_structured_with_tools(
                 agent_name, round_count,
             )
         except Exception as exc:
-            logger.warning(
-                "%s: structured output failed after tool loop (%s); "
-                "falling back to free text on the final trace",
-                agent_name, exc,
-            )
+            # First attempt failed; attempt retry if enabled in config
+            first_failure = exc
+            should_retry = False
+
+            # Import here to avoid circular dependency
+            from tradingagents.dataflows.config import get_config
+            if get_config().get("structured_output_repair_retry", True):
+                should_retry = True
+
+            if should_retry:
+                logger.warning(
+                    "%s: structured output failed after tool loop (%s); "
+                    "retrying once with schema-repair instruction",
+                    agent_name, first_failure,
+                )
+
+                # Append repair instruction to trace
+                repair_instruction = _generate_repair_instruction(response_model)
+                retry_trace = message_trace + [HumanMessage(content=repair_instruction)]
+
+                try:
+                    structured_result = structured_llm.invoke(retry_trace)
+                    logger.warning(
+                        "%s: structured output retry succeeded",
+                        agent_name,
+                    )
+                except Exception as retry_exc:
+                    logger.warning(
+                        "%s: structured output retry also failed (%s); "
+                        "falling back to free text",
+                        agent_name, retry_exc,
+                    )
+            else:
+                logger.warning(
+                    "%s: structured output failed after tool loop (%s); "
+                    "falling back to free text on the final trace (retry disabled)",
+                    agent_name, first_failure,
+                )
     else:
         logger.debug(
             "%s: structured output not supported by LLM; falling back to free text",
