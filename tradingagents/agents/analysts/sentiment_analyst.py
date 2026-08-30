@@ -28,11 +28,11 @@ signal/confidence.
 See: https://github.com/TauricResearch/TradingAgents/issues/557
 """
 
-import json
+import logging
 from datetime import datetime, timedelta
 
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from pydantic import ValidationError
 
 from tradingagents.agents.analysts.sentiment_computation import (
     SentimentAnalystOutput,
@@ -46,8 +46,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
+from tradingagents.agents.utils.structured import run_structured_with_tools
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+
+logger = logging.getLogger(__name__)
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -108,22 +111,41 @@ def create_sentiment_analyst(llm):
         prompt = prompt.partial(current_date=end_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        # No bind_tools — the data is already in the prompt; a single LLM
-        # call produces the structured analysis directly.
-        chain = prompt | llm
-        result = chain.invoke(state["messages"])
+        # Build prompt for structured output. The sentiment analyst does not
+        # use tool-calling; the data is already in the prompt. We invoke the
+        # structured LLM through run_structured_with_tools with tools=[] and
+        # max_rounds=0 to inherit the shared recovery ladder (schema-repair
+        # retry #153, text extraction #162) without a tool loop.
+        formatted_prompt = prompt.format_prompt(messages=state["messages"])
 
-        # Step 2: Parse + validate the LLM's structured JSON output. Any
-        # failure (bad JSON, schema mismatch) falls back to the
-        # Python-only `details` built above rather than crashing the run.
-        if result and hasattr(result, "content") and result.content:
-            llm_response = str(result.content).strip()
-            try:
-                parsed = json.loads(llm_response)
-                llm_output = SentimentAnalystOutput(**parsed)
-                details = build_details(start_date, end_date, sources_skeleton, llm_output=llm_output)
-            except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
-                pass  # keep the Python-only fallback `details` from above
+        # Convert formatted prompt to HumanMessage for run_structured_with_tools
+        # (it expects a list of BaseMessage objects, not a PromptValue).
+        messages = [HumanMessage(content=formatted_prompt.to_string())]
+
+        # Step 2: Run the structured-output call through the shared ladder.
+        # With tools=[] and max_rounds=0, this degenerates to a single
+        # structured call plus the shared fallback/retry/extraction logic.
+        structured_result, fallback_text, _message_trace = run_structured_with_tools(
+            llm,
+            messages,
+            tools=[],
+            response_model=SentimentAnalystOutput,
+            max_rounds=0,
+            agent_name="SentimentAnalyst",
+        )
+
+        # Merge structured result (if any) with the Python-computed skeleton
+        if structured_result is not None:
+            details = build_details(start_date, end_date, sources_skeleton, llm_output=structured_result)
+        else:
+            # structured_result is None: either the structured call failed entirely
+            # (and was logged by run_structured_with_tools) or text extraction was
+            # attempted (and logged if it succeeded). Keep the Python-only fallback
+            # `details` from above.
+            logger.debug(
+                "SentimentAnalyst: structured-output parsing failed completely; "
+                "using Python-only skeleton with null directions"
+            )
 
         signal, confidence = derive_signal_and_confidence(details)
 

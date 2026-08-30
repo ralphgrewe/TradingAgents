@@ -1,8 +1,14 @@
 """Tests for the sentiment analyst node (issue #71): JSON envelope output,
 Python-derived signal/confidence, and graceful degradation.
+
+After issue #166, the sentiment analyst uses run_structured_with_tools for
+the shared recovery ladder (schema-repair retry #153, text extraction #162).
+Tests in this file cover the new structured-output path, including fallback
+and extraction scenarios.
 """
 
 import json
+import logging
 import warnings
 from unittest.mock import MagicMock, patch
 
@@ -66,16 +72,76 @@ def _patch_fetchers(news_block=None, stocktwits_block=None, reddit_block=None):
 
 
 def _make_llm(main_content, summary_content="Bullish retail chatter and steady news coverage"):
-    """A MagicMock LLM usable in `prompt | llm` chains (LangChain coerces a
-    bare callable via RunnableLambda, invoking it as `llm(input)` — so the
-    response sequence is driven by `side_effect`, not `.invoke`).
+    """A MagicMock LLM suitable for run_structured_with_tools + free-text fallback.
 
-    Yields `main_content` on the first chain invocation (the structured
-    analysis call) and `summary_content` on the second (the one-line
-    summary call), matching sentiment_analyst_node's two-LLM-call pattern.
+    Since sentiment_analyst_node now uses run_structured_with_tools, we need to:
+    1. Make with_structured_output() return a mock that can parse JSON strings into
+       SentimentAnalystOutput objects (or return None to trigger fallback).
+    2. Make bind_tools() return self for chaining.
+    3. Make the LLM callable (as a __call__ side_effect) to work with LangChain chains.
+
+    The call sequence depends on whether the structured call succeeds:
+    - Success path: no llm() call in run_structured_with_tools, then summary call
+    - Failure path: fallback llm() call in run_structured_with_tools, then summary call
+
+    We use a callable side_effect that tracks state to handle both paths correctly.
     """
+    from tradingagents.agents.analysts.sentiment_computation import SentimentAnalystOutput
+
     llm = MagicMock()
-    llm.side_effect = [MagicMock(content=main_content), MagicMock(content=summary_content)]
+
+    # Mock with_structured_output() to return a structured LLM
+    structured_llm = MagicMock()
+
+    def structured_invoke_impl(messages):
+        """Try to parse main_content as JSON into SentimentAnalystOutput."""
+        try:
+            parsed = json.loads(main_content)
+            return SentimentAnalystOutput(**parsed)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # If parsing fails, return None to trigger fallback
+            return None
+
+    structured_llm.invoke = MagicMock(side_effect=structured_invoke_impl)
+    llm.with_structured_output = MagicMock(return_value=structured_llm)
+
+    # Track whether structured call succeeded to know which invoke() is next
+    # In success path: first call is for summary
+    # In failure path: first call is for fallback, second is for summary
+    call_count = [0]
+
+    # Create a simple response class that doesn't auto-create attributes like MagicMock
+    class Response:
+        def __init__(self, content):
+            self.content = content
+
+    def call_impl(*args, **kwargs):
+        """Handle __call__ (via side_effect) and .invoke() calls via all paths."""
+        call_count[0] += 1
+        # Determine which call this is:
+        # If structured call succeeded, there's no fallback call, so first call is summary
+        # If structured call failed, first call is fallback, second is summary
+        try:
+            json.loads(main_content)
+            # Structured call succeeded, so this call is for summary
+            return Response(summary_content)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # Structured call failed, so route based on call count
+            if call_count[0] == 1:
+                # First call is fallback
+                return Response(main_content)
+            else:
+                # Second call is summary
+                return Response(summary_content)
+
+    # Set up the mock to be callable (LangChain uses __call__ for chain.invoke)
+    llm.side_effect = call_impl
+    # Also set up .invoke for when run_structured_with_tools calls it directly
+    llm.invoke.side_effect = call_impl
+
+    # Mock bind_tools for run_structured_with_tools (returns self for chaining)
+    llm.bind_tools = MagicMock(return_value=llm)
+
     return llm
 
 
@@ -212,6 +278,88 @@ class TestSentimentAnalystGracefulDegradation:
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["direction"] is None
+
+    def test_valid_structured_response_populates_directions(self):
+        """AC1: a valid structured response populates per-source directions
+        and yields a non-null signal via the recovery ladder."""
+        payload = _sample_llm_payload()
+        llm = _make_llm(json.dumps(payload))
+        p1, p2, p3 = _patch_fetchers()
+        with p1, p2, p3:
+            node = create_sentiment_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["sentiment_report"])
+        # All three sources should have directions from the LLM
+        details = envelope["details"]
+        assert details["sources"]["news"]["direction"] == "NEUTRAL"
+        assert details["sources"]["stocktwits"]["direction"] == "POSITIVE"
+        assert details["sources"]["reddit"]["direction"] == "POSITIVE"
+        assert details["overall_direction"] == "BULLISH"
+        # Signal should be non-null since we have directions
+        assert envelope["signal"] == "BUY"
+        assert envelope["confidence"] is not None
+
+    def test_text_extraction_recovery_logs_warning(self, caplog):
+        """AC3: when JSON is embedded in prose (e.g. model emitted markdown),
+        text extraction recovers the structured output and logs a WARNING.
+        The payload is wrapped in ```json fences to simulate text extraction."""
+        payload = _sample_llm_payload()
+        # Simulate a response that wraps the JSON in markdown code fence
+        llm_response = f"""Here's the sentiment analysis:
+
+```json
+{json.dumps(payload)}
+```
+
+This covers the key drivers."""
+        llm = _make_llm(llm_response)
+        p1, p2, p3 = _patch_fetchers()
+
+        with p1, p2, p3, caplog.at_level(logging.WARNING):
+            node = create_sentiment_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["sentiment_report"])
+        # Text extraction should have recovered the structured output
+        assert envelope["signal"] == "BUY"
+        assert envelope["confidence"] is not None
+        # Check that the extraction was logged
+        assert any(
+            "recovered from free-text fallback via text extraction" in record.message
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), f"Expected extraction warning in logs, got: {[r.message for r in caplog.records]}"
+
+    def test_malformed_response_logs_warning_and_degrades(self, caplog):
+        """AC2: a malformed response (bad JSON, schema mismatch) is handled by
+        run_structured_with_tools and logged. The node degrades gracefully to
+        the Python-only skeleton (null directions)."""
+        # Completely invalid JSON that can't be recovered
+        llm_response = "This is random prose that doesn't contain any JSON at all"
+        llm = _make_llm(llm_response)
+        p1, p2, p3 = _patch_fetchers()
+
+        with p1, p2, p3, caplog.at_level(logging.WARNING):
+            node = create_sentiment_analyst(llm)
+            result = node(_make_state())
+
+        envelope = json.loads(result["sentiment_report"])
+        # Fallback to Python-only skeleton: counts present, directions null
+        details = envelope["details"]
+        assert details["sources"]["news"]["headline_count"] == 1
+        assert details["sources"]["news"]["direction"] is None
+        assert details["sources"]["stocktwits"]["direction"] is None
+        assert details["sources"]["reddit"]["direction"] is None
+        # Signal should be None since no directions were found
+        assert envelope["signal"] is None
+        assert envelope["confidence"] is None
+        # Verify that a failure was logged
+        assert any(
+            "structured output failed" in record.message.lower()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), f"Expected structured output failure warning in logs, got: {[r.message for r in caplog.records]}"
 
 
 class TestSocialMediaAnalystDeprecationShim:
