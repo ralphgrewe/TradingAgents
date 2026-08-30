@@ -125,24 +125,46 @@ def create_sentiment_analyst(llm):
         # Step 2: Run the structured-output call through the shared ladder.
         # With tools=[] and max_rounds=0, this degenerates to a single
         # structured call plus the shared fallback/retry/extraction logic.
-        structured_result, fallback_text, _message_trace = run_structured_with_tools(
-            llm,
-            messages,
-            tools=[],
-            response_model=SentimentAnalystOutput,
-            max_rounds=0,
-            agent_name="SentimentAnalyst",
-        )
+        #
+        # run_structured_with_tools's own docstring documents a "true double
+        # failure" mode: the structured call fails/is unsupported *and* the
+        # free-text fallback llm.invoke also raises (e.g. a provider outage
+        # hitting both calls) -- which propagates uncaught out of the helper.
+        # Unlike the Portfolio Manager (which is designed to hard-fail on
+        # structured-output failure per #156, via PortfolioDecisionError),
+        # the sentiment analyst must never abort the ticker -- it is one of
+        # several analyst inputs, not the final decision -- so that
+        # exception is caught here and folded into the same "total failure"
+        # path as a plain ``structured_result is None`` return: fall through
+        # to the Python-only skeleton and let the run continue.
+        try:
+            structured_result, fallback_text, _message_trace = run_structured_with_tools(
+                llm,
+                messages,
+                tools=[],
+                response_model=SentimentAnalystOutput,
+                max_rounds=0,
+                agent_name="SentimentAnalyst",
+            )
+        except Exception as exc:
+            logger.warning(
+                "SentimentAnalyst: structured-output ladder raised an uncaught "
+                "exception (%s); using Python-only skeleton with null directions",
+                exc,
+            )
+            structured_result = None
 
         # Merge structured result (if any) with the Python-computed skeleton
         if structured_result is not None:
             details = build_details(start_date, end_date, sources_skeleton, llm_output=structured_result)
         else:
             # structured_result is None: either the structured call failed entirely
-            # (and was logged by run_structured_with_tools) or text extraction was
-            # attempted (and logged if it succeeded). Keep the Python-only fallback
-            # `details` from above.
-            logger.debug(
+            # (and was logged by run_structured_with_tools, or above if the ladder
+            # itself raised) or text extraction was attempted (and logged if it
+            # succeeded). Keep the Python-only fallback `details` from above. Logged
+            # at WARNING (not DEBUG) since this is a real degradation -- the
+            # sentiment stage is producing a null-signal envelope for this run.
+            logger.warning(
                 "SentimentAnalyst: structured-output parsing failed completely; "
                 "using Python-only skeleton with null directions"
             )

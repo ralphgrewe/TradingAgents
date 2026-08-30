@@ -361,6 +361,54 @@ This covers the key drivers."""
             if record.levelname == "WARNING"
         ), f"Expected structured output failure warning in logs, got: {[r.message for r in caplog.records]}"
 
+    def test_double_failure_in_recovery_ladder_does_not_abort_ticker(self, caplog):
+        """Design-review follow-up to 569979c: run_structured_with_tools's own
+        docstring documents a "true double failure" mode -- the structured call
+        fails/is unsupported *and* the free-text fallback llm.invoke also raises
+        (e.g. a provider outage) -- which propagates uncaught out of the helper.
+        The node must catch that, log it at WARNING, and degrade to the
+        Python-only skeleton instead of letting the exception propagate (which
+        would otherwise abort the whole batch run via run_trading_agents.py's
+        per-ticker sys.exit(1) handler)."""
+        llm = MagicMock()
+
+        # Structured output unsupported: with_structured_output itself raises,
+        # so bind_structured() catches it internally and returns None -- the
+        # ladder falls straight to the free-text fallback path.
+        llm.with_structured_output = MagicMock(
+            side_effect=NotImplementedError("provider does not support structured output")
+        )
+        llm.bind_tools = MagicMock(return_value=llm)
+
+        # The free-text fallback (llm.invoke on the final trace) also raises,
+        # simulating a provider outage hitting both rungs of the ladder.
+        llm.invoke = MagicMock(side_effect=RuntimeError("provider outage"))
+
+        p1, p2, p3 = _patch_fetchers()
+        with p1, p2, p3, caplog.at_level(logging.WARNING):
+            node = create_sentiment_analyst(llm)
+            # Must not raise -- the node has to swallow the double failure and
+            # still return a valid envelope with null directions.
+            result = node(_make_state())
+
+        assert "sentiment_report" in result
+        envelope = json.loads(result["sentiment_report"])
+        assert envelope["signal"] is None
+        assert envelope["confidence"] is None
+        details = envelope["details"]
+        assert details["sources"]["news"]["direction"] is None
+        assert details["sources"]["stocktwits"]["direction"] is None
+        assert details["sources"]["reddit"]["direction"] is None
+        # Python-computed counts are still present even though the LLM path
+        # failed entirely.
+        assert details["sources"]["news"]["headline_count"] == 1
+
+        assert any(
+            "structured-output ladder raised an uncaught exception" in record.message
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ), f"Expected double-failure warning in logs, got: {[r.message for r in caplog.records]}"
+
 
 class TestSocialMediaAnalystDeprecationShim:
     def test_shim_still_works_and_warns(self):
