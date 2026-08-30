@@ -1,7 +1,7 @@
 """Unit tests for sentiment_computation.py (issue #71).
 
 Covers the Python-side count/availability parsing of the pre-fetched
-news/StockTwits/Reddit blocks, the signal/confidence derivation rules, and
+news/StockTwits/Reddit/ApeWisdom blocks, the signal/confidence derivation rules, and
 the details-payload merge (including the parse-failure fallback shape).
 """
 
@@ -16,6 +16,7 @@ from tradingagents.agents.analysts.sentiment_computation import (
     build_details,
     build_json_envelope,
     build_sources_skeleton,
+    compute_apewisdom_counts,
     compute_news_counts,
     compute_reddit_counts,
     compute_stocktwits_counts,
@@ -182,6 +183,55 @@ class TestComputeRedditCounts:
 
 
 # ---------------------------------------------------------------------------
+# compute_apewisdom_counts (issue #167)
+# ---------------------------------------------------------------------------
+
+class TestComputeApewisdomCounts:
+    def test_parses_mentions_and_upvotes(self):
+        block = "ApeWisdom (Reddit + 4chan /biz aggregate): 245 mentions, 1842 upvotes, rank 24h ago: #12"
+        result = compute_apewisdom_counts(block)
+        assert result["available"] is True
+        assert result["mention_count"] == 245
+        assert result["upvote_count"] == 1842
+        assert result["rank_24h_ago"] == 12
+        assert result["reason"] is None
+
+    def test_parses_mentions_only(self):
+        block = "ApeWisdom (Reddit + 4chan /biz aggregate): 100 mentions"
+        result = compute_apewisdom_counts(block)
+        assert result["available"] is True
+        assert result["mention_count"] == 100
+        assert result["upvote_count"] == 0
+        assert result["rank_24h_ago"] is None
+
+    def test_zero_mentions_is_available_with_zero(self):
+        result = compute_apewisdom_counts("<no ApeWisdom mentions found for $AAPL>")
+        assert result["available"] is True
+        assert result["mention_count"] == 0
+        assert result["upvote_count"] == 0
+        assert result["rank_24h_ago"] is None
+        assert result["reason"] is None
+
+    def test_non_us_listing_unavailable(self):
+        block = "<apewisdom unavailable: non-US listing (exchange suffix detected)>"
+        result = compute_apewisdom_counts(block)
+        assert result["available"] is False
+        assert result["mention_count"] == 0
+        assert result["reason"] == "non-US listing (exchange suffix detected)"
+
+    def test_network_error_unavailable(self):
+        block = "<apewisdom unavailable: TimeoutError>"
+        result = compute_apewisdom_counts(block)
+        assert result["available"] is False
+        assert result["reason"] == "TimeoutError"
+
+    def test_empty_block_is_unavailable(self):
+        result = compute_apewisdom_counts("")
+        assert result["available"] is False
+        assert result["reason"] == "empty response"
+
+
+# ---------------------------------------------------------------------------
 # build_sources_skeleton
 # ---------------------------------------------------------------------------
 
@@ -191,8 +241,9 @@ class TestBuildSourcesSkeleton:
             "No news found for AAPL",
             "<no StockTwits messages found for $AAPL>",
             "<no Reddit posts found mentioning AAPL across r/wallstreetbets, r/stocks, r/investing in the past 7 days>",
+            "<no ApeWisdom mentions found for $AAPL>",
         )
-        for name in ("news", "stocktwits", "reddit"):
+        for name in ("news", "stocktwits", "reddit", "apewisdom"):
             assert skeleton[name]["direction"] is None
             assert skeleton[name]["confidence"] is None
             assert skeleton[name]["key_items"] == []
@@ -202,10 +253,12 @@ class TestBuildSourcesSkeleton:
             "Error fetching news for AAPL: timeout",
             "<stocktwits unavailable: TimeoutError>",
             "",
+            "<apewisdom unavailable: non-US listing (exchange suffix detected)>",
         )
         assert skeleton["news"]["available"] is False
         assert skeleton["stocktwits"]["available"] is False
         assert skeleton["reddit"]["available"] is False
+        assert skeleton["apewisdom"]["available"] is False
 
     def test_non_yfinance_news_block_surfaces_caveat_in_details(self):
         """AC4 end-to-end: an alpha_vantage-style news payload must produce a
@@ -214,12 +267,26 @@ class TestBuildSourcesSkeleton:
             {"feed": [{"title": "Q2 beat"}]},  # alpha_vantage dict payload
             "<no StockTwits messages found for $AAPL>",
             "<no Reddit posts found mentioning AAPL in the past 7 days>",
+            "ApeWisdom (Reddit + 4chan /biz aggregate): 50 mentions, 320 upvotes",
         )
         assert skeleton["news"]["available"] is False
         details = build_details("2026-07-01", "2026-07-08", skeleton, llm_output=None)
         caveats = details["data_quality"]["caveats"]
         assert any("News unavailable" in c for c in caveats)
         assert details["sources"]["news"]["available"] is False
+
+    def test_skeleton_includes_apewisdom_counts(self):
+        """Apewisdom counts are parsed and included in the skeleton."""
+        skeleton = build_sources_skeleton(
+            "No news found for AAPL",
+            "<no StockTwits messages found for $AAPL>",
+            "<no Reddit posts found mentioning AAPL across r/wallstreetbets, r/stocks, r/investing in the past 7 days>",
+            "ApeWisdom (Reddit + 4chan /biz aggregate): 245 mentions, 1842 upvotes, rank 24h ago: #12",
+        )
+        assert skeleton["apewisdom"]["available"] is True
+        assert skeleton["apewisdom"]["mention_count"] == 245
+        assert skeleton["apewisdom"]["upvote_count"] == 1842
+        assert skeleton["apewisdom"]["rank_24h_ago"] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +299,7 @@ class TestBuildDetails:
             "### Headline one (source: Reuters)\nSummary\n\n### Headline two (source: AP)\nSummary\n\n",
             "Bullish: 10 (80%) · Bearish: 2 (16%) · Unlabeled: 1 · Total: 13 most-recent messages",
             "r/stocks — 1 recent posts mentioning AAPL:\n  [2026-07-08 ·  100↑ ·   20c] Post title\n",
+            "ApeWisdom (Reddit + 4chan /biz aggregate): 245 mentions, 1842 upvotes, rank 24h ago: #12",
         )
 
     def test_fallback_details_has_python_counts_and_null_directions(self):
@@ -243,9 +311,10 @@ class TestBuildDetails:
         assert details["sources"]["stocktwits"]["message_count"] == 13
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["post_count"] == 1
+        assert details["sources"]["apewisdom"]["mention_count"] == 245
         assert details["overall_direction"] is None
         assert details["divergences"] == []
-        assert details["data_quality"]["sources_available"] == 3
+        assert details["data_quality"]["sources_available"] == 4
         assert details["data_quality"]["caveats"] == []
 
     def test_merges_llm_output_onto_skeleton(self):
@@ -253,6 +322,7 @@ class TestBuildDetails:
             news=SourceAssessment(direction="NEUTRAL", confidence=0.4, key_items=["a"]),
             stocktwits=SourceAssessment(direction="POSITIVE", confidence=0.6, key_items=["b"]),
             reddit=SourceAssessment(direction="POSITIVE", confidence=0.3, key_items=["c"]),
+            apewisdom=SourceAssessment(direction="POSITIVE", confidence=0.7, key_items=["d"]),
             overall_direction="BULLISH",
             divergences=["news lags retail"],
             narratives=["AI momentum"],
@@ -264,6 +334,7 @@ class TestBuildDetails:
         assert details["sources"]["news"]["direction"] == "NEUTRAL"
         assert details["sources"]["stocktwits"]["direction"] == "POSITIVE"
         assert details["sources"]["reddit"]["direction"] == "POSITIVE"
+        assert details["sources"]["apewisdom"]["direction"] == "POSITIVE"
         assert details["overall_direction"] == "BULLISH"
         assert details["divergences"] == ["news lags retail"]
 
@@ -274,11 +345,13 @@ class TestBuildDetails:
             "Error fetching news for AAPL: timeout",
             "Bullish: 10 (80%) · Bearish: 2 (16%) · Unlabeled: 1 · Total: 13 most-recent messages",
             "<no Reddit posts found mentioning AAPL across r/wallstreetbets, r/stocks, r/investing in the past 7 days>",
+            "ApeWisdom (Reddit + 4chan /biz aggregate): 245 mentions, 1842 upvotes",
         )
         llm_output = SentimentAnalystOutput(
             news=SourceAssessment(direction="POSITIVE", confidence=0.9),  # LLM ignoring the unavailable flag
             stocktwits=SourceAssessment(direction="POSITIVE", confidence=0.6),
             reddit=SourceAssessment(direction=None, confidence=None),
+            apewisdom=SourceAssessment(direction="POSITIVE", confidence=0.7),
             overall_direction="NEUTRAL",
         )
         details = build_details("2026-07-01", "2026-07-08", skeleton, llm_output=llm_output)
@@ -287,21 +360,23 @@ class TestBuildDetails:
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["news"]["confidence"] is None
 
-    def test_all_three_sources_unavailable_populates_caveats(self):
-        """Edge case: all three sources unavailable -> signal/confidence null,
+    def test_all_four_sources_unavailable_populates_caveats(self):
+        """Edge case: all four sources unavailable -> signal/confidence null,
         caveats populated, envelope still produced."""
         skeleton = build_sources_skeleton(
             "Error fetching news for AAPL: timeout",
             "<stocktwits unavailable: HTTPError>",
             "",
+            "<apewisdom unavailable: non-US listing (exchange suffix detected)>",
         )
         details = build_details("2026-07-01", "2026-07-08", skeleton, llm_output=None)
 
         assert details["data_quality"]["sources_available"] == 0
-        assert len(details["data_quality"]["caveats"]) == 3
+        assert len(details["data_quality"]["caveats"]) == 4
         assert any("News" in c for c in details["data_quality"]["caveats"])
         assert any("StockTwits" in c for c in details["data_quality"]["caveats"])
         assert any("Reddit" in c for c in details["data_quality"]["caveats"])
+        assert any("ApeWisdom" in c for c in details["data_quality"]["caveats"])
 
         signal, confidence = derive_signal_and_confidence(details)
         assert signal is None
@@ -447,6 +522,7 @@ class TestSentimentAnalystOutputValidation:
             "news": {"direction": "POSITIVE", "confidence": 0.5, "key_items": []},
             "stocktwits": {"direction": None, "confidence": None, "key_items": []},
             "reddit": {"direction": "NEGATIVE", "confidence": 0.2, "key_items": ["x"]},
+            "apewisdom": {"direction": "POSITIVE", "confidence": 0.6, "key_items": []},
             "overall_direction": "MIXED",
             "divergences": [],
             "narratives": [],
@@ -458,6 +534,7 @@ class TestSentimentAnalystOutputValidation:
         output = SentimentAnalystOutput(**self._valid_payload())
         assert output.overall_direction == "MIXED"
         assert output.stocktwits.direction is None
+        assert output.apewisdom.direction == "POSITIVE"
 
     def test_invalid_direction_raises(self):
         payload = self._valid_payload()

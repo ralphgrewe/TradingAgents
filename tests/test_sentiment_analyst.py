@@ -37,6 +37,7 @@ def _sample_llm_payload(**overrides):
         "news": {"direction": "NEUTRAL", "confidence": 0.4, "key_items": ["Q2 beat estimates"]},
         "stocktwits": {"direction": "POSITIVE", "confidence": 0.6, "key_items": ["retail buying the dip"]},
         "reddit": {"direction": "POSITIVE", "confidence": 0.3, "key_items": ["earnings thread trending"]},
+        "apewisdom": {"direction": "POSITIVE", "confidence": 0.5, "key_items": ["high engagement on 4chan"]},
         "overall_direction": "BULLISH",
         "divergences": [],
         "narratives": ["AI momentum"],
@@ -50,10 +51,11 @@ def _sample_llm_payload(**overrides):
 _DEFAULT_NEWS_BLOCK = "### Q2 beat estimates (source: Reuters)\nStrong quarter\n\n"
 _DEFAULT_STOCKTWITS_BLOCK = "Bullish: 14 (70%) · Bearish: 4 (20%) · Unlabeled: 2 · Total: 20 most-recent messages"
 _DEFAULT_REDDIT_BLOCK = "r/stocks — 1 recent posts mentioning AAPL:\n  [2026-07-08 ·  100↑ ·   20c] Great quarter\n"
+_DEFAULT_APEWISDOM_BLOCK = "ApeWisdom (Reddit + 4chan /biz aggregate): 50 mentions, 320 upvotes"
 
 
-def _patch_fetchers(news_block=None, stocktwits_block=None, reddit_block=None):
-    """Patch the three data fetchers. Pass an explicit `""` to simulate an
+def _patch_fetchers(news_block=None, stocktwits_block=None, reddit_block=None, apewisdom_block=None):
+    """Patch the four data fetchers. Pass an explicit `""` to simulate an
     empty/unavailable block — only omitted (`None`) args get the default."""
     return (
         patch(
@@ -67,6 +69,10 @@ def _patch_fetchers(news_block=None, stocktwits_block=None, reddit_block=None):
         patch(
             "tradingagents.agents.analysts.sentiment_analyst.fetch_reddit_posts",
             return_value=_DEFAULT_REDDIT_BLOCK if reddit_block is None else reddit_block,
+        ),
+        patch(
+            "tradingagents.agents.analysts.sentiment_analyst.fetch_apewisdom_mentions",
+            return_value=_DEFAULT_APEWISDOM_BLOCK if apewisdom_block is None else apewisdom_block,
         ),
     )
 
@@ -148,8 +154,8 @@ def _make_llm(main_content, summary_content="Bullish retail chatter and steady n
 class TestSentimentAnalystJsonEnvelope:
     def test_sentiment_report_is_json_string(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -159,8 +165,8 @@ class TestSentimentAnalystJsonEnvelope:
 
     def test_envelope_has_required_fields(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -175,8 +181,8 @@ class TestSentimentAnalystJsonEnvelope:
 
     def test_details_sources_have_python_computed_counts(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -186,24 +192,26 @@ class TestSentimentAnalystJsonEnvelope:
         assert details["sources"]["stocktwits"]["bullish"] == 14
         assert details["sources"]["reddit"]["post_count"] == 1
         assert details["sources"]["reddit"]["top_engagement"] == {"score": 100, "comments": 20}
+        assert details["sources"]["apewisdom"]["mention_count"] == 50
+        assert details["sources"]["apewisdom"]["upvote_count"] == 320
 
     def test_signal_and_confidence_derived_from_llm_directions(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
         envelope = json.loads(result["sentiment_report"])
-        # news NEUTRAL(0.4) + stocktwits POSITIVE(0.6) + reddit POSITIVE(0.3):
-        # s = (0*0.4 + 1*0.6 + 1*0.3) / (0.4+0.6+0.3) = 0.9/1.3 ~ 0.69 -> BUY
+        # news NEUTRAL(0.4) + stocktwits POSITIVE(0.6) + reddit POSITIVE(0.3) + apewisdom POSITIVE(0.5):
+        # s = (0*0.4 + 1*0.6 + 1*0.3 + 1*0.5) / (0.4+0.6+0.3+0.5) = 1.4/1.8 ~ 0.78 -> BUY
         assert envelope["signal"] == "BUY"
         assert envelope["confidence"] in ("MEDIUM", "HIGH", "LOW")
 
     def test_messages_cleared_after_processing(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -213,8 +221,8 @@ class TestSentimentAnalystJsonEnvelope:
         llm = _make_llm(
             json.dumps(_sample_llm_payload()), summary_content="Custom one-line summary"
         )
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -225,8 +233,8 @@ class TestSentimentAnalystJsonEnvelope:
 class TestSentimentAnalystGracefulDegradation:
     def test_llm_json_parse_failure_falls_back_without_crashing(self):
         llm = _make_llm("This is not valid JSON at all")
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -239,6 +247,7 @@ class TestSentimentAnalystGracefulDegradation:
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["direction"] is None
+        assert details["sources"]["apewisdom"]["direction"] is None
 
     def test_llm_schema_validation_failure_falls_back(self):
         """Valid JSON, but the wrong shape (e.g. bad enum) fails pydantic
@@ -246,8 +255,8 @@ class TestSentimentAnalystGracefulDegradation:
         bad_payload = _sample_llm_payload()
         bad_payload["overall_direction"] = "SUPER_BULLISH"  # not a valid enum
         llm = _make_llm(json.dumps(bad_payload))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -256,15 +265,16 @@ class TestSentimentAnalystGracefulDegradation:
         assert envelope["confidence"] is None
 
     def test_all_sources_unavailable_still_writes_envelope(self):
-        """Edge case: all three sources unavailable -> envelope still
+        """Edge case: all four sources unavailable -> envelope still
         written, signal/confidence null, caveats populated."""
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers(
+        p1, p2, p3, p4 = _patch_fetchers(
             news_block="Error fetching news for AAPL: timeout",
             stocktwits_block="<stocktwits unavailable: HTTPError>",
             reddit_block="",
+            apewisdom_block="<apewisdom unavailable: non-US listing (exchange suffix detected)>",
         )
-        with p1, p2, p3:
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -273,28 +283,30 @@ class TestSentimentAnalystGracefulDegradation:
         assert envelope["confidence"] is None
         details = envelope["details"]
         assert details["data_quality"]["sources_available"] == 0
-        assert len(details["data_quality"]["caveats"]) == 3
+        assert len(details["data_quality"]["caveats"]) == 4
         # LLM-provided directions for unavailable sources must not leak through.
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["direction"] is None
+        assert details["sources"]["apewisdom"]["direction"] is None
 
     def test_valid_structured_response_populates_directions(self):
         """AC1: a valid structured response populates per-source directions
         and yields a non-null signal via the recovery ladder."""
         payload = _sample_llm_payload()
         llm = _make_llm(json.dumps(payload))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4:
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
         envelope = json.loads(result["sentiment_report"])
-        # All three sources should have directions from the LLM
+        # All four sources should have directions from the LLM
         details = envelope["details"]
         assert details["sources"]["news"]["direction"] == "NEUTRAL"
         assert details["sources"]["stocktwits"]["direction"] == "POSITIVE"
         assert details["sources"]["reddit"]["direction"] == "POSITIVE"
+        assert details["sources"]["apewisdom"]["direction"] == "POSITIVE"
         assert details["overall_direction"] == "BULLISH"
         # Signal should be non-null since we have directions
         assert envelope["signal"] == "BUY"
@@ -314,9 +326,9 @@ class TestSentimentAnalystGracefulDegradation:
 
 This covers the key drivers."""
         llm = _make_llm(llm_response)
-        p1, p2, p3 = _patch_fetchers()
+        p1, p2, p3, p4 = _patch_fetchers()
 
-        with p1, p2, p3, caplog.at_level(logging.WARNING):
+        with p1, p2, p3, p4, caplog.at_level(logging.WARNING):
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -338,9 +350,9 @@ This covers the key drivers."""
         # Completely invalid JSON that can't be recovered
         llm_response = "This is random prose that doesn't contain any JSON at all"
         llm = _make_llm(llm_response)
-        p1, p2, p3 = _patch_fetchers()
+        p1, p2, p3, p4 = _patch_fetchers()
 
-        with p1, p2, p3, caplog.at_level(logging.WARNING):
+        with p1, p2, p3, p4, caplog.at_level(logging.WARNING):
             node = create_sentiment_analyst(llm)
             result = node(_make_state())
 
@@ -351,6 +363,7 @@ This covers the key drivers."""
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["direction"] is None
+        assert details["sources"]["apewisdom"]["direction"] is None
         # Signal should be None since no directions were found
         assert envelope["signal"] is None
         assert envelope["confidence"] is None
@@ -384,8 +397,8 @@ This covers the key drivers."""
         # simulating a provider outage hitting both rungs of the ladder.
         llm.invoke = MagicMock(side_effect=RuntimeError("provider outage"))
 
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3, caplog.at_level(logging.WARNING):
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4, caplog.at_level(logging.WARNING):
             node = create_sentiment_analyst(llm)
             # Must not raise -- the node has to swallow the double failure and
             # still return a valid envelope with null directions.
@@ -399,6 +412,7 @@ This covers the key drivers."""
         assert details["sources"]["news"]["direction"] is None
         assert details["sources"]["stocktwits"]["direction"] is None
         assert details["sources"]["reddit"]["direction"] is None
+        assert details["sources"]["apewisdom"]["direction"] is None
         # Python-computed counts are still present even though the LLM path
         # failed entirely.
         assert details["sources"]["news"]["headline_count"] == 1
@@ -413,8 +427,8 @@ This covers the key drivers."""
 class TestSocialMediaAnalystDeprecationShim:
     def test_shim_still_works_and_warns(self):
         llm = _make_llm(json.dumps(_sample_llm_payload()))
-        p1, p2, p3 = _patch_fetchers()
-        with p1, p2, p3, warnings.catch_warnings(record=True) as caught:
+        p1, p2, p3, p4 = _patch_fetchers()
+        with p1, p2, p3, p4, warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             node = create_social_media_analyst(llm)
             result = node(_make_state())

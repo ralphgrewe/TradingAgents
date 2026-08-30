@@ -47,6 +47,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
 )
 from tradingagents.agents.utils.structured import run_structured_with_tools
+from tradingagents.dataflows.apewisdom import fetch_apewisdom_mentions
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
@@ -72,16 +73,17 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = build_instrument_context(ticker)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
+        # Pre-fetch all four sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
         news_block = get_news.func(ticker, start_date, end_date)
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
+        apewisdom_block = fetch_apewisdom_mentions(ticker)
 
         # Step 1: Python-side count/availability computation from the
         # already-fetched blocks (never trust the LLM to count).
-        sources_skeleton = build_sources_skeleton(news_block, stocktwits_block, reddit_block)
+        sources_skeleton = build_sources_skeleton(news_block, stocktwits_block, reddit_block, apewisdom_block)
 
         # Default fallback details: Python-computed counts, null directions.
         # Used verbatim if the LLM call/parse/validation fails below.
@@ -94,6 +96,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            apewisdom_block=apewisdom_block,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -202,7 +205,7 @@ def _write_summary(llm, state, ticker, signal, confidence, details) -> str:
     sources_available = details.get("data_quality", {}).get("sources_available", 0)
 
     fallback_summary = (
-        f"Sentiment read from {sources_available} of 3 sources"
+        f"Sentiment read from {sources_available} of 4 sources"
         + (f"; overall direction {overall_direction}" if overall_direction else "")
         + (f" ({'; '.join(caveats)})" if caveats else "")
     )
@@ -213,7 +216,7 @@ def _write_summary(llm, state, ticker, signal, confidence, details) -> str:
     summary_system = f"""Write a single-line summary of the sentiment analysis for {ticker}:
 - Signal: {signal}, confidence: {confidence}
 - Overall direction: {overall_direction}
-- Sources available: {sources_available} of 3
+- Sources available: {sources_available} of 4
 - Data quality caveats: {caveats}
 
 Example: "Retail chatter and Reddit engagement lean bullish despite muted news coverage — cautious BUY"
@@ -246,9 +249,10 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    apewisdom_block: str,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to analyze sentiment for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""You are a financial market sentiment analyst. Your task is to analyze sentiment for {ticker} covering the period from {start_date} to {end_date}, drawing on four complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
@@ -273,6 +277,13 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 {reddit_block}
 <end_of_reddit>
 
+### ApeWisdom mentions — Reddit + 4chan /biz aggregate engagement (US-listed tickers only)
+Retail engagement metrics aggregated across ~12 subreddits plus 4chan /biz, covering mention counts and upvotes. US listings only; non-US tickers return no data. Complements StockTwits' user-labeled sentiment with raw engagement volume.
+
+<start_of_apewisdom>
+{apewisdom_block}
+<end_of_apewisdom>
+
 ## How to analyze this data (best practices)
 
 1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
@@ -281,15 +292,17 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread reflects community attention; a 3-upvote post is noise. Read the body excerpts for context — the title alone often misleads.
 
-4. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; a StockTwits post ("buying NVDA, this is going to moon") is opinion. Both are inputs but should be weighted differently in your conclusions.
+4. **Weight ApeWisdom mentions by volume.** High mention counts (100+) across Reddit + 4chan /biz indicate sustained retail attention; low counts (0–20) suggest minimal engagement. Compare ApeWisdom volume to StockTwits message count — a ticker may have high StockTwits sentiment ratio but low ApeWisdom volume (boutique discussion), or vice versa (high volume, low sentiment polarization). Remember that ApeWisdom includes 4chan /biz, which has a distinct character (often contrarian, high conviction).
 
-5. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
+5. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; a StockTwits post ("buying NVDA, this is going to moon") is opinion. Both are inputs but should be weighted differently in your conclusions.
 
-6. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder / empty result, set that source's direction and confidence to null — do not guess. If the sources are silent on a given subreddit, say so via divergences/narratives rather than fabricating a read.
+6. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
 
-7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
+7. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder / empty result, set that source's direction and confidence to null — do not guess. If the sources are silent on a given subreddit, say so via divergences/narratives rather than fabricating a read.
 
-8. **Past sentiment is not predictive.** Your read is signal for the trader to weigh alongside fundamentals and technicals, not a price call.
+8. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
+
+9. **Past sentiment is not predictive.** Your read is signal for the trader to weigh alongside fundamentals and technicals, not a price call.
 
 ## Output
 
@@ -298,6 +311,7 @@ Return ONLY a valid JSON object matching this structure (no markdown, no prose, 
   "news": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
   "stocktwits": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
   "reddit": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
+  "apewisdom": {{"direction": "POSITIVE|NEUTRAL|NEGATIVE or null", "confidence": <0.0-1.0 or null>, "key_items": ["<=120 chars", ...] (up to 3)}},
   "overall_direction": "BULLISH|BEARISH|NEUTRAL|MIXED",
   "divergences": ["<=160 chars", ...] (up to 3),
   "narratives": ["...", ...] (up to 3),

@@ -58,7 +58,7 @@ class SourceAssessment(BaseModel):
 class SentimentAnalystOutput(BaseModel):
     """Structured output from the sentiment analyst LLM.
 
-    The LLM reads the three pre-fetched data blocks and provides a
+    The LLM reads the four pre-fetched data blocks and provides a
     directional read + short evidence per source, plus a cross-source
     synthesis (overall direction, divergences, narratives, catalysts,
     risks). It does not compute any counts — those are Python-derived
@@ -68,6 +68,7 @@ class SentimentAnalystOutput(BaseModel):
     news: SourceAssessment
     stocktwits: SourceAssessment
     reddit: SourceAssessment
+    apewisdom: SourceAssessment
     overall_direction: str = Field(pattern="^(BULLISH|BEARISH|NEUTRAL|MIXED)$")
     divergences: list[str] = Field(default_factory=list, max_length=3)
     narratives: list[str] = Field(default_factory=list, max_length=3)
@@ -197,13 +198,68 @@ def compute_reddit_counts(block: str) -> dict:
     return {"available": True, "post_count": post_count, "top_engagement": top_engagement, "reason": None}
 
 
-def build_sources_skeleton(news_block: str, stocktwits_block: str, reddit_block: str) -> dict:
+_APEWISDOM_UNAVAILABLE_RE = re.compile(r"^<apewisdom unavailable:\s*(.+?)>")
+
+
+def compute_apewisdom_counts(block: str) -> dict:
+    """Parse the pre-fetched ApeWisdom block into
+    ``{available, mention_count, upvote_count, rank_24h_ago, reason}``.
+
+    ApeWisdom aggregates Reddit + 4chan /biz engagement metrics (mentions,
+    upvotes) for US-listed tickers. Non-US tickers return an unavailable
+    placeholder with a reason naming the coverage limit. A ticker present in
+    ApeWisdom but with zero mentions is available with zero, distinct from
+    unavailable (which uses a placeholder).
+    """
+    stripped = (block or "").strip()
+    empty = {"available": False, "mention_count": 0, "upvote_count": 0, "rank_24h_ago": None}
+    if not stripped:
+        return {**empty, "reason": "empty response"}
+
+    unavailable = _APEWISDOM_UNAVAILABLE_RE.match(stripped)
+    if unavailable:
+        return {**empty, "reason": unavailable.group(1)}
+    if stripped.startswith("<no ApeWisdom mentions found"):
+        return {**empty, "available": True, "reason": None}
+
+    # Parse the summary line: "ApeWisdom (Reddit + 4chan /biz aggregate): N mentions, M upvotes, rank 24h ago: #K"
+    # Format may vary slightly; extract numbers pragmatically.
+    mention_count = 0
+    upvote_count = 0
+    rank_24h_ago = None
+
+    # Extract mention count
+    mention_match = re.search(r"(\d+)\s+mentions?", stripped)
+    if mention_match:
+        mention_count = int(mention_match.group(1))
+
+    # Extract upvote count
+    upvote_match = re.search(r"(\d+)\s+upvotes?", stripped)
+    if upvote_match:
+        upvote_count = int(upvote_match.group(1))
+
+    # Extract rank (optional, may be absent for new tickers)
+    rank_match = re.search(r"rank\s+24h\s+ago:\s*#(\d+)", stripped)
+    if rank_match:
+        rank_24h_ago = int(rank_match.group(1))
+
+    return {
+        "available": True,
+        "mention_count": mention_count,
+        "upvote_count": upvote_count,
+        "rank_24h_ago": rank_24h_ago,
+        "reason": None,
+    }
+
+
+def build_sources_skeleton(news_block: str, stocktwits_block: str, reddit_block: str, apewisdom_block: str) -> dict:
     """Build the Python-computed portion of ``details.sources`` (counts/
     availability, direction/confidence/key_items left null pending the LLM).
     """
     news_counts = compute_news_counts(news_block)
     stocktwits_counts = compute_stocktwits_counts(stocktwits_block)
     reddit_counts = compute_reddit_counts(reddit_block)
+    apewisdom_counts = compute_apewisdom_counts(apewisdom_block)
 
     return {
         "news": {
@@ -234,10 +290,20 @@ def build_sources_skeleton(news_block: str, stocktwits_block: str, reddit_block:
             "key_items": [],
             "_reason": reddit_counts["reason"],
         },
+        "apewisdom": {
+            "available": apewisdom_counts["available"],
+            "mention_count": apewisdom_counts["mention_count"],
+            "upvote_count": apewisdom_counts["upvote_count"],
+            "rank_24h_ago": apewisdom_counts["rank_24h_ago"],
+            "direction": None,
+            "confidence": None,
+            "key_items": [],
+            "_reason": apewisdom_counts["reason"],
+        },
     }
 
 
-_SOURCE_LABELS = {"news": "News", "stocktwits": "StockTwits", "reddit": "Reddit"}
+_SOURCE_LABELS = {"news": "News", "stocktwits": "StockTwits", "reddit": "Reddit", "apewisdom": "ApeWisdom"}
 
 
 def build_details(
@@ -256,7 +322,7 @@ def build_details(
     sources = {name: {k: v for k, v in fields.items() if k != "_reason"} for name, fields in sources_skeleton.items()}
 
     if llm_output is not None:
-        for name in ("news", "stocktwits", "reddit"):
+        for name in ("news", "stocktwits", "reddit", "apewisdom"):
             source = sources[name]
             if not source["available"]:
                 continue
