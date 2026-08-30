@@ -68,6 +68,18 @@ class SentimentAnalystOutput(BaseModel):
     news: SourceAssessment
     stocktwits: SourceAssessment
     reddit: SourceAssessment
+    # Required, not `SourceAssessment | None` (issue #167 schema-optionality
+    # decision): the LLM always sees an `apewisdom` block in the prompt (a
+    # real read or an "<apewisdom unavailable: ...>" placeholder -- the
+    # fetcher never omits the section), so it can always answer with
+    # direction=None/confidence=None for that case, matching how the other
+    # three sources already handle unavailability. Making the field
+    # optional on the schema would let the LLM omit it silently instead of
+    # making that null-vs-absent distinction explicit. Older 3-source
+    # envelopes stored before this issue are unaffected: they are stored
+    # JSON (already-serialized `details` dicts), not re-validated against
+    # this schema, which only shapes the current LLM call's structured
+    # output.
     apewisdom: SourceAssessment
     overall_direction: str = Field(pattern="^(BULLISH|BEARISH|NEUTRAL|MIXED)$")
     divergences: list[str] = Field(default_factory=list, max_length=3)

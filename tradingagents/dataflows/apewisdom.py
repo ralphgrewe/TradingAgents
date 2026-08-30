@@ -1,22 +1,59 @@
 """ApeWisdom public API fetcher for retail/4chan engagement metrics.
 
 ApeWisdom (https://apewisdom.io/api/) exposes aggregated Reddit + 4chan /biz
-engagement metrics — mentions, upvotes, and rank — for US-listed tickers. No
-API key required; keyless endpoint verified as of 2026-08-30. Coverage is
-US-only (~763 tickers across 8 pages); exchange-suffixed symbols (e.g.
-ALFEN.AS) have zero coverage and short-circuit to the unavailable placeholder
-with a reason naming the coverage limit, consistent with the architectural
-note in issue #158.
+engagement metrics -- mentions, upvotes, and rank -- for US-listed tickers.
+No API key required.
 
-The function is deliberately self-contained: short timeout, graceful
-degradation on any HTTP or parse failure, US-only coverage check at the point
-of use (symbol_utils.py, consistent with the rest of the repo — normalization
-never happens at storage time), and a string return type so the calling agent
-gets a uniform interface regardless of whether the network call succeeded.
+Endpoint and request-budget strategy (issue #167, fixed in design review of
+commit 7304291): the original implementation requested
+``https://www.apewisdom.io/api/filter/gme_dd/{ticker}``, which returns HTTP
+200 but serves the site's HTML homepage (``content-type: text/html``), not
+JSON -- confirmed live with ``curl``, it never returned real data for any
+ticker. There is no per-ticker filter endpoint. The real, working API is
+paginated-list-only:
 
-Each request fetches a single ticker. The endpoint is paginated (8 pages for
-the full list), but per-ticker queries are more efficient and do not require
-caching across trades.
+    https://apewisdom.io/api/v1.0/filter/all-stocks/page/{n}
+
+returning ``{"count", "pages", "current_page", "results": [{"ticker",
+"mentions", "upvotes", "rank_24h_ago", ...}, ...]}`` -- verified live
+2026-08-30, 707-763 tickers across 8 pages. Since there is no per-ticker
+query, this module implements the second of issue #167's two explicitly
+allowed strategies: fetch the full list once, build a
+``{ticker: {mentions, upvotes, rank_24h_ago}}`` lookup, and cache it
+in-process (module-level, thread-safe) so a batch run over many tickers
+issues a bounded number of requests total (~8, the page count) rather than
+8 per ticker. ``_MAX_PAGES`` is a hard safety cap independent of whatever
+the API's own ``pages`` field reports, and a page that fails to fetch is
+skipped rather than aborting the whole snapshot -- a partial snapshot
+(missing the long tail of low-mention tickers on the last page or two) is
+still useful.
+
+Date interaction: ApeWisdom has no historical query and no per-trade-date
+dimension server-side -- every page always reflects "now". This module
+therefore does NOT key the cache by ``trade_date``: doing so would not
+produce more accurate historical data (none exists), only a redundant
+identical refetch per date. A historical ``trade_date`` run still receives
+today's live snapshot; callers should treat the ApeWisdom read as "current
+retail engagement," not a value specific to the analyzed date -- similar in
+spirit to how the researcher stage's live web search only runs when
+``trade_date == today`` (see CLAUDE.md), except ApeWisdom offers no
+equivalent gate to fall back on, so the limitation is simply documented
+here rather than faked. To keep a long-lived process (e.g. the MCP server,
+which can stay up across days of unrelated runs) from serving indefinitely
+stale data, the cache also carries a TTL (``_CACHE_TTL_SECONDS``); this is
+a staleness bound, not a per-date cache key.
+
+US-only coverage is handled explicitly: exchange-suffixed symbols (e.g.
+``ALFEN.AS``, ``SAP.DE``) have zero coverage on ApeWisdom and short-circuit
+to the unavailable placeholder with a reason naming the coverage limit,
+via ``tradingagents.dataflows.symbol_utils.has_non_us_exchange_suffix`` --
+consistent with the rest of the repo, which does symbol handling at the
+point of use rather than duplicating a suffix table locally.
+
+The public function is deliberately self-contained: short timeout,
+graceful degradation on any HTTP or parse failure, and a string return type
+so the calling agent gets a uniform interface regardless of whether the
+network call succeeded -- returns a string, never raises.
 """
 
 from __future__ import annotations
@@ -24,75 +61,36 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import threading
+import time
 from urllib.request import Request, urlopen
+
+from tradingagents.dataflows.symbol_utils import has_non_us_exchange_suffix
 
 logger = logging.getLogger(__name__)
 
-_API = "https://www.apewisdom.io/api/filter/gme_dd/{ticker}"
+_LIST_API = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/{page}"
 _UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 
+# Hard cap on pages fetched per snapshot, independent of what the API's own
+# "pages" field reports (currently 8) -- defends against a runaway loop if
+# the field is malformed or the site's universe grows unexpectedly.
+_MAX_PAGES = 20
 
-def _has_exchange_suffix(ticker: str) -> bool:
-    """True if ticker carries an exchange suffix (e.g., ALFEN.AS, ACHR.DE).
+# How long a fetched snapshot is served before the next call triggers a
+# refetch. ApeWisdom has no date dimension to key on (see module docstring);
+# this is a simple staleness bound for long-lived processes, not a
+# per-trade-date cache.
+_CACHE_TTL_SECONDS = 3600.0
 
-    Exchange suffixes indicate non-US listings that are not covered by ApeWisdom.
-    """
-    if "." not in ticker:
-        return False
-    # Check for common European and international exchange suffixes.
-    # Format is usually TICKER.EXCH (e.g., ALFEN.AS, ASML.AS, SAP.DE, NOKIA.HE).
-    parts = ticker.rsplit(".", 1)
-    if len(parts) == 2:
-        suffix = parts[1].upper()
-        # Common exchange suffixes for non-US markets.
-        non_us_suffixes = {
-            "AS",   # Amsterdam Stock Exchange
-            "DE",   # Deutsche Börse (Frankfurt)
-            "T",    # Tokyo Stock Exchange
-            "AX",   # Australian Securities Exchange
-            "PA",   # Euronext Paris
-            "BA",   # Bolsa de Madrid
-            "BR",   # Brussels Stock Exchange
-            "DB",   # Borsa Italiana (Milan)
-            "SW",   # SIX Swiss Exchange
-            "TA",   # Tel Aviv Stock Exchange
-            "L",    # London Stock Exchange (LSE)
-            "HK",   # Hong Kong Stock Exchange
-            "SG",   # Singapore Exchange
-            "NZ",   # NZX (New Zealand)
-            "TO",   # Toronto Stock Exchange
-            "V",    # TSX Venture Exchange
-            "HE",   # Helsinki Stock Exchange
-            "CO",   # Copenhagen Stock Exchange
-            "OL",   # Oslo Stock Exchange
-            "ST",   # Stockholm Stock Exchange
-            "VX",   # SIX Swiss Exchange (Virt-X)
-            "MC",   # Euronext Brussels
-            "WR",   # Warsaw Stock Exchange
-            "PR",   # Prague Stock Exchange
-        }
-        return suffix in non_us_suffixes
-    return False
+_cache_lock = threading.Lock()
+_cache: dict[str, dict] | None = None
+_cache_fetched_at: float = 0.0
 
 
-def fetch_apewisdom_mentions(ticker: str, timeout: float = 10.0) -> str:
-    """Fetch retail/4chan engagement metrics for ``ticker`` from ApeWisdom.
-
-    Returns a placeholder string when the endpoint is unreachable, the
-    symbol has no mentions, the ticker is non-US (exchange-suffixed), or the
-    response shape is unexpected — the caller never has to special-case None
-    or exceptions.
-
-    ApeWisdom aggregates discussions from ~12 subreddits plus 4chan /biz,
-    returning mention counts and upvotes. Coverage is US-only; non-US tickers
-    (those carrying exchange suffixes like .AS, .DE, .T) are detected and
-    return an unavailable placeholder without issuing a network request.
-    """
-    # Check for exchange suffix (non-US listing) before issuing a request.
-    if _has_exchange_suffix(ticker):
-        return "<apewisdom unavailable: non-US listing (exchange suffix detected)>"
-
-    url = _API.format(ticker=ticker.upper())
+def _fetch_page(page: int, timeout: float) -> dict | None:
+    """Fetch one page of the all-stocks list. Returns None on any failure."""
+    url = _LIST_API.format(page=page)
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -100,43 +98,137 @@ def fetch_apewisdom_mentions(ticker: str, timeout: float = 10.0) -> str:
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
-        logger.warning("ApeWisdom fetch failed for %s: %s", ticker, exc)
-        return f"<apewisdom unavailable: {type(exc).__name__}>"
+        logger.warning("ApeWisdom page %d fetch failed: %s", page, exc)
+        return None
+    if not isinstance(data, dict):
+        logger.warning("ApeWisdom page %d: unexpected response shape (not an object)", page)
+        return None
+    return data
 
-    # ApeWisdom returns a list of objects. Parse the aggregated counts.
-    if not isinstance(data, list):
-        logger.warning("ApeWisdom: unexpected response shape for %s (not a list)", ticker)
-        return "<apewisdom unavailable: unexpected response shape>"
 
-    if not data:
-        # Empty list: ticker not in ApeWisdom's database (non-US or not tracked).
-        return f"<no ApeWisdom mentions found for ${ticker.upper()}>"
-
-    # Aggregate mentions and upvotes from all entries (typically there's one,
-    # but the endpoint structure allows for multiple).
-    total_mentions = 0
-    total_upvotes = 0
-    rank_24h_ago = None
-
-    for item in data:
+def _merge_results(lookup: dict[str, dict], results) -> None:
+    """Merge one page's ``results`` list into the running ticker lookup."""
+    if not isinstance(results, list):
+        return
+    for item in results:
         if not isinstance(item, dict):
             continue
-        # Extract counts; rank_24h_ago may be absent or null for new tickers.
-        total_mentions += item.get("mentions", 0) or 0
-        total_upvotes += item.get("upvotes", 0) or 0
-        # Capture rank_24h_ago from the first item that has it (usually present).
-        if rank_24h_ago is None and item.get("rank_24h_ago") is not None:
-            rank_24h_ago = item.get("rank_24h_ago")
+        ticker = item.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            continue
+        lookup[ticker.upper()] = {
+            "mentions": item.get("mentions", 0) or 0,
+            "upvotes": item.get("upvotes", 0) or 0,
+            # rank_24h_ago may be absent or null for a newly-appearing
+            # ticker; keep it as None rather than treating it as a parse
+            # failure.
+            "rank_24h_ago": item.get("rank_24h_ago"),
+        }
 
-    if total_mentions == 0:
-        # Ticker is in ApeWisdom but has zero mentions: available with zero,
-        # distinct from unavailable (which uses a placeholder).
-        return f"<no ApeWisdom mentions found for ${ticker.upper()}>"
 
-    # Format the output for injection into the prompt.
-    summary = f"ApeWisdom (Reddit + 4chan /biz aggregate): {total_mentions} mentions"
-    if total_upvotes > 0:
-        summary += f", {total_upvotes} upvotes"
+def _fetch_full_snapshot(timeout: float) -> dict[str, dict] | None:
+    """Fetch every page of the all-stocks list and build a ticker lookup.
+
+    Returns None only if the first page fails -- without it there is no
+    ``pages`` count to iterate and nothing to return. A later page failing
+    is not fatal: the partial snapshot built from the pages that succeeded
+    is returned as-is (see module docstring).
+    """
+    first = _fetch_page(1, timeout)
+    if first is None:
+        return None
+
+    lookup: dict[str, dict] = {}
+    _merge_results(lookup, first.get("results"))
+
+    try:
+        total_pages = int(first.get("pages", 1))
+    except (TypeError, ValueError):
+        total_pages = 1
+    total_pages = max(1, min(total_pages, _MAX_PAGES))
+
+    for page in range(2, total_pages + 1):
+        data = _fetch_page(page, timeout)
+        if data is None:
+            continue
+        _merge_results(lookup, data.get("results"))
+
+    return lookup
+
+
+def _get_snapshot(timeout: float) -> dict[str, dict] | None:
+    """Return the cached ticker snapshot, fetching/refreshing it if stale.
+
+    One full-list fetch (up to ``_MAX_PAGES`` requests) per cache lifetime,
+    shared across every ticker calling this module in the same process --
+    this is what keeps a batch run's request count bounded (~8 requests
+    total, not 8-per-ticker) per issue #167's acceptance criteria.
+    """
+    global _cache, _cache_fetched_at
+    with _cache_lock:
+        now = time.monotonic()
+        if _cache is not None and (now - _cache_fetched_at) < _CACHE_TTL_SECONDS:
+            return _cache
+        snapshot = _fetch_full_snapshot(timeout)
+        if snapshot is None:
+            # Fetch failed entirely (first page unreachable/unparseable);
+            # keep serving whatever stale cache we have (if any) rather
+            # than blanking out every ticker for the rest of the run.
+            return _cache
+        _cache = snapshot
+        _cache_fetched_at = now
+        return _cache
+
+
+def _reset_cache_for_tests() -> None:
+    """Clear the module-level snapshot cache. Test-only; not part of the
+    public API."""
+    global _cache, _cache_fetched_at
+    with _cache_lock:
+        _cache = None
+        _cache_fetched_at = 0.0
+
+
+def fetch_apewisdom_mentions(ticker: str, timeout: float = 10.0) -> str:
+    """Fetch retail/4chan engagement metrics for ``ticker`` from ApeWisdom.
+
+    Returns a placeholder string when the ticker is non-US
+    (exchange-suffixed), the snapshot fetch fails, or the ticker has no
+    mentions in the current snapshot -- the caller never has to
+    special-case None or exceptions.
+
+    ApeWisdom aggregates discussions from ~12 subreddits plus 4chan /biz,
+    returning mention counts and upvotes for US-listed tickers. Coverage is
+    checked via ``symbol_utils.has_non_us_exchange_suffix`` before touching
+    the network; the actual data comes from a process-wide cached snapshot
+    (see module docstring for the pagination/caching strategy).
+    """
+    if has_non_us_exchange_suffix(ticker):
+        return "<apewisdom unavailable: non-US listing (exchange suffix detected)>"
+
+    ticker_u = ticker.upper()
+    snapshot = _get_snapshot(timeout)
+    if snapshot is None:
+        return "<apewisdom unavailable: snapshot fetch failed>"
+
+    entry = snapshot.get(ticker_u)
+    if entry is None:
+        # Not present in the all-stocks list: either genuinely untracked or
+        # below whatever mention floor ApeWisdom applies to the list. The
+        # API never lists a ticker with a $0 count explicitly, so this is
+        # the same "available with zero" outcome as an explicit zero below.
+        return f"<no ApeWisdom mentions found for ${ticker_u}>"
+
+    mentions = entry.get("mentions", 0) or 0
+    upvotes = entry.get("upvotes", 0) or 0
+    rank_24h_ago = entry.get("rank_24h_ago")
+
+    if mentions == 0:
+        return f"<no ApeWisdom mentions found for ${ticker_u}>"
+
+    summary = f"ApeWisdom (Reddit + 4chan /biz aggregate): {mentions} mentions"
+    if upvotes > 0:
+        summary += f", {upvotes} upvotes"
     if rank_24h_ago is not None:
         summary += f", rank 24h ago: #{rank_24h_ago}"
 

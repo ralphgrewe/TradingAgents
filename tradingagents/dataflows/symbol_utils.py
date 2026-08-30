@@ -73,6 +73,44 @@ _ALIASES = {
 _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 
 
+# Exchange suffixes (Yahoo's ``TICKER.EXCH`` convention, e.g. ``ALFEN.AS``,
+# ``SAP.DE``, ``NOKIA.HE``) that mark a ticker as listed on a non-US
+# exchange. This is not a normalize_symbol() input -- Yahoo accepts these
+# suffixes as-is -- it is a coverage classification used by vendors whose
+# data is US-only (e.g. ApeWisdom's Reddit/4chan mention aggregator, issue
+# #167) to short-circuit before issuing a request that would return a
+# spurious miss for a symbol they were never going to cover. Extend by
+# adding rows -- no call site changes required.
+_NON_US_EXCHANGE_SUFFIXES = frozenset(
+    {
+        "AS",   # Amsterdam Stock Exchange
+        "DE",   # Deutsche Börse (Frankfurt)
+        "T",    # Tokyo Stock Exchange
+        "AX",   # Australian Securities Exchange
+        "PA",   # Euronext Paris
+        "BA",   # Bolsa de Madrid
+        "BR",   # Brussels Stock Exchange
+        "DB",   # Borsa Italiana (Milan)
+        "SW",   # SIX Swiss Exchange
+        "TA",   # Tel Aviv Stock Exchange
+        "L",    # London Stock Exchange (LSE)
+        "HK",   # Hong Kong Stock Exchange
+        "SG",   # Singapore Exchange
+        "NZ",   # NZX (New Zealand)
+        "TO",   # Toronto Stock Exchange
+        "V",    # TSX Venture Exchange
+        "HE",   # Helsinki Stock Exchange
+        "CO",   # Copenhagen Stock Exchange
+        "OL",   # Oslo Stock Exchange
+        "ST",   # Stockholm Stock Exchange
+        "VX",   # SIX Swiss Exchange (Virt-X)
+        "MC",   # Euronext Brussels
+        "WR",   # Warsaw Stock Exchange
+        "PR",   # Prague Stock Exchange
+    }
+)
+
+
 # Crypto quote currencies that all map to Yahoo's USD pair. Yahoo lists only
 # ``<BASE>-USD`` (not the USDT/USDC stablecoin pairs), so a broker symbol quoted
 # in any of these resolves to ``-USD`` (#982). Longest first so ``USDT``/``USDC``
@@ -131,6 +169,21 @@ def normalize_symbol(raw: str) -> str:
     if canonical != raw.strip().upper():
         logger.info("Resolved symbol %r to Yahoo symbol %r", raw, canonical)
     return canonical
+
+
+def has_non_us_exchange_suffix(ticker: str) -> bool:
+    """True when ``ticker`` carries a Yahoo-style non-US exchange suffix
+    (``TICKER.EXCH``, e.g. ``ALFEN.AS``, ``SAP.DE``, ``0700.HK``).
+
+    Unlike ``normalize_symbol``, this does not rewrite the symbol -- Yahoo
+    accepts these suffixes as-is -- it only classifies it, for vendors with
+    US-only coverage that need to skip a request they know will miss (see
+    ``_NON_US_EXCHANGE_SUFFIXES`` above for the maintained table).
+    """
+    if not isinstance(ticker, str) or "." not in ticker:
+        return False
+    _, _, suffix = ticker.strip().upper().rpartition(".")
+    return suffix in _NON_US_EXCHANGE_SUFFIXES
 
 
 def is_yahoo_safe(symbol: str) -> bool:

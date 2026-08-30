@@ -11,6 +11,7 @@ import pytest
 
 from tradingagents.dataflows.symbol_utils import (
     NoMarketDataError,
+    has_non_us_exchange_suffix,
     is_non_equity_symbol,
     is_yahoo_safe,
     normalize_symbol,
@@ -124,6 +125,36 @@ class TestIsNonEquitySymbol(unittest.TestCase):
     def test_empty_and_non_string_inputs(self):
         self.assertFalse(is_non_equity_symbol(""))
         self.assertFalse(is_non_equity_symbol(None))
+
+
+@pytest.mark.unit
+class TestHasNonUsExchangeSuffix(unittest.TestCase):
+    def test_non_us_suffixes_detected(self):
+        for sym in ("ALFEN.AS", "SAP.DE", "0700.HK", "NOKIA.HE", "ASML.AS"):
+            self.assertTrue(has_non_us_exchange_suffix(sym))
+
+    def test_lowercase_suffix_detected(self):
+        self.assertTrue(has_non_us_exchange_suffix("sap.de"))
+
+    def test_us_tickers_not_flagged(self):
+        for sym in ("AAPL", "MSFT", "SPCX", "ACHR", "CRWV"):
+            self.assertFalse(has_non_us_exchange_suffix(sym))
+
+    def test_hyphenated_share_class_not_flagged(self):
+        # "." doesn't appear here, but guard against confusing "-" with a
+        # suffix separator.
+        self.assertFalse(has_non_us_exchange_suffix("BRK-B"))
+
+    def test_dotted_share_class_without_suffix_not_flagged(self):
+        # "BRK.B" has a "." but "B" is not a recognized exchange suffix.
+        self.assertFalse(has_non_us_exchange_suffix("BRK.B"))
+
+    def test_empty_and_non_string_inputs(self):
+        self.assertFalse(has_non_us_exchange_suffix(""))
+        self.assertFalse(has_non_us_exchange_suffix(None))
+
+    def test_trailing_dot_no_suffix(self):
+        self.assertFalse(has_non_us_exchange_suffix("AAPL."))
 
 
 @pytest.mark.unit
