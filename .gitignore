@@ -236,3 +236,10 @@ my-reports/
 # Cross-project Claude skills — sourced from a separate skills repo shared
 # across projects, not owned by this repo. Keep locally, never commit.
 .claude/skills/
+
+# Personal local run configs and watchlist — untracked working-tree files,
+# not project source. Previously swept in by a broad `git add` twice
+# (f3d9d1b, 569979c); ignored here so it stops recurring (issue #162 cleanup).
+config-01.json
+config-01-qwen.json
+stocks.json

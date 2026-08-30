@@ -1,8 +1,0 @@
-{
-    "stocks_file": "stocks.json",
-    "llm_provider": "ollama",
-    "deep_think_llm": "ministral-3:8b",
-    "quick_think_llm": "ministral-3:8b",
-    "report_dir": "./reports",
-    "show_summary": true
-}
