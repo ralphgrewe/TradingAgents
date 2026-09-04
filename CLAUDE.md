@@ -490,6 +490,10 @@ num_ctx = min(needed, ollama_num_ctx_max)
   counts, consulted before falling back to the global `ollama_num_ctx_response_headroom` above. Allows
   tuning headroom per agent without recompiling (e.g., to reserve more tokens for agents known to
   produce longer outputs). Unknown agent names are silently ignored, falling back to the global value.
+  The override lookup lives in exactly one place, `OllamaNumCtxDerivation.headroom_for(agent)`, called
+  by both `needed_tokens()` (the num_ctx arithmetic) and `ContextWindowGuardHandler._check` (which
+  needs the resolved headroom only to report it on `PromptContextOverflowError`) so the two can't
+  compute different figures for the same call.
 
 `TradingAgentsGraph._build_ollama_num_ctx_derivation` builds an `OllamaNumCtxDerivation` (in
 `tradingagents/llm_call_log.py`) from these three values plus `quick_think_llm`/`deep_think_llm`, and
@@ -501,7 +505,18 @@ under the `ollama_num_ctx` field, so truncation can be audited after the fact), 
 re-pointed this from `OllamaChatOpenAI._get_request_payload` on the now-removed OpenAI-compatible
 client to `ChatOllama`'s own per-request assembly hook, the equivalent seam since `ChatOllama` has
 no `_get_request_payload`) which actually attaches the derived value to the outgoing request's
-`options.num_ctx`.
+`options.num_ctx`. Unlike the two callback handlers, `_chat_params` has no `metadata` argument to
+read the executing agent's name from directly — `self.quick_thinking_llm`/`self.deep_thinking_llm`
+are each one `NormalizedChatOllama` instance shared across every agent using that thinking tier, so
+the name can't be bound once at construction either. It instead calls
+`langchain_core.runnables.config.ensure_config()`, which returns the same ambient `RunnableConfig`
+(via the `var_child_runnable_config` contextvar LangGraph sets per node via `context.run(...)` before
+invoking a node's callable) that an unconfigured `BaseChatModel.invoke()` call already reads to
+populate the callback handlers' `metadata={"langgraph_node": ...}` in the first place — so this is
+the same signal the callback handlers get, just read a few frames further down the same call stack,
+not a second mechanism. (Issue #170's initial implementation wired the override into the two callback
+handlers but missed this call site, so a configured override changed what was logged/aborted-on but
+not what was actually sent to Ollama; re-dispatched and fixed under the same issue.)
 
 A model with no known context window (fixed or derived) is never checked. When a checked prompt's
 adjusted estimate exceeds the known window/ceiling, the run aborts with `PromptContextOverflowError`

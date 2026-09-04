@@ -39,10 +39,16 @@ import os
 from typing import Any
 
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables.config import ensure_config
 from langchain_ollama import ChatOllama
 
 from tradingagents.dataflows.config import get_config
-from tradingagents.llm_call_log import OllamaNumCtxDerivation, _count_prompt_tokens, _message_text
+from tradingagents.llm_call_log import (
+    OllamaNumCtxDerivation,
+    _count_prompt_tokens,
+    _extract_agent_name,
+    _message_text,
+)
 
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
@@ -92,6 +98,26 @@ class NormalizedChatOllama(ChatOllama):
     (``self._ollama_num_ctx_derivation``) when no explicit ``num_ctx`` was configured --
     see ``OllamaClient.get_llm`` -- so an explicit value and the derivation are never
     both live at once, exactly as before #169.
+
+    ``_chat_params`` has no ``run_manager``/callback ``metadata`` in its own signature
+    (unlike ``ContextWindowGuardHandler``/``LLMCallLogHandler``, which receive it as an
+    explicit callback argument) -- and ``self.quick_thinking_llm``/``self.deep_thinking_llm``
+    are each a single ``NormalizedChatOllama`` instance shared across every agent that
+    uses that thinking tier (see ``TradingAgentsGraph.__init__``), so the agent name can't
+    be bound once at construction time either. Issue #170's per-agent headroom override
+    therefore reads the LangGraph node name the same way ``ensure_config()`` recovers it
+    for an un-configured ``BaseChatModel.invoke()`` call: LangGraph runs each node's
+    callable via ``context.run(...)`` inside ``langgraph._internal._runnable.set_config_context``,
+    which sets ``langchain_core.runnables.config.var_child_runnable_config`` -- an ambient
+    ``contextvars.ContextVar`` that survives through every nested, unconfigured function
+    call made during that node's synchronous execution (including the one several frames
+    below that ends up here). Calling ``ensure_config()`` again from within ``_chat_params``
+    reads that same ambient value, which is exactly how the callback handlers' ``metadata``
+    argument already gets ``{"langgraph_node": ...}`` populated without any agent code
+    threading ``config`` through by hand. This also means concurrent analysts
+    (``analyst_concurrency_limit``) don't race each other here: LangGraph copies the
+    context per node invocation, so each node's ``ensure_config()`` reads see only that
+    node's own metadata.
     """
 
     _ollama_num_ctx_derivation: OllamaNumCtxDerivation | None = None
@@ -112,7 +138,13 @@ class NormalizedChatOllama(ChatOllama):
 
         prompt_text = "".join(_message_text(m) for m in messages)
         token_count, _method = _count_prompt_tokens(prompt_text, self.model, OLLAMA_LLM_TYPE)
-        needed = derivation.needed_tokens(token_count)
+        # issue #170: recover the executing LangGraph node name from the ambient
+        # RunnableConfig (see the class docstring above for why this, rather than an
+        # instance attribute or an explicit kwarg, is the right mechanism here) so a
+        # configured per-agent headroom override actually reaches the outgoing
+        # request -- not just the audit log and the abort check.
+        agent = _extract_agent_name(ensure_config().get("metadata"))
+        needed = derivation.needed_tokens(token_count, agent=agent)
         num_ctx = min(needed, derivation.num_ctx_max)
 
         # super()._chat_params() already built an "options" dict from whichever of

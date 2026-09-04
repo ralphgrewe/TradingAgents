@@ -923,21 +923,33 @@ class OllamaNumCtxDerivation:
         """Whether ``model`` is one of this run's ollama-served models."""
         return model in self.models
 
+    def headroom_for(self, agent: str | None) -> int:
+        """Return the response-token headroom that applies to ``agent`` (issue #170).
+
+        Single source of truth for the override lookup: ``response_headroom_overrides``
+        wins when ``agent`` is truthy and present in it, otherwise the global
+        ``response_headroom`` applies. An unknown agent name is silently ignored (falls
+        back to the global value) rather than raising. ``needed_tokens`` below and
+        ``ContextWindowGuardHandler._check`` (the only two call sites that need the
+        per-agent figure) both call this instead of re-implementing the lookup, so they
+        can't drift apart -- see the class docstring.
+        """
+        if agent and agent in self.response_headroom_overrides:
+            return self.response_headroom_overrides[agent]
+        return self.response_headroom
+
     def needed_tokens(self, prompt_tokens_estimated: int, agent: str | None = None) -> int:
         """Return ``ceil(prompt_tokens_estimated * safety_margin) + headroom``.
 
-        Headroom is looked up per-agent from response_headroom_overrides (issue #170)
-        when an agent name is provided; otherwise the global response_headroom is used.
-        Unknown agent names are silently ignored, falling back to the global value.
+        Headroom is looked up per-agent via ``headroom_for`` (issue #170) when an agent
+        name is provided; otherwise the global ``response_headroom`` is used.
 
         This is the context length a request needs to hold its prompt plus
         room for a response, *before* clamping to ``num_ctx_max`` -- callers
         compare it against ``num_ctx_max`` themselves (to decide whether to
         abort) or clamp it (to decide what to actually send).
         """
-        headroom = self.response_headroom
-        if agent and agent in self.response_headroom_overrides:
-            headroom = self.response_headroom_overrides[agent]
+        headroom = self.headroom_for(agent)
         return math.ceil(prompt_tokens_estimated * self.safety_margin) + headroom
 
 
@@ -1140,11 +1152,6 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
             if needed <= derivation.num_ctx_max:
                 return
 
-            # Determine the actual headroom used (including overrides, issue #170)
-            actual_headroom = derivation.response_headroom
-            if agent and agent in derivation.response_headroom_overrides:
-                actual_headroom = derivation.response_headroom_overrides[agent]
-
             error = PromptContextOverflowError(
                 agent=agent,
                 model=model,
@@ -1152,7 +1159,10 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
                 token_count_method=token_count_method,
                 safety_margin=derivation.safety_margin,
                 ollama_num_ctx_max=derivation.num_ctx_max,
-                ollama_num_ctx_response_headroom=actual_headroom,
+                # issue #170: shares the lookup with needed_tokens() above via
+                # headroom_for() so the reported figure can't drift from what was
+                # actually compared against num_ctx_max.
+                ollama_num_ctx_response_headroom=derivation.headroom_for(agent),
             )
             self._abort(
                 error,
