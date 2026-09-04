@@ -13,6 +13,7 @@ end-of-run summary aggregation.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from pathlib import Path
@@ -32,7 +33,7 @@ from tradingagents.llm_call_log import (
 )
 
 
-def _chat_result(content: str, input_tokens=None, output_tokens=None) -> LLMResult:
+def _chat_result(content: str, input_tokens=None, output_tokens=None, finish_reason=None, done_reason=None) -> LLMResult:
     usage_metadata = None
     if input_tokens is not None or output_tokens is not None:
         usage_metadata = {
@@ -40,8 +41,27 @@ def _chat_result(content: str, input_tokens=None, output_tokens=None) -> LLMResu
             "output_tokens": output_tokens or 0,
             "total_tokens": (input_tokens or 0) + (output_tokens or 0),
         }
-    message = AIMessage(content=content, usage_metadata=usage_metadata)
-    return LLMResult(generations=[[ChatGeneration(message=message)]])
+
+    # Build generation_info for OpenAI-compatible finish_reason
+    generation_info = None
+    if finish_reason is not None:
+        generation_info = {"finish_reason": finish_reason}
+
+    # Build response_metadata for Ollama-native done_reason
+    # Only pass response_metadata if done_reason is provided
+    message_kwargs = {
+        "content": content,
+    }
+    if usage_metadata is not None:
+        message_kwargs["usage_metadata"] = usage_metadata
+    if done_reason is not None:
+        message_kwargs["response_metadata"] = {"done_reason": done_reason}
+
+    message = AIMessage(**message_kwargs)
+    generation = ChatGeneration(message=message)
+    if generation_info is not None:
+        generation.generation_info = generation_info
+    return LLMResult(generations=[[generation]])
 
 
 def test_basic_call_produces_one_jsonl_record(tmp_path):
@@ -1137,3 +1157,171 @@ def test_reading_a_pre_change_record_without_token_count_method_field(tmp_path):
     summary = summarize_records([pre_change_record])
     assert summary["Market Analyst"]["call_count"] == 1
     assert summary["Market Analyst"]["total_prompt_tokens_estimated"] == 100
+
+
+# -- truncation detection (issue #171) -----------------------------------------
+
+
+def test_finish_reason_recorded_in_jsonl_for_openai_shaped_response(tmp_path):
+    """OpenAI-compatible finish_reason is extracted and recorded in JSONL."""
+    from unittest.mock import patch
+
+    # Disable abort to test that the field is recorded (abort test covers the exception path)
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": False}):
+        handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+        run_id = uuid.uuid4()
+
+        handler.on_chat_model_start(
+            {"kwargs": {"model_name": "gpt-4o-mini"}},
+            [[HumanMessage(content="hello")]],
+            run_id=run_id,
+            metadata={"langgraph_node": "Market Analyst"},
+        )
+        handler.on_llm_end(
+            _chat_result("truncated response", input_tokens=100, output_tokens=10, finish_reason="length"),
+            run_id=run_id,
+        )
+
+        record = handler.get_records()[0]
+        assert record["finish_reason"] == "length"
+        assert record["error"] is None
+
+
+def test_done_reason_recorded_in_jsonl_for_ollama_native_response(tmp_path):
+    """Ollama-native done_reason is extracted and recorded in JSONL."""
+    from unittest.mock import patch
+
+    # Disable abort to test that the field is recorded (abort test covers the exception path)
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": False}):
+        handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+        run_id = uuid.uuid4()
+
+        handler.on_chat_model_start(
+            {"kwargs": {"model_name": "ministral-3:3b"}},
+            [[HumanMessage(content="hello")]],
+            run_id=run_id,
+            metadata={"langgraph_node": "Fundamentals Analyst"},
+        )
+        handler.on_llm_end(
+            _chat_result("truncated output", input_tokens=200, output_tokens=150, done_reason="length"),
+            run_id=run_id,
+        )
+
+        record = handler.get_records()[0]
+        assert record["finish_reason"] == "length"
+        assert record["error"] is None
+
+
+def test_normal_stop_finish_reason_recorded(tmp_path):
+    """Normal completion (finish_reason='stop') is recorded."""
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content="query")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Trader"},
+    )
+    handler.on_llm_end(
+        _chat_result("complete response", input_tokens=50, output_tokens=30, finish_reason="stop"),
+        run_id=run_id,
+    )
+
+    record = handler.get_records()[0]
+    assert record["finish_reason"] == "stop"
+    assert record["error"] is None
+
+
+def test_response_with_no_finish_reason_recorded_as_null(tmp_path):
+    """Responses with no finish_reason (provider doesn't report) are recorded as null."""
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "some-model"}},
+        [[HumanMessage(content="prompt")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "News Analyst"},
+    )
+    # No finish_reason or done_reason provided
+    handler.on_llm_end(
+        _chat_result("response text", input_tokens=50, output_tokens=20),
+        run_id=run_id,
+    )
+
+    record = handler.get_records()[0]
+    assert record["finish_reason"] is None
+    assert record["error"] is None
+
+
+def test_truncated_response_abort_enabled_raises_exception(tmp_path):
+    """When truncated_response_abort_enabled=True (default), finish_reason='length' raises."""
+    from unittest.mock import patch
+
+    from tradingagents.llm_call_log import LLMResponseTruncatedError
+
+    # Enable abort (default)
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": True}):
+        handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+        run_id = uuid.uuid4()
+
+        handler.on_chat_model_start(
+            {"kwargs": {"model_name": "gpt-4o-mini"}},
+            [[HumanMessage(content="hello")]],
+            run_id=run_id,
+            metadata={"langgraph_node": "Market Analyst"},
+        )
+
+        with pytest.raises(LLMResponseTruncatedError) as exc_info:
+            handler.on_llm_end(
+                _chat_result("truncated", input_tokens=100, output_tokens=200, finish_reason="length"),
+                run_id=run_id,
+            )
+
+        error = exc_info.value
+        assert error.agent == "Market Analyst"
+        assert error.model == "gpt-4o-mini"
+        assert error.finish_reason == "length"
+        assert error.input_tokens == 100
+        assert error.output_tokens == 200
+
+        # The error should be in JSONL
+        records = handler.get_records()
+        assert len(records) == 1
+        error_record = records[0]
+        assert error_record["finish_reason"] == "length"
+        assert error_record["agent"] == "Market Analyst"
+        assert "LLMResponseTruncatedError" in error_record["error"]
+
+
+def test_truncated_response_abort_disabled_logs_warning(tmp_path, caplog):
+    """When truncated_response_abort_enabled=False, finish_reason='length' logs warning and continues."""
+    from unittest.mock import patch
+
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "ministral-3:3b"}},
+        [[HumanMessage(content="test")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Fundamentals Analyst"},
+    )
+
+    # Should not raise, just log and continue
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": False}), caplog.at_level(logging.WARNING):
+        handler.on_llm_end(
+            _chat_result("incomplete", input_tokens=500, output_tokens=1000, finish_reason="length"),
+            run_id=run_id,
+        )
+
+    # Should have a normal (non-error) record
+    records = handler.get_records()
+    assert len(records) == 1
+    record = records[0]
+    assert record["finish_reason"] == "length"
+    assert record["error"] is None  # Not an error record, just a normal one with truncation logged
+
+    # Should have logged a warning
+    assert any("truncated" in msg.lower() for msg in caplog.text.splitlines())

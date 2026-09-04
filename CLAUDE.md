@@ -527,6 +527,33 @@ server above: `run_trading_agents.py`'s per-ticker `except Exception` already tr
 other run-aborting error (flushes the call log, prints the error, exits) with no code change needed
 for that behavior.
 
+### Truncated response detection (issue #171)
+
+When an LLM response is cut off mid-answer (`finish_reason='length'` or `done_reason='length'`), the
+pipeline detects it and, by default, aborts the ticker — the same fail-fast precedent as
+`PromptContextOverflowError` and `MemoryMCPConnectionError`. Without this, a truncated report from
+an analyst (or any other agent with free-text output) would flow downstream to the researcher, trader,
+and portfolio manager with no indication that the analysis was incomplete, producing a decision built
+on partial information.
+
+- **`truncated_response_abort_enabled`** (env: `TRADINGAGENTS_TRUNCATED_RESPONSE_ABORT_ENABLED`,
+  default `True`): when enabled, the run aborts with `LLMResponseTruncatedError` if any LLM response
+  is detected as truncated. When disabled, the truncation is logged at WARNING level and the run
+  continues — the pre-#171 behavior (not recommended).
+- **`finish_reason` field in `llm_calls.jsonl`** (added by issue #171): every JSONL record now includes
+  a `finish_reason` field carrying the provider's completion-stopping reason (`"stop"`, `"length"`,
+  `"tool_calls"`, etc.) or `null` if the provider doesn't report it. Covers both OpenAI-compatible
+  `finish_reason` and Ollama-native `done_reason` shapes. This field is the key for auditing truncation
+  events after the fact: a record with `finish_reason='length'` and `error=null` is a truncation the
+  abort didn't catch (because abort was disabled); one with `finish_reason='length'` and an error
+  containing `LLMResponseTruncatedError` is one the abort caught and halted for.
+
+The detection runs in the `LLMCallLogHandler.on_llm_end` callback (before the call is logged), so a
+truncated response triggers the abort as part of the normal callback path — no agent-specific wiring
+required. When abort is enabled and truncation is detected, the exception propagates to
+`run_trading_agents.py`'s per-ticker `except Exception` handler like any other run-aborting error
+(flushes the call log, prints the error, exits).
+
 ### Portfolio Manager structured decision requirement (issue #156)
 
 The Portfolio Manager produces decisions via structured output (`PortfolioDecision` schema). When a

@@ -36,6 +36,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OLLAMA_THINK":         "ollama_think",
     "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED": "context_window_check_enabled",
     "TRADINGAGENTS_CONTEXT_WINDOW_SAFETY_MARGIN": "context_window_safety_margin",
+    "TRADINGAGENTS_TRUNCATED_RESPONSE_ABORT_ENABLED": "truncated_response_abort_enabled",
     "TRADINGAGENTS_SWING_TRADER_ENABLED": "swing_trader_enabled",
     "TRADINGAGENTS_SWING_TRADER_MIN_RISK_REWARD": "swing_trader_min_risk_reward",
     "TRADINGAGENTS_SWING_TRADER_MAX_HOLDING_DAYS": "swing_trader_max_holding_days",
@@ -246,6 +247,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # default: config-only (no single env var fits a dict of model names), set
     # programmatically or in a config file.
     "context_window_overrides": {},
+    # Truncated response detection (issue #171): when True (default), abort the
+    # run if an LLM response is detected as truncated (finish_reason='length').
+    # When False, log a warning and continue (pre-#171 behavior). Set via
+    # TRADINGAGENTS_TRUNCATED_RESPONSE_ABORT_ENABLED env var.
+    "truncated_response_abort_enabled": True,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,

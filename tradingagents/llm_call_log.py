@@ -179,6 +179,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import LLMResult
 
+from tradingagents.dataflows.config import get_config
+
 logger = logging.getLogger(__name__)
 
 # chars/4 heuristic for estimating token counts from character counts,
@@ -370,6 +372,42 @@ def _extract_usage(response: LLMResult) -> tuple[int | None, int | None]:
         if usage_metadata:
             return usage_metadata.get("input_tokens"), usage_metadata.get("output_tokens")
     return None, None
+
+
+def _extract_finish_reason(response: LLMResult) -> str | None:
+    """Return the finish_reason or done_reason from the response, else ``None``.
+
+    Covers both OpenAI-compatible (finish_reason: "length") and Ollama-native
+    (done_reason: "length") shapes (issue #171). Returns the finish_reason field
+    if present, or None when absent (provider doesn't report it).
+
+    Attempts to read from:
+    1. ``response.generations[0][0].generation_info["finish_reason"]`` (OpenAI-compatible)
+    2. ``response.generations[0][0].message.response_metadata["done_reason"]`` (Ollama native)
+    3. None if neither is present
+    """
+    try:
+        generation = response.generations[0][0]
+    except (IndexError, TypeError, AttributeError):
+        return None
+
+    # Try OpenAI-compatible shape: generation_info.finish_reason
+    generation_info = getattr(generation, "generation_info", None)
+    if isinstance(generation_info, dict):
+        finish_reason = generation_info.get("finish_reason")
+        if isinstance(finish_reason, str):
+            return finish_reason
+
+    # Try Ollama native shape: message.response_metadata.done_reason
+    message = getattr(generation, "message", None)
+    if isinstance(message, AIMessage):
+        response_metadata = getattr(message, "response_metadata", None)
+        if isinstance(response_metadata, dict):
+            done_reason = response_metadata.get("done_reason")
+            if isinstance(done_reason, str):
+                return done_reason
+
+    return None
 
 
 def _format_error(error: BaseException | Any) -> str:
@@ -613,11 +651,15 @@ class LLMCallLogHandler(BaseCallbackHandler):
         input_tokens: int | None,
         output_tokens: int | None,
         error: str | None,
+        finish_reason: str | None = None,
     ) -> None:
         """Pop the pending start for ``run_id`` and append its completed record.
 
         Shared by ``on_llm_end`` and ``on_llm_error`` so a failed call is
-        bookkept (and logged) exactly like a successful one.
+        bookkept (and logged) exactly like a successful one. ``finish_reason``
+        is extracted from the response (OpenAI-compatible 'finish_reason' or
+        Ollama-native 'done_reason') and recorded for truncation detection
+        (issue #171).
         """
         with self._lock:
             start = self._pending.pop(str(run_id), None)
@@ -666,6 +708,9 @@ class LLMCallLogHandler(BaseCallbackHandler):
             # or None when derivation doesn't apply to this run/model (e.g.
             # non-ollama providers, or an explicit ollama_num_ctx override).
             "ollama_num_ctx": start.get("ollama_num_ctx"),
+            # issue #171: finish_reason from the response (OpenAI-compatible or
+            # Ollama-native), or None if the provider doesn't report it.
+            "finish_reason": finish_reason,
         }
 
         with self._lock:
@@ -685,7 +730,40 @@ class LLMCallLogHandler(BaseCallbackHandler):
         if not self.enabled:
             return
         input_tokens, output_tokens = _extract_usage(response)
-        self._finish(run_id, input_tokens, output_tokens, error=None)
+        finish_reason = _extract_finish_reason(response)
+
+        # Check for truncation (issue #171). Extract the pending start info so
+        # we can report the agent/model in the error.
+        if finish_reason == "length":
+            with self._lock:
+                start = self._pending.get(str(run_id))
+            if start is not None and get_config().get("truncated_response_abort_enabled", True):
+                error = LLMResponseTruncatedError(
+                    agent=start["agent"],
+                    model=start["model"],
+                    finish_reason=finish_reason,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+                self._abort_truncated(
+                    error,
+                    agent=start["agent"],
+                    model=start["model"],
+                    message_count=start["message_count"],
+                    prompt_chars=start["prompt_chars"],
+                    prompt_tokens_estimated=start["token_count"],
+                    token_count_method=start["token_count_method"],
+                )
+            elif start is not None:
+                # Abort is disabled: log warning and continue
+                logger.warning(
+                    "%s (model '%s'): LLM response truncated (finish_reason='length'), "
+                    "input=%s tokens, output=%s tokens. "
+                    "Continuing with truncated response (truncated_response_abort_enabled=False).",
+                    start["agent"], start["model"], input_tokens, output_tokens,
+                )
+
+        self._finish(run_id, input_tokens, output_tokens, error=None, finish_reason=finish_reason)
 
     def on_llm_error(
         self,
@@ -706,6 +784,65 @@ class LLMCallLogHandler(BaseCallbackHandler):
         if not self.enabled:
             return
         self._finish(run_id, input_tokens=None, output_tokens=None, error=_format_error(error))
+
+    # -- truncation detection (issue #171) -----------------------------------
+
+    def _abort_truncated(
+        self,
+        error: LLMResponseTruncatedError,
+        *,
+        agent: str,
+        model: str,
+        message_count: int,
+        prompt_chars: int,
+        prompt_tokens_estimated: int,
+        token_count_method: str,
+    ) -> None:
+        """Write a truncation error record to JSONL then raise ``error``.
+
+        Mirrors ``ContextWindowGuardHandler._abort`` (issue #149) so the
+        truncation abort is auditable in llm_calls.jsonl just like an
+        oversize-prompt abort.
+        """
+        if not self.enabled:
+            raise error
+        try:
+            with self._lock:
+                ticker, date = self._ticker, self._date
+                log_path = self.log_path
+
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "run_id": None,
+                "ticker": ticker,
+                "date": date,
+                "agent": agent,
+                "model": model,
+                "message_count": message_count,
+                "prompt_chars": prompt_chars,
+                "prompt_tokens_estimated": prompt_tokens_estimated,
+                "token_count_method": token_count_method,
+                "input_tokens": error.input_tokens,
+                "output_tokens": error.output_tokens,
+                "duration_seconds": 0.0,
+                "error": _format_error(error),
+                "prompt_dump_path": None,
+                "ollama_num_ctx": None,
+                "finish_reason": error.finish_reason,
+            }
+
+            with self._lock:
+                self._records.append(record)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+        except Exception:
+            logger.warning(
+                "LLMCallLogHandler: failed to write truncation error record to "
+                "llm_calls.jsonl; aborting the run anyway.",
+                exc_info=True,
+            )
+
+        raise error
 
     # -- pre-dispatch abort (issue #149) --------------------------------------
 
@@ -1039,6 +1176,45 @@ class PromptContextOverflowError(RuntimeError):
                 "entirely (not recommended), set "
                 "TRADINGAGENTS_CONTEXT_WINDOW_CHECK_ENABLED=false."
             )
+        super().__init__(message)
+
+
+class LLMResponseTruncatedError(RuntimeError):
+    """Raised when an LLM response is truncated (finish_reason='length').
+
+    Part of issue #171: detect and abort when a response is cut off mid-answer,
+    instead of letting truncated reports flow downstream to later pipeline stages.
+    This is a hard failure, like ``PromptContextOverflowError``: the run aborts
+    with a fail-fast error rather than producing a decision built on incomplete
+    analysis.
+
+    When ``truncated_response_abort_enabled`` is False, the truncation is logged
+    at WARNING level and the run continues (pre-#171 behavior).
+    """
+
+    def __init__(
+        self,
+        *,
+        agent: str,
+        model: str,
+        finish_reason: str,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        self.agent = agent
+        self.model = model
+        self.finish_reason = finish_reason
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+        message = (
+            f"LLM response truncated for agent '{agent}' (model '{model}'): "
+            f"finish_reason='{finish_reason}'. "
+            f"Tokens: input={input_tokens}, output={output_tokens}. "
+            "The run has been aborted instead of using an incomplete analysis "
+            "(issue #171). To disable this check, set "
+            "TRADINGAGENTS_TRUNCATED_RESPONSE_ABORT_ENABLED=false (not recommended)."
+        )
         super().__init__(message)
 
 
