@@ -678,3 +678,176 @@ class TestOllamaThinkMode:
             api_key="placeholder",
         ).get_llm()
         assert getattr(llm, "reasoning", None) is not True
+
+
+# ---------------------------------------------------------------------------
+# 7. Per-agent response-headroom overrides (issue #170)
+# ---------------------------------------------------------------------------
+
+
+class TestPerAgentResponseHeadroomOverrides:
+    def test_new_default_headroom_is_4096(self):
+        """Issue #170: raised from 2048 to 4096."""
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["ollama_num_ctx_response_headroom"] == 4096
+
+    def test_new_overrides_config_key_exists_and_defaults_to_empty_dict(self):
+        """Issue #170: new config key with empty dict default."""
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        assert "ollama_num_ctx_response_headroom_overrides" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["ollama_num_ctx_response_headroom_overrides"] == {}
+
+    def test_needed_tokens_uses_global_headroom_when_agent_not_in_overrides(self):
+        """Override miss: agent not in overrides dict, falls back to global."""
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=1000,  # global headroom
+            safety_margin=1.0,
+            response_headroom_overrides={"Fundamentals Analyst": 5000},
+        )
+        # "Market Analyst" not in overrides, should use global 1000
+        assert derivation.needed_tokens(100, agent="Market Analyst") == 1100
+
+    def test_needed_tokens_uses_override_when_agent_found(self):
+        """Override hit: agent in overrides dict uses the override value."""
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=1000,  # global headroom
+            safety_margin=1.0,
+            response_headroom_overrides={"Fundamentals Analyst": 5000},
+        )
+        # "Fundamentals Analyst" in overrides, should use 5000
+        assert derivation.needed_tokens(100, agent="Fundamentals Analyst") == 5100
+
+    def test_unknown_agent_name_is_silently_ignored(self):
+        """Unknown agent name: ignored silently, falls back to global headroom."""
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=2000,
+            safety_margin=1.0,
+            response_headroom_overrides={"Market Analyst": 3000},
+        )
+        # Nonexistent agent should not raise, just use global
+        result = derivation.needed_tokens(100, agent="Nonexistent Agent")
+        assert result == 2100  # 100 + 2000, using global
+
+    def test_none_agent_uses_global_headroom(self):
+        """When agent is None, uses global headroom regardless of overrides."""
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=1000,
+            safety_margin=1.0,
+            response_headroom_overrides={"Market Analyst": 5000},
+        )
+        # No agent specified: use global even though Market Analyst is in overrides
+        assert derivation.needed_tokens(100, agent=None) == 1100
+
+    def test_overrides_build_from_config(self):
+        """OllamaNumCtxDerivation built from config includes overrides."""
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+        mock_graph = MagicMock()
+        mock_graph.config = {
+            "llm_provider": "ollama",
+            "quick_think_llm": "ministral-3:3b",
+            "deep_think_llm": "ministral-3:8b",
+            "ollama_num_ctx": None,
+            "ollama_num_ctx_max": 32768,
+            "ollama_num_ctx_response_headroom": 4096,
+            "ollama_num_ctx_response_headroom_overrides": {
+                "Fundamentals Analyst": 5000,
+                "Market Analyst": 4500,
+            },
+            "context_window_safety_margin": 1.3,
+        }
+        derivation = TradingAgentsGraph._build_ollama_num_ctx_derivation(mock_graph)
+        assert derivation is not None
+        assert derivation.response_headroom_overrides == {
+            "Fundamentals Analyst": 5000,
+            "Market Analyst": 4500,
+        }
+
+    def test_override_applied_in_guard_handler(self):
+        """ContextWindowGuardHandler uses override when computing needed tokens."""
+        text = "x" * 800  # heuristic: 200 tokens
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"custom-model"}),
+            num_ctx_max=300,
+            response_headroom=50,
+            safety_margin=1.0,
+            response_headroom_overrides={"Portfolio Manager": 150},
+        )
+        handler = ContextWindowGuardHandler(ollama_num_ctx_derivation=derivation)
+
+        # With override, Portfolio Manager needs 200 + 150 = 350 > 300 -> raises
+        with pytest.raises(PromptContextOverflowError) as exc_info:
+            handler.on_chat_model_start(
+                {"kwargs": {"model": "custom-model"}},
+                _messages(text),
+                run_id=uuid.uuid4(),
+                metadata={"langgraph_node": "Portfolio Manager"},
+            )
+        error = exc_info.value
+        assert error.agent == "Portfolio Manager"
+        assert error.response_headroom == 150  # the override
+
+    def test_override_not_applied_for_different_agent(self):
+        """Override for one agent doesn't affect another agent."""
+        text = "x" * 800  # heuristic: 200 tokens
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"custom-model"}),
+            num_ctx_max=300,
+            response_headroom=50,
+            safety_margin=1.0,
+            response_headroom_overrides={"Portfolio Manager": 150},
+        )
+        handler = ContextWindowGuardHandler(ollama_num_ctx_derivation=derivation)
+
+        # Trader uses global headroom, so 200 + 50 = 250 <= 300 -> no raise
+        handler.on_chat_model_start(
+            {"kwargs": {"model": "custom-model"}},
+            _messages(text),
+            run_id=uuid.uuid4(),
+            metadata={"langgraph_node": "Trader"},
+        )
+        # Should not raise
+
+    def test_override_applied_in_log_handler(self, tmp_path):
+        """LLMCallLogHandler uses override when recording num_ctx."""
+        log_path = tmp_path / "llm_calls.jsonl"
+        derivation = OllamaNumCtxDerivation(
+            models=frozenset({"ministral-3:8b"}),
+            num_ctx_max=100_000,
+            response_headroom=100,
+            safety_margin=1.0,
+            response_headroom_overrides={"Portfolio Manager": 1000},
+        )
+        handler = LLMCallLogHandler(log_path, ollama_num_ctx_derivation=derivation)
+        handler.start_run(ticker="AAPL", date="2024-01-15")
+
+        run_id = uuid.uuid4()
+        text = "x" * 400  # heuristic: 100 tokens
+        handler.on_chat_model_start(
+            {"kwargs": {"model": "ministral-3:8b"}},
+            _messages(text),
+            run_id=run_id,
+            metadata={"langgraph_node": "Portfolio Manager"},
+        )
+
+        # Manually end the call
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, LLMResult
+
+        response = LLMResult(generations=[[ChatGeneration(message=AIMessage(content="ok"))]])
+        handler.on_llm_end(response, run_id=run_id)
+
+        records = handler.get_records()
+        assert len(records) == 1
+        # Portfolio Manager override is 1000, so 100 + 1000 = 1100
+        assert records[0]["ollama_num_ctx"] == 1100

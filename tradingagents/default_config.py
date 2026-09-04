@@ -202,11 +202,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # prompt requirement so the model actually has room to write its response
     # -- Ollama's num_ctx bounds prompt + completion together, not just the
     # prompt, so sizing num_ctx to the prompt alone would truncate the
-    # response instead. 2048 comfortably covers the longest response observed
-    # in docs/analysis/prompt-truncation-diagnosis.md (a round-1 Portfolio
-    # Manager reply measured at 1006 tokens) with margin for longer
-    # rounds/models.
-    "ollama_num_ctx_response_headroom": 2048,
+    # response instead. Raised from 2048 to 4096 (issue #170) to comfortably
+    # cover observed analyst outputs (4000+ tokens in #168). This is a
+    # provisional figure pending statistics from runs whose outputs weren't
+    # truncated; once those exist, this value and per-agent overrides below
+    # should be re-tuned based on the empirical distribution.
+    "ollama_num_ctx_response_headroom": 4096,
+    # Per-agent response-headroom overrides (issue #170): a dict mapping agent
+    # names (as they appear in llm_calls.jsonl, e.g. "Market Analyst",
+    # "Portfolio Manager") to response-headroom token counts, consulted before
+    # falling back to the global ollama_num_ctx_response_headroom above.
+    # Allows tuning headroom per agent without recompiling, e.g. to reserve
+    # more tokens for agents known to produce longer outputs.
+    "ollama_num_ctx_response_headroom_overrides": {},
     # Oversize-prompt enforcement (issue #149): before an LLM call is
     # dispatched, ContextWindowGuardHandler (tradingagents/llm_call_log.py)
     # compares the #147 tiktoken/heuristic prompt-size estimate --

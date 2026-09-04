@@ -498,7 +498,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
 
     # -- call-start handlers -------------------------------------------------
 
-    def _derive_ollama_num_ctx(self, model: str, token_count: int) -> int | None:
+    def _derive_ollama_num_ctx(self, model: str, token_count: int, agent: str | None = None) -> int | None:
         """Return the #154-derived ``num_ctx`` for this request, or ``None``.
 
         Purely for audit visibility in the JSONL record below -- this handler
@@ -513,7 +513,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
         derivation = self.ollama_num_ctx_derivation
         if derivation is None or not derivation.applies_to(model):
             return None
-        needed = derivation.needed_tokens(token_count)
+        needed = derivation.needed_tokens(token_count, agent=agent)
         return min(needed, derivation.num_ctx_max)
 
     def _record_start(
@@ -559,16 +559,17 @@ class LLMCallLogHandler(BaseCallbackHandler):
         model = _extract_model_name(serialized, kwargs)
         llm_type = _extract_llm_type(kwargs)
         token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
+        agent = _extract_agent_name(metadata)
         self._record_start(
             run_id,
-            agent=_extract_agent_name(metadata),
+            agent=agent,
             model=model,
             message_count=len(flat_messages),
             prompt_chars=len(prompt_text),
             token_count=token_count,
             token_count_method=token_count_method,
             messages=flat_messages if self.dump_prompts else None,
-            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count),
+            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count, agent=agent),
         )
 
     def on_llm_start(
@@ -591,16 +592,17 @@ class LLMCallLogHandler(BaseCallbackHandler):
         # For legacy on_llm_start, we don't have message objects, just strings.
         # Store them as a simple list if dumping prompts is enabled.
         messages = prompts if self.dump_prompts else None
+        agent = _extract_agent_name(metadata)
         self._record_start(
             run_id,
-            agent=_extract_agent_name(metadata),
+            agent=agent,
             model=model,
             message_count=len(prompts),
             prompt_chars=len(prompt_text),
             token_count=token_count,
             token_count_method=token_count_method,
             messages=messages,
-            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count),
+            ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count, agent=agent),
         )
 
     # -- call-end handlers ----------------------------------------------------
@@ -910,20 +912,33 @@ class OllamaNumCtxDerivation:
     num_ctx_max: int
     response_headroom: int
     safety_margin: float
+    response_headroom_overrides: dict[str, int] = None  # issue #170
+
+    def __post_init__(self):
+        # Convert None to empty dict for response_headroom_overrides
+        if self.response_headroom_overrides is None:
+            object.__setattr__(self, "response_headroom_overrides", {})
 
     def applies_to(self, model: str) -> bool:
         """Whether ``model`` is one of this run's ollama-served models."""
         return model in self.models
 
-    def needed_tokens(self, prompt_tokens_estimated: int) -> int:
-        """Return ``ceil(prompt_tokens_estimated * safety_margin) + response_headroom``.
+    def needed_tokens(self, prompt_tokens_estimated: int, agent: str | None = None) -> int:
+        """Return ``ceil(prompt_tokens_estimated * safety_margin) + headroom``.
+
+        Headroom is looked up per-agent from response_headroom_overrides (issue #170)
+        when an agent name is provided; otherwise the global response_headroom is used.
+        Unknown agent names are silently ignored, falling back to the global value.
 
         This is the context length a request needs to hold its prompt plus
         room for a response, *before* clamping to ``num_ctx_max`` -- callers
         compare it against ``num_ctx_max`` themselves (to decide whether to
         abort) or clamp it (to decide what to actually send).
         """
-        return math.ceil(prompt_tokens_estimated * self.safety_margin) + self.response_headroom
+        headroom = self.response_headroom
+        if agent and agent in self.response_headroom_overrides:
+            headroom = self.response_headroom_overrides[agent]
+        return math.ceil(prompt_tokens_estimated * self.safety_margin) + headroom
 
 
 class PromptContextOverflowError(RuntimeError):
@@ -1121,9 +1136,14 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
             # issue #154: derive num_ctx from this request's own prompt size
             # instead of comparing against a fixed window.
             token_count, token_count_method = _count_prompt_tokens(prompt_text, model, llm_type)
-            needed = derivation.needed_tokens(token_count)
+            needed = derivation.needed_tokens(token_count, agent=agent)
             if needed <= derivation.num_ctx_max:
                 return
+
+            # Determine the actual headroom used (including overrides, issue #170)
+            actual_headroom = derivation.response_headroom
+            if agent and agent in derivation.response_headroom_overrides:
+                actual_headroom = derivation.response_headroom_overrides[agent]
 
             error = PromptContextOverflowError(
                 agent=agent,
@@ -1132,7 +1152,7 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
                 token_count_method=token_count_method,
                 safety_margin=derivation.safety_margin,
                 ollama_num_ctx_max=derivation.num_ctx_max,
-                ollama_num_ctx_response_headroom=derivation.response_headroom,
+                ollama_num_ctx_response_headroom=actual_headroom,
             )
             self._abort(
                 error,

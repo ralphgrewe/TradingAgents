@@ -479,8 +479,17 @@ num_ctx = min(needed, ollama_num_ctx_max)
 - **`ollama_num_ctx_max`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX_MAX`, default `32768`): ceiling on the
   derived value. When a request's `needed` exceeds it, the call is not dispatched.
 - **`ollama_num_ctx_response_headroom`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX_RESPONSE_HEADROOM`,
-  default `2048`): tokens reserved on top of the prompt requirement so the model has room to write its
-  response — Ollama's `num_ctx` bounds prompt + completion together, not just the prompt.
+  default `4096`): tokens reserved on top of the prompt requirement so the model has room to write its
+  response — Ollama's `num_ctx` bounds prompt + completion together, not just the prompt. Raised from
+  2048 to 4096 in issue #170 to comfortably cover observed analyst outputs (4000+ tokens in #168). This
+  is a provisional figure pending statistics from runs whose outputs were not truncated; once those
+  exist, this value and per-agent overrides below should be re-tuned based on the empirical distribution.
+- **`ollama_num_ctx_response_headroom_overrides`** (config-only dict, `{agent_name: tokens}`, default
+  `{}`; issue #170): per-agent response-headroom overrides. Maps agent names (as they appear in
+  `llm_calls.jsonl`, e.g. `"Market Analyst"`, `"Portfolio Manager"`) to response-headroom token
+  counts, consulted before falling back to the global `ollama_num_ctx_response_headroom` above. Allows
+  tuning headroom per agent without recompiling (e.g., to reserve more tokens for agents known to
+  produce longer outputs). Unknown agent names are silently ignored, falling back to the global value.
 
 `TradingAgentsGraph._build_ollama_num_ctx_derivation` builds an `OllamaNumCtxDerivation` (in
 `tradingagents/llm_call_log.py`) from these three values plus `quick_think_llm`/`deep_think_llm`, and

@@ -246,6 +246,7 @@ class TradingAgentsGraph:
             num_ctx_max=int(self.config.get("ollama_num_ctx_max", 32768)),
             response_headroom=int(self.config.get("ollama_num_ctx_response_headroom", 0)),
             safety_margin=float(self.config.get("context_window_safety_margin", 1.3)),
+            response_headroom_overrides=self.config.get("ollama_num_ctx_response_headroom_overrides", {}),
         )
 
     def _build_context_window_guard(self) -> ContextWindowGuardHandler:
