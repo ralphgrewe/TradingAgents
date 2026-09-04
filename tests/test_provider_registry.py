@@ -9,7 +9,6 @@ from tradingagents.llm_clients.openai_client import (
     DeepSeekChatOpenAI,
     MinimaxChatOpenAI,
     NormalizedChatOpenAI,
-    OllamaChatOpenAI,
     is_openai_compatible,
 )
 
@@ -22,6 +21,11 @@ def test_registry_membership():
     assert not is_openai_compatible("anthropic")
     assert not is_openai_compatible("google")
     assert not is_openai_compatible("azure")
+    # issue #169: ollama moved off the OpenAI-compatible family entirely (its
+    # /v1/chat/completions endpoint silently drops num_ctx and think) onto its
+    # own dedicated OllamaClient (native /api/chat via langchain-ollama).
+    assert not is_openai_compatible("ollama")
+    assert "ollama" not in OPENAI_COMPATIBLE_PROVIDERS
 
 
 @pytest.mark.unit
@@ -40,7 +44,6 @@ def test_registry_membership():
     ("kimi", "https://api.moonshot.ai/v1", NormalizedChatOpenAI, False),
     ("groq", "https://api.groq.com/openai/v1", NormalizedChatOpenAI, False),
     ("nvidia", "https://integrate.api.nvidia.com/v1", NormalizedChatOpenAI, False),
-    ("ollama", "http://localhost:11434/v1", OllamaChatOpenAI, False),
 ])
 def test_registry_spec(provider, base_url, chat_class, responses):
     spec = OPENAI_COMPATIBLE_PROVIDERS[provider]
@@ -52,9 +55,6 @@ def test_registry_spec(provider, base_url, chat_class, responses):
 @pytest.mark.unit
 def test_key_optionality():
     # Local/generic endpoints are key-optional; hosted APIs require a key.
-    assert OPENAI_COMPATIBLE_PROVIDERS["ollama"].key_optional is True
     assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].key_optional is True
     assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].require_base_url is True
     assert OPENAI_COMPATIBLE_PROVIDERS["xai"].key_optional is False
-    # OLLAMA_BASE_URL is the only base-URL env override.
-    assert OPENAI_COMPATIBLE_PROVIDERS["ollama"].base_url_env == "OLLAMA_BASE_URL"

@@ -48,17 +48,27 @@ chat-model class made it (read from ``invocation_params["_type"]``, the
 ``_llm_type`` LangChain attaches to every chat model — see
 ``_extract_llm_type``), and always labels the result:
 
-- **``"tiktoken"``** — used when ``_type == "openai-chat"``, i.e. the call
-  went through ``langchain_openai.ChatOpenAI`` or a subclass of it. Every
-  OpenAI-compatible provider this codebase's ``OpenAIClient`` routes to
-  (openai, xai, deepseek, qwen/qwen-cn, glm/glm-cn, minimax/minimax-cn,
-  ollama, openrouter, mistral, kimi, groq, nvidia, openai_compatible — see
-  ``tradingagents/llm_clients/factory.py`` and ``openai_client.py``) shares
-  this LangChain class regardless of what model the base_url actually points
-  at. ``tiktoken.encoding_for_model`` is tried first (exact for genuine
-  OpenAI model names); an unrecognized name (the common case here, since
-  most of these providers serve their own model names, e.g. Ollama's
-  ``ministral-3:3b``) falls back to a fixed modern encoding
+- **``"tiktoken"``** — used when ``_type`` is ``"openai-chat"`` or
+  ``"chat-ollama"``. ``"openai-chat"`` covers every OpenAI-compatible
+  provider this codebase's ``OpenAIClient`` routes to (openai, xai,
+  deepseek, qwen/qwen-cn, glm/glm-cn, minimax/minimax-cn, openrouter,
+  mistral, kimi, groq, nvidia, openai_compatible — see
+  ``tradingagents/llm_clients/factory.py`` and ``openai_client.py``), which
+  all share ``langchain_openai.ChatOpenAI`` (or a subclass of it) regardless
+  of what model the base_url actually points at. ``"chat-ollama"`` is
+  ``langchain_ollama.ChatOllama``'s own ``_llm_type`` — issue #169 moved the
+  ``ollama`` provider off the OpenAI-compatible family and onto this
+  dedicated client (native ``/api/chat``, not chat-completions), so it no
+  longer reports ``"openai-chat"`` at all; it is listed here explicitly
+  (rather than folding it into ``"openai-chat"``) so a future OpenAI-compat
+  addition/removal can't accidentally drop Ollama's coverage. The #147/#148
+  calibration corpus below was entirely Ollama-served models under the old
+  ``"openai-chat"`` routing, so the estimate this produces for Ollama is
+  unchanged by #169 — only the ``_type`` string that selects it moved.
+  ``tiktoken.encoding_for_model`` is tried first (exact for genuine OpenAI
+  model names); an unrecognized name (the common case for both families
+  here, since most of these providers/Ollama serve their own model names,
+  e.g. ``ministral-3:3b``) falls back to a fixed modern encoding
   (``_TIKTOKEN_FALLBACK_ENCODING = "o200k_base"``) as a family-level
   approximation, not a claim of an exact match to that model's own
   tokenizer. Anthropic (``_type == "anthropic-chat"``) is deliberately
@@ -184,14 +194,17 @@ _TOKEN_COUNT_METHOD_TIKTOKEN = "tiktoken"
 _TOKEN_COUNT_METHOD_HEURISTIC = "heuristic_chars_per_token"
 
 # LangChain invocation_params["_type"] values that indicate the call went
-# through langchain_openai.ChatOpenAI or a subclass of it — every provider
-# tradingagents/llm_clients/openai_client.py's OpenAIClient routes to (see
-# "Tokenizer strategy" in the module docstring for the full provider list
-# and the reasoning). tiktoken only ships true encodings for OpenAI's own
-# model names, so applying it to this whole family is a deliberate
-# family-level approximation for the non-OpenAI members, not a claim of
-# exactness — see the calibration write-up above.
-_TIKTOKEN_LLM_TYPES = frozenset({"openai-chat"})
+# through a chat-model class this codebase treats as part of the tiktoken-
+# family estimate: "openai-chat" (langchain_openai.ChatOpenAI or a subclass
+# of it — every provider tradingagents/llm_clients/openai_client.py's
+# OpenAIClient routes to) and "chat-ollama" (langchain_ollama.ChatOllama,
+# issue #169's dedicated native-endpoint client for the ollama provider —
+# see "Tokenizer strategy" in the module docstring for the full reasoning).
+# tiktoken only ships true encodings for OpenAI's own model names, so
+# applying it to this whole family is a deliberate family-level
+# approximation for the non-OpenAI members, not a claim of exactness — see
+# the calibration write-up above.
+_TIKTOKEN_LLM_TYPES = frozenset({"openai-chat", "chat-ollama"})
 
 # Fallback tiktoken encoding for model names tiktoken.encoding_for_model
 # doesn't recognize (the common case for this family — see above). o200k_base
@@ -325,6 +338,7 @@ def _extract_llm_type(kwargs: dict[str, Any]) -> str | None:
     from each chat model class's ``_llm_type`` property — alongside
     ``"model"`` for every provider this codebase wires up (verified for
     ``ChatOpenAI``/its ``OpenAIClient`` subclasses: ``"openai-chat"``;
+    ``ChatOllama``/``NormalizedChatOllama``: ``"chat-ollama"`` (issue #169);
     ``ChatAnthropic``: ``"anthropic-chat"``; ``ChatGoogleGenerativeAI``:
     ``"chat-google-generative-ai"``; ``AzureChatOpenAI``:
     ``"azure-openai-chat"``). It is the tokenizer-family signal used by
@@ -863,10 +877,12 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 # below is the small config snapshot ``TradingAgentsGraph`` builds once and
 # hands to both this handler (which aborts) and ``LLMCallLogHandler`` (which
 # records the value actually sent for a successful call) -- and to
-# ``OllamaChatOpenAI._get_request_payload``
-# (``tradingagents/llm_clients/openai_client.py``), which independently runs
-# the identical arithmetic to attach the derived ``num_ctx`` to the outgoing
-# request. Three call sites share one formula instead of three independent
+# ``NormalizedChatOllama._chat_params``
+# (``tradingagents/llm_clients/ollama_client.py`` -- issue #169 re-pointed this
+# from ``OllamaChatOpenAI._get_request_payload`` on the now-removed
+# OpenAI-compatible client to this native-endpoint client's own per-request
+# hook), which independently runs the identical arithmetic to attach the
+# derived ``num_ctx`` to the outgoing request. Three call sites share one formula instead of three independent
 # ones so they can't drift apart. An explicit ``ollama_num_ctx`` still wins
 # outright: when set, ``TradingAgentsGraph`` never builds an
 # ``OllamaNumCtxDerivation`` at all, and every #154 code path is a no-op.
@@ -880,7 +896,7 @@ class OllamaNumCtxDerivation:
     config and shared, unchanged, across ``ContextWindowGuardHandler`` (which
     aborts the run when a prompt's derived requirement exceeds
     ``num_ctx_max``), ``LLMCallLogHandler`` (which records the value actually
-    sent for successful calls), and ``OllamaChatOpenAI._get_request_payload``
+    sent for successful calls), and ``NormalizedChatOllama._chat_params``
     (which attaches it to the outgoing request) -- see the module-section note
     above for why the same object is threaded through all three.
 

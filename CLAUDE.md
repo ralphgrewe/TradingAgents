@@ -138,15 +138,41 @@ Key files:
 `tradingagents/llm_clients/factory.py` is the single entry point (`create_llm_client`). Provider
 SDKs are imported lazily inside each branch so importing the factory never pulls in unused SDKs.
 OpenAI-compatible providers (openai, xai, deepseek, qwen/qwen-cn, glm/glm-cn, minimax/minimax-cn,
-ollama, openrouter, mistral) all share `OpenAIClient`; anthropic, google, azure, and perplexity
+openrouter, mistral) all share `OpenAIClient`; anthropic, google, azure, ollama, and perplexity
 each have a dedicated client. Provider-specific "thinking" knobs (`google_thinking_level`,
 `openai_reasoning_effort`, `anthropic_effort`) are applied per-provider in
-`TradingAgentsGraph._get_provider_kwargs`. The same method applies `ollama_num_ctx` (issue #149) and
-`ollama_think` (issue #155) for the `ollama` provider — forwarded through `OpenAIClient.get_llm` as
-`extra_body={"options": {"num_ctx": N}, "think": True}` (or only the applicable field when just one
-is set), Ollama's OpenAI-compatible endpoint's non-standard way of pinning context length per request
-and enabling think mode. See "Oversize-prompt enforcement" under Configuration below for why
-`ollama_num_ctx` exists.
+`TradingAgentsGraph._get_provider_kwargs`.
+
+**Ollama talks to the native `/api/chat` endpoint, not the OpenAI-compatible one (issue #169).**
+Ollama's OpenAI-compatible endpoint (`/v1/chat/completions`) **silently drops both `num_ctx` and
+`think`** — verified live against Ollama 0.32.3: the same request with `options.num_ctx` or `think`
+set is honored on `/api/chat` and ignored on `/v1/chat/completions` (`finish_reason=length` at the
+daemon's default 4096-token window either way). Because of this, `ollama_client.OllamaClient`
+routes the `ollama` provider to `langchain_ollama.ChatOllama` (via `factory.create_llm_client`,
+matched *before* the OpenAI-compatible registry) instead of through `OpenAIClient`. **Do not
+"fix" this back to `extra_body`/the compat endpoint** — that is precisely the silently-broken
+behavior #169 replaced. Users who deliberately want the OpenAI-compat endpoint in front of Ollama
+(e.g. a proxy) can still reach it via the generic `openai_compatible` provider with an explicit
+`backend_url`.
+- **Base URL**: resolution precedence is `backend_url`/`TRADINGAGENTS_LLM_BACKEND_URL` >
+  `OLLAMA_BASE_URL` > default `http://localhost:11434` (no `/v1` — the native endpoint isn't
+  OpenAI-compat). A configured URL ending in `/v1` or `/v1/` (the old documented shape) has that
+  suffix stripped, so existing `.../v1` configs keep working against the new endpoint.
+- **`ollama_num_ctx`** (issue #149) and the issue #154 per-request derivation are unchanged in
+  arithmetic/semantics — only the delivery mechanism moved: `OllamaClient.get_llm` sets ChatOllama's
+  native `num_ctx` field for the explicit-override case, and `NormalizedChatOllama._chat_params`
+  (`ollama_client.py`) — the equivalent per-request hook to `ChatOpenAI._get_request_payload` on a
+  client with no such method — derives and attaches it for the unset case, both landing under the
+  request's `options.num_ctx`, same as `/api/chat` expects.
+- **`ollama_think`** (issue #155) is a three-state knob (`True`/`False`/`None`) forwarded to
+  ChatOllama's native `reasoning` field, which controls the request's `think` field: `True` sends
+  `think: true`; `False` sends `think: false` explicitly; `None` sends no `think` field at all
+  (model decides). **The effective default is `False`** (`default_config.py`'s `ollama_think`) — a
+  deliberate behaviour change from pre-#169: the old compat endpoint silently dropped `think`
+  regardless of this setting, so a reasoning-capable model (e.g. `qwen3.5:9b`) always burned
+  1–3k tokens per call on reasoning; the native endpoint actually honors `false`, reclaiming those
+  tokens by default. Set to `None` to explicitly defer to the model's own default instead.
+See "Oversize-prompt enforcement" under Configuration below for why `ollama_num_ctx` exists.
 
 **Structured output method (issue #161):** By default, most providers use `function_calling` for
 structured output (LangChain's default). However, Ollama's OpenAI-compatibility layer does not
@@ -154,7 +180,8 @@ honor `tool_choice` directives, meaning `function_calling` can silently return `
 model writes prose instead of a tool call. The `structured_output_method` config key (env var
 `TRADINGAGENTS_STRUCTURED_OUTPUT_METHOD`, default `"auto"`) allows selecting the method globally:
 - `"auto"` (default): use the capability table's `preferred_structured_method` for each model,
-  except Ollama defaults to `json_schema` (grammar-constrained at decode time).
+  except Ollama defaults to `json_schema` (grammar-constrained at decode time, via ChatOllama's
+  native `format` field — issue #169).
 - `"function_calling"`, `"json_schema"`, `"json_mode"`: force a specific method for all models.
 Legal values: `"auto"`, `"function_calling"`, `"json_schema"`, `"json_mode"`. Precedence order
 (highest first): explicit `method=` argument passed by caller > config value (when not `"auto"`)
@@ -405,7 +432,7 @@ again" at an LLM call, extraction recovers the answer the model **already gave**
 #161 (Ollama → `json_schema`) is expected to make this path rarely fire in practice; it stays worth
 having as the last line of defence for other providers and for schema-validation failures.
 
-### Oversize-prompt enforcement (issues #149, #154)
+### Oversize-prompt enforcement (issues #149, #154, #169)
 
 `docs/analysis/prompt-truncation-diagnosis.md` (issue #148) found that a prompt exceeding a local
 Ollama model's actual (VRAM-tiered auto-fit, not fixed) context window can be silently truncated with
@@ -415,14 +442,16 @@ addresses this by attaching `ContextWindowGuardHandler` (`tradingagents/llm_call
 call's callbacks, regardless of what callbacks the caller passed in:
 
 - **`ollama_num_ctx`** (env: `TRADINGAGENTS_OLLAMA_NUM_CTX`, default `None`/unset): explicit,
-  *fixed* context length forwarded to Ollama's OpenAI-compatible endpoint on every request (see "LLM
-  providers" above) and used as the *known* context window for `quick_think_llm`/`deep_think_llm` when
-  `llm_provider` is `"ollama"`. When set, it wins outright — issue #154's per-request derivation below
-  never runs, and behavior matches #149 exactly (same value on every call).
-- **`ollama_think`** (env: `TRADINGAGENTS_OLLAMA_THINK`, default `False`): enable think mode for Ollama
-  models. When set to `True`, the `think` field is forwarded to Ollama's OpenAI-compatible endpoint
-  (see "LLM providers" above) on every request, instructing models that support it (e.g. ministral-3:8b)
-  to perform explicit reasoning before answering. Only meaningful for `llm_provider == "ollama"`.
+  *fixed* context length forwarded to Ollama's native `/api/chat` endpoint on every request (issue
+  #169 moved this off the OpenAI-compatible endpoint, which silently dropped it — see "LLM
+  providers" above) and used as the *known* context window for `quick_think_llm`/`deep_think_llm`
+  when `llm_provider` is `"ollama"`. When set, it wins outright — issue #154's per-request
+  derivation below never runs, and behavior matches #149 exactly (same value on every call).
+- **`ollama_think`** (env: `TRADINGAGENTS_OLLAMA_THINK`, default `False`): a three-state
+  (`True`/`False`/`None`) think-mode knob for Ollama models, forwarded to `ChatOllama`'s native
+  `reasoning` field (issue #169 moved this off the OpenAI-compatible endpoint, which silently
+  dropped `think` entirely — see "LLM providers" above for the full True/False/None contract and
+  why the effective default changed to `False`). Only meaningful for `llm_provider == "ollama"`.
   Composable with `ollama_num_ctx` and per-request derivation — both can be active at the same time.
 - **`context_window_overrides`** (config-only dict, `{model_name: context_window_tokens}`, default
   `{}`): lets any provider/model opt into the same check without this codebase guessing a limit it has
@@ -459,10 +488,11 @@ the *same* object is shared by three collaborators so their arithmetic can't dri
 `ContextWindowGuardHandler` (aborts before dispatch when `needed > ollama_num_ctx_max`),
 `LLMCallLogHandler` (records the derived `num_ctx` on the successful call's `llm_calls.jsonl` record,
 under the `ollama_num_ctx` field, so truncation can be audited after the fact), and
-`OllamaChatOpenAI._get_request_payload` (`tradingagents/llm_clients/openai_client.py` — the per-request
-hook, alongside the `_get_request_payload` overrides `DeepSeekChatOpenAI`/`MinimaxChatOpenAI` already
-use for their own provider quirks) which actually attaches the derived value to the outgoing request
-as `extra_body={"options": {"num_ctx": N}}`.
+`NormalizedChatOllama._chat_params` (`tradingagents/llm_clients/ollama_client.py` — issue #169
+re-pointed this from `OllamaChatOpenAI._get_request_payload` on the now-removed OpenAI-compatible
+client to `ChatOllama`'s own per-request assembly hook, the equivalent seam since `ChatOllama` has
+no `_get_request_payload`) which actually attaches the derived value to the outgoing request's
+`options.num_ctx`.
 
 A model with no known context window (fixed or derived) is never checked. When a checked prompt's
 adjusted estimate exceeds the known window/ceiling, the run aborts with `PromptContextOverflowError`

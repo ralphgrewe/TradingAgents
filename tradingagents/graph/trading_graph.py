@@ -228,7 +228,7 @@ class TradingAgentsGraph:
         escape hatch. Returns ``None`` in every other case (a different
         provider, an explicit ``ollama_num_ctx``, or no models configured),
         which every #154 code path (``ContextWindowGuardHandler``,
-        ``LLMCallLogHandler``, ``OllamaChatOpenAI``) treats as "derivation
+        ``LLMCallLogHandler``, ``NormalizedChatOllama``) treats as "derivation
         does not apply to this run" -- exactly today's pre-#154 behaviour.
         """
         provider = self.config.get("llm_provider", "").lower()
@@ -336,24 +336,27 @@ class TradingAgentsGraph:
                 kwargs["num_ctx"] = int(num_ctx)
             else:
                 # Per-request num_ctx derivation (issue #154): forwarded to
-                # OpenAIClient.get_llm, which attaches it to the constructed
-                # OllamaChatOpenAI instance for its _get_request_payload hook
-                # to consult on every call. None (no models configured, or
-                # this isn't actually the ollama provider -- can't happen
-                # inside this branch, but _build_ollama_num_ctx_derivation
-                # is the single source of truth either way) forwards nothing,
-                # same as today's pre-#154 behaviour.
+                # OllamaClient.get_llm (tradingagents/llm_clients/ollama_client.py
+                # -- re-pointed here from OpenAIClient/OllamaChatOpenAI by issue
+                # #169), which attaches it to the constructed NormalizedChatOllama
+                # instance for its _chat_params hook to consult on every call.
+                # None (no models configured, or this isn't actually the ollama
+                # provider -- can't happen inside this branch, but
+                # _build_ollama_num_ctx_derivation is the single source of truth
+                # either way) forwards nothing, same as today's pre-#154 behaviour.
                 derivation = self._build_ollama_num_ctx_derivation()
                 if derivation is not None:
                     kwargs["ollama_num_ctx_derivation"] = derivation
 
-            # Think mode for Ollama (issue #155): when enabled, requests
-            # the model to output thinking before answering. Forwarded to
-            # OpenAIClient.get_llm and attached to extra_body alongside
-            # num_ctx (see openai_client.OllamaChatOpenAI._get_request_payload).
-            ollama_think = self.config.get("ollama_think")
-            if ollama_think:
-                kwargs["ollama_think"] = True
+            # Think mode for Ollama (issue #155, re-pointed at the native
+            # /api/chat endpoint's `think` field by issue #169): a three-state
+            # config value (True/False/None -- see default_config.py's
+            # "ollama_think" doc comment) forwarded verbatim, not just when
+            # truthy, so OllamaClient.get_llm can distinguish "unset" (key
+            # absent, e.g. a caller that never passes this kwarg at all -->
+            # effective default False) from an explicit False (send `think:
+            # false`) from an explicit None (send no `think` field at all).
+            kwargs["ollama_think"] = self.config.get("ollama_think")
 
         # Temperature is supported by all providers. Cast through float() so a
         # string env var (TRADINGAGENTS_TEMPERATURE) is tolerated: the config

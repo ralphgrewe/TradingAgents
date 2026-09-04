@@ -26,9 +26,14 @@ These tests cover, in order:
    ``_get_provider_kwargs``: when derivation applies, when an explicit
    ``ollama_num_ctx`` bypasses it, and when a non-ollama provider is
    unaffected.
-5. ``OllamaChatOpenAI._get_request_payload``: the derived value actually
-   reaching the outgoing request's ``extra_body.options.num_ctx``, and other
-   providers/chat classes being completely unaffected.
+5. ``NormalizedChatOllama._chat_params`` (issue #169 re-pointed this from
+   ``OllamaChatOpenAI._get_request_payload`` on the now-removed
+   OpenAI-compatible client): the derived value actually reaching the
+   outgoing request's ``options.num_ctx``, and other providers/chat classes
+   being completely unaffected.
+6. Ollama think mode (issue #155, re-pointed at ``ChatOllama``'s native
+   ``reasoning``/``think`` field by issue #169): the True/False/None
+   three-state contract.
 """
 
 from __future__ import annotations
@@ -461,12 +466,12 @@ class TestGetProviderKwargsDerivation:
 
 
 # ---------------------------------------------------------------------------
-# 5. OllamaChatOpenAI._get_request_payload plumbing
+# 5. NormalizedChatOllama._chat_params plumbing (issue #169)
 # ---------------------------------------------------------------------------
 
 
-class TestOllamaChatOpenAIRequestPayload:
-    def test_derived_num_ctx_reaches_extra_body(self):
+class TestNormalizedChatOllamaChatParams:
+    def test_derived_num_ctx_reaches_options(self):
         from tradingagents.llm_clients.factory import create_llm_client
 
         derivation = OllamaNumCtxDerivation(
@@ -479,19 +484,19 @@ class TestOllamaChatOpenAIRequestPayload:
             provider="ollama",
             model="ministral-3:8b",
             ollama_num_ctx_derivation=derivation,
-            api_key="placeholder",
         ).get_llm()
 
-        # _get_request_payload always counts via the tiktoken path (this
-        # class is always ChatOpenAI-family / "openai-chat"), not the
-        # chars/4 heuristic, so derive the expected token count the same way
-        # rather than assuming a heuristic figure.
+        # _chat_params always counts via the tiktoken path (ChatOllama's
+        # _llm_type, "chat-ollama", is in _TIKTOKEN_LLM_TYPES -- issue #169
+        # acceptance criterion 9), not the chars/4 heuristic, so derive the
+        # expected token count the same way rather than assuming a heuristic
+        # figure.
         from tradingagents.llm_call_log import _count_prompt_tokens
 
         text = "x" * 400
-        token_count, _ = _count_prompt_tokens(text, "ministral-3:8b", "openai-chat")
-        payload = llm._get_request_payload([HumanMessage(content=text)])
-        assert payload["extra_body"]["options"]["num_ctx"] == token_count + 100
+        token_count, _ = _count_prompt_tokens(text, "ministral-3:8b", "chat-ollama")
+        params = llm._chat_params([HumanMessage(content=text)])
+        assert params["options"]["num_ctx"] == token_count + 100
 
     def test_derived_num_ctx_is_clamped_to_the_ceiling(self):
         from tradingagents.llm_clients.factory import create_llm_client
@@ -506,21 +511,18 @@ class TestOllamaChatOpenAIRequestPayload:
             provider="ollama",
             model="ministral-3:8b",
             ollama_num_ctx_derivation=derivation,
-            api_key="placeholder",
         ).get_llm()
 
         long_text = "word " * 1000  # well over 50 tokens
-        payload = llm._get_request_payload([HumanMessage(content=long_text)])
-        assert payload["extra_body"]["options"]["num_ctx"] == 50
+        params = llm._chat_params([HumanMessage(content=long_text)])
+        assert params["options"]["num_ctx"] == 50
 
-    def test_no_derivation_leaves_payload_unaffected(self):
+    def test_no_derivation_leaves_options_without_num_ctx(self):
         from tradingagents.llm_clients.factory import create_llm_client
 
-        llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", api_key="placeholder"
-        ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="hi")])
-        assert "extra_body" not in payload
+        llm = create_llm_client(provider="ollama", model="ministral-3:8b").get_llm()
+        params = llm._chat_params([HumanMessage(content="hi")])
+        assert "num_ctx" not in params.get("options", {})
 
     def test_explicit_num_ctx_and_derivation_are_mutually_exclusive_in_practice(self):
         # TradingAgentsGraph._get_provider_kwargs never sets both at once (see
@@ -530,10 +532,10 @@ class TestOllamaChatOpenAIRequestPayload:
         from tradingagents.llm_clients.factory import create_llm_client
 
         llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", num_ctx=16384, api_key="placeholder"
+            provider="ollama", model="ministral-3:8b", num_ctx=16384
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="word " * 1000)])
-        assert payload["extra_body"]["options"]["num_ctx"] == 16384
+        params = llm._chat_params([HumanMessage(content="word " * 1000)])
+        assert params["options"]["num_ctx"] == 16384
 
     def test_model_not_covered_by_derivation_is_unaffected(self):
         from tradingagents.llm_clients.factory import create_llm_client
@@ -548,56 +550,85 @@ class TestOllamaChatOpenAIRequestPayload:
             provider="ollama",
             model="ministral-3:8b",
             ollama_num_ctx_derivation=derivation,
-            api_key="placeholder",
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="word " * 1000)])
-        assert "extra_body" not in payload
+        params = llm._chat_params([HumanMessage(content="word " * 1000)])
+        assert "num_ctx" not in params.get("options", {})
 
-    def test_other_providers_never_see_an_options_field(self):
+    def test_other_providers_never_route_through_ollama_client(self):
         from tradingagents.llm_clients.factory import create_llm_client
+        from tradingagents.llm_clients.ollama_client import NormalizedChatOllama
 
-        derivation = OllamaNumCtxDerivation(
-            models=frozenset({"gpt-5.5"}), num_ctx_max=50, response_headroom=0, safety_margin=1.0,
-        )
         # Even if a derivation object were (incorrectly) forwarded to a
-        # non-ollama provider, its chat_class isn't OllamaChatOpenAI, so
-        # there is no _get_request_payload override to act on it.
+        # non-ollama provider, that provider's client never constructs a
+        # NormalizedChatOllama, so there is no _chat_params override to act
+        # on it.
         llm = create_llm_client(
-            provider="openai",
-            model="gpt-5.5",
-            ollama_num_ctx_derivation=derivation,
-            api_key="placeholder",
+            provider="openai", model="gpt-5.5", api_key="placeholder"
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="word " * 1000)])
-        assert "extra_body" not in payload
+        assert not isinstance(llm, NormalizedChatOllama)
 
 
 # ---------------------------------------------------------------------------
-# 6. Ollama think mode (issue #155)
+# 6. Ollama think mode (issue #155, re-pointed at ChatOllama's native
+#    `reasoning`/`think` field by issue #169's three-state contract)
 # ---------------------------------------------------------------------------
 
 
 class TestOllamaThinkMode:
-    def test_think_unset_no_think_in_body(self):
+    def test_think_key_absent_defaults_to_reasoning_false(self):
+        """A caller that never sets ollama_think gets the documented effective default: False."""
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(provider="ollama", model="ministral-3:8b").get_llm()
+        assert llm.reasoning is False
+
+    def test_think_true(self):
         from tradingagents.llm_clients.factory import create_llm_client
 
         llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", api_key="placeholder"
+            provider="ollama", model="ministral-3:8b", ollama_think=True,
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="hi")])
-        assert "think" not in payload.get("extra_body", {})
+        assert llm.reasoning is True
 
-    def test_think_set_appears_in_extra_body(self):
+    def test_think_false_explicit(self):
         from tradingagents.llm_clients.factory import create_llm_client
 
         llm = create_llm_client(
-            provider="ollama",
-            model="ministral-3:8b",
-            ollama_think=True,
-            api_key="placeholder",
+            provider="ollama", model="ministral-3:8b", ollama_think=False,
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="hi")])
-        assert payload.get("extra_body", {}).get("think") is True
+        assert llm.reasoning is False
+
+    def test_think_none_leaves_reasoning_unset(self):
+        """ollama_think=None must be distinguishable from False -- no think field at all."""
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama", model="ministral-3:8b", ollama_think=None,
+        ).get_llm()
+        assert llm.reasoning is None
+
+    def test_think_field_dropped_from_chat_params_when_reasoning_none(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama", model="ministral-3:8b", ollama_think=None,
+        ).get_llm()
+        params = llm._chat_params([HumanMessage(content="hi")])
+        # ChatOllama._chat_params always includes a "think" key (from
+        # self.reasoning); the underlying ollama-python client drops it from
+        # the actual request body via model_dump(exclude_none=True) -- see
+        # ollama_client.py's module docstring. None here is what makes that
+        # downstream stripping happen.
+        assert params["think"] is None
+
+    def test_think_field_explicit_false_in_chat_params(self):
+        from tradingagents.llm_clients.factory import create_llm_client
+
+        llm = create_llm_client(
+            provider="ollama", model="ministral-3:8b", ollama_think=False,
+        ).get_llm()
+        params = llm._chat_params([HumanMessage(content="hi")])
+        assert params["think"] is False
 
     def test_think_and_num_ctx_compose(self):
         from tradingagents.llm_clients.factory import create_llm_client
@@ -607,12 +638,10 @@ class TestOllamaThinkMode:
             model="ministral-3:8b",
             num_ctx=16384,
             ollama_think=True,
-            api_key="placeholder",
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="hi")])
-        extra_body = payload.get("extra_body", {})
-        assert extra_body.get("think") is True
-        assert extra_body.get("options", {}).get("num_ctx") == 16384
+        params = llm._chat_params([HumanMessage(content="hi")])
+        assert params["think"] is True
+        assert params["options"]["num_ctx"] == 16384
 
     def test_think_preserved_through_derivation(self):
         from tradingagents.llm_clients.factory import create_llm_client
@@ -628,14 +657,18 @@ class TestOllamaThinkMode:
             model="ministral-3:8b",
             ollama_think=True,
             ollama_num_ctx_derivation=derivation,
-            api_key="placeholder",
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="word " * 100)])
-        extra_body = payload.get("extra_body", {})
-        assert extra_body.get("think") is True
-        assert "num_ctx" in extra_body.get("options", {})
+        params = llm._chat_params([HumanMessage(content="word " * 100)])
+        assert params["think"] is True
+        assert "num_ctx" in params.get("options", {})
 
-    def test_non_ollama_provider_never_gets_think(self):
+    def test_non_ollama_provider_never_gets_reasoning(self):
+        """ollama_think must not leak into another provider's client as a truthy `reasoning`.
+
+        ChatOpenAI happens to have its own unrelated `reasoning` field (for
+        OpenAI's reasoning-effort config); the assertion here is that
+        `ollama_think=True` never sets it, not that the attribute is absent.
+        """
         from tradingagents.llm_clients.factory import create_llm_client
 
         llm = create_llm_client(
@@ -644,5 +677,4 @@ class TestOllamaThinkMode:
             ollama_think=True,  # ignored for non-ollama
             api_key="placeholder",
         ).get_llm()
-        payload = llm._get_request_payload([HumanMessage(content="hi")])
-        assert "think" not in payload.get("extra_body", {})
+        assert getattr(llm, "reasoning", None) is not True

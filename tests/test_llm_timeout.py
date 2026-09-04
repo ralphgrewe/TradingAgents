@@ -35,11 +35,12 @@ import threading
 import time
 from unittest.mock import MagicMock
 
-import openai
+import httpx
 import pytest
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.llm_clients.factory import create_llm_client
+from tradingagents.llm_clients.ollama_client import NormalizedChatOllama
 from tradingagents.llm_clients.openai_client import NormalizedChatOpenAI
 
 
@@ -74,24 +75,31 @@ class TestGetProviderKwargsTimeout:
 
 @pytest.mark.unit
 class TestTimeoutReachesClient:
-    """Verify the configured timeout reaches the underlying ChatOpenAI
+    """Verify the configured timeout reaches the underlying chat-model
     instance for the ollama provider specifically (the provider named in
-    the bug report), without any real network I/O.
+    the bug report) and for openai, without any real network I/O.
+
+    Issue #169 moved ollama off ChatOpenAI/`request_timeout` onto
+    ChatOllama, which has no top-level timeout field of its own -- the
+    underlying ollama-python client accepts it as an httpx client kwarg
+    instead (`client_kwargs={"timeout": ...}`, set by
+    `OllamaClient.get_llm`), so its assertion is a separate case rather than
+    reusing the ChatOpenAI-shaped parametrization openai still exercises.
     """
 
-    @pytest.mark.parametrize(
-        "provider,model",
-        [
-            ("ollama", "ministral-3:8b"),
-            ("openai", "gpt-4.1"),
-        ],
-    )
-    def test_timeout_reaches_chat_openai(self, provider, model):
+    def test_timeout_reaches_chat_openai(self):
         llm = create_llm_client(
-            provider=provider, model=model, timeout=45, api_key="placeholder"
+            provider="openai", model="gpt-4.1", timeout=45, api_key="placeholder"
         ).get_llm()
         assert isinstance(llm, NormalizedChatOpenAI)
         assert llm.request_timeout == 45
+
+    def test_timeout_reaches_chat_ollama_as_client_kwarg(self):
+        llm = create_llm_client(
+            provider="ollama", model="ministral-3:8b", timeout=45
+        ).get_llm()
+        assert isinstance(llm, NormalizedChatOllama)
+        assert llm.client_kwargs == {"timeout": 45}
 
     def test_timeout_omitted_leaves_request_timeout_none(self):
         # Documents the pre-fix default the hang relied on: without an
@@ -100,9 +108,13 @@ class TestTimeoutReachesClient:
         # httpx) -- this is exactly why _get_provider_kwargs now always
         # forwards a configured llm_timeout.
         llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", api_key="placeholder"
+            provider="openai", model="gpt-4.1", api_key="placeholder"
         ).get_llm()
         assert llm.request_timeout is None
+
+    def test_timeout_omitted_leaves_ollama_client_kwargs_empty(self):
+        llm = create_llm_client(provider="ollama", model="ministral-3:8b").get_llm()
+        assert not llm.client_kwargs
 
 
 @pytest.mark.unit
@@ -157,14 +169,17 @@ class TestWedgedEndpointFailsFast:
             llm = create_llm_client(
                 provider="ollama",
                 model="ministral-3:8b",
-                base_url=f"http://127.0.0.1:{port}/v1",
+                base_url=f"http://127.0.0.1:{port}",
                 timeout=0.5,
-                max_retries=0,
-                api_key="placeholder",
             ).get_llm()
 
             start = time.monotonic()
-            with pytest.raises(openai.APITimeoutError):
+            # ChatOllama's underlying ollama-python client raises httpx's own
+            # timeout exception directly (no openai-SDK-style wrapping into
+            # openai.APITimeoutError -- that wrapping is specific to the
+            # OpenAI-compatible path this test predates issue #169 moving
+            # ollama off of).
+            with pytest.raises(httpx.ReadTimeout):
                 llm.invoke("hello")
             elapsed = time.monotonic() - start
 

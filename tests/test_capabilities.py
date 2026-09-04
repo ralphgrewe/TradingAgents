@@ -8,7 +8,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients.capabilities import (
     get_capabilities,
 )
-from tradingagents.llm_clients.openai_client import OllamaChatOpenAI
+from tradingagents.llm_clients.ollama_client import NormalizedChatOllama
 
 
 @pytest.mark.unit
@@ -159,12 +159,49 @@ class TestStructuredOutputMethodResolution:
         assert get_config().get("structured_output_method") == "json_mode"
 
     def test_ollama_defaults_to_json_schema_in_source(self):
-        """OllamaChatOpenAI.with_structured_output defaults to json_schema under 'auto'."""
-        # Verify the override code uses json_schema for Ollama
+        """NormalizedChatOllama.with_structured_output defaults to json_schema under 'auto'."""
+        # Verify the override code uses json_schema for Ollama (issue #169: moved
+        # off OllamaChatOpenAI onto the dedicated native-endpoint client).
         import inspect
-        source = inspect.getsource(OllamaChatOpenAI.with_structured_output)
+        source = inspect.getsource(NormalizedChatOllama.with_structured_output)
         assert "json_schema" in source
-        assert "config_method == \"auto\"" in source
+        assert "config_method != \"auto\"" in source
+
+    def test_ollama_auto_resolves_to_json_schema(self):
+        """End-to-end: 'auto' (the default) resolves to json_schema for ollama."""
+        from unittest.mock import patch
+
+        set_config({"structured_output_method": "auto"})
+        llm = NormalizedChatOllama(model="qwen3.5:9b")
+        with patch(
+            "langchain_ollama.ChatOllama.with_structured_output"
+        ) as mock_super:
+            llm.with_structured_output(dict)
+        assert mock_super.call_args.kwargs["method"] == "json_schema"
+
+    def test_ollama_explicit_config_method_wins_over_auto_default(self):
+        """A non-'auto' structured_output_method config value overrides ollama's json_schema default."""
+        from unittest.mock import patch
+
+        set_config({"structured_output_method": "function_calling"})
+        llm = NormalizedChatOllama(model="qwen3.5:9b")
+        with patch(
+            "langchain_ollama.ChatOllama.with_structured_output"
+        ) as mock_super:
+            llm.with_structured_output(dict)
+        assert mock_super.call_args.kwargs["method"] == "function_calling"
+
+    def test_ollama_explicit_method_argument_wins_over_everything(self):
+        """An explicit method= argument short-circuits both config and the json_schema default."""
+        from unittest.mock import patch
+
+        set_config({"structured_output_method": "auto"})
+        llm = NormalizedChatOllama(model="qwen3.5:9b")
+        with patch(
+            "langchain_ollama.ChatOllama.with_structured_output"
+        ) as mock_super:
+            llm.with_structured_output(dict, method="json_mode")
+        assert mock_super.call_args.kwargs["method"] == "json_mode"
 
     def test_deepseek_tool_choice_suppression_only_on_function_calling(self):
         """DeepSeek tool_choice suppression is only applied when method=function_calling."""

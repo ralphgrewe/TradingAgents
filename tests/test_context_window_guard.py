@@ -413,18 +413,19 @@ class TestOllamaNumCtxPlumbing:
         kwargs = TradingAgentsGraph._get_provider_kwargs(mock_graph)
         assert "num_ctx" not in kwargs
 
-    def test_num_ctx_reaches_chat_openai_as_extra_body(self):
+    def test_num_ctx_reaches_chat_ollama_as_num_ctx_field(self):
+        """Issue #169: ollama moved off ChatOpenAI/extra_body onto ChatOllama's
+        native `num_ctx` field (still ends up under `options.num_ctx` on the
+        outgoing request -- see NormalizedChatOllama._chat_params)."""
         from tradingagents.llm_clients.factory import create_llm_client
 
         llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", num_ctx=16384, api_key="placeholder"
+            provider="ollama", model="ministral-3:8b", num_ctx=16384
         ).get_llm()
-        assert llm.extra_body == {"options": {"num_ctx": 16384}}
+        assert llm.num_ctx == 16384
 
-    def test_no_num_ctx_leaves_extra_body_unset(self):
+    def test_no_num_ctx_leaves_num_ctx_field_unset(self):
         from tradingagents.llm_clients.factory import create_llm_client
 
-        llm = create_llm_client(
-            provider="ollama", model="ministral-3:8b", api_key="placeholder"
-        ).get_llm()
-        assert llm.extra_body is None
+        llm = create_llm_client(provider="ollama", model="ministral-3:8b").get_llm()
+        assert llm.num_ctx is None

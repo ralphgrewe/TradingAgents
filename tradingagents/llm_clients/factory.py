@@ -47,6 +47,15 @@ def create_llm_client(
         from .bedrock_client import BedrockClient
         return BedrockClient(model, base_url, **kwargs)
 
+    # Ollama is matched before the is_openai_compatible check (issue #169): it now
+    # talks to Ollama's native /api/chat endpoint via langchain-ollama's ChatOllama,
+    # not the OpenAI-compatible chat-completions wire format the registry below
+    # serves. See ollama_client.py's module docstring for why (num_ctx/think are
+    # silently dropped by the OpenAI-compatible endpoint).
+    if provider_lower == "ollama":
+        from .ollama_client import OllamaClient
+        return OllamaClient(model, base_url, **kwargs)
+
     # Fork-only: Perplexity's Agent API doesn't speak the OpenAI-compatible
     # chat-completions wire format, so it stays a dedicated branch rather than
     # a registry entry (see perplexity_client.PerplexityClient).

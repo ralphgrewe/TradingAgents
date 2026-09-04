@@ -99,7 +99,15 @@ Or set it persistently in your shell profile or systemd service.
 
 #### 3. API Request Parameter (lowest precedence, per-call)
 
-This repo talks to Ollama via the **OpenAI-compatible endpoint** at `http://localhost:11434/v1` (overridable via `OLLAMA_BASE_URL`). Per-call overrides are set at the Ollama API level via a non-standard `options` request field:
+**As of issue #169, this repo talks to Ollama via its native `/api/chat` endpoint** at
+`http://localhost:11434` (overridable via `OLLAMA_BASE_URL`; no `/v1` suffix — a configured URL
+ending in `/v1`/`/v1/`, the old documented shape, has that suffix stripped automatically). Prior to
+#169 this repo used Ollama's OpenAI-compatible endpoint (`/v1/chat/completions`) instead — verified
+live against Ollama 0.32.3, that endpoint **silently drops both `num_ctx` and `think`** from the
+request, meaning every run before #169 actually executed at the daemon's default (often
+VRAM-tiered-auto-fit, observed as low as 4096) context window regardless of what this repo computed
+and sent. Per-call overrides are set at the Ollama API level via a non-standard `options` request
+field:
 
 ```bash
 curl http://localhost:11434/api/chat \
@@ -107,11 +115,11 @@ curl http://localhost:11434/api/chat \
 ```
 
 **As of issue #149, this repo *does* expose that override**, via the `ollama_num_ctx` config key
-(env `TRADINGAGENTS_OLLAMA_NUM_CTX`, default unset). When set, `TradingAgentsGraph` forwards it as
-`extra_body={"options": {"num_ctx": N}}` on every `ChatOpenAI` request for the `ollama` provider
-(`tradingagents/llm_clients/openai_client.py`'s `OpenAIClient.get_llm`) — the same mechanism the
-`curl` example above uses, just sent automatically on every call instead of typed by hand, and
-identical across every call for the life of the run.
+(env `TRADINGAGENTS_OLLAMA_NUM_CTX`, default unset). When set, `OllamaClient.get_llm`
+(`tradingagents/llm_clients/ollama_client.py`) sets it as `ChatOllama`'s native `num_ctx` field,
+which lands under the request's `options.num_ctx` — the same mechanism the `curl` example above
+uses, just sent automatically on every call instead of typed by hand, and identical across every
+call for the life of the run.
 
 **As of issue #154, leaving `ollama_num_ctx` unset no longer means "no control at all."** Instead of a
 single fixed value, `num_ctx` is derived **per request** from that request's own measured prompt size:
@@ -121,9 +129,11 @@ needed  = ceil(prompt_tokens_estimated * context_window_safety_margin) + ollama_
 num_ctx = min(needed, ollama_num_ctx_max)
 ```
 
-This is computed fresh for every call (`OllamaChatOpenAI._get_request_payload` in
-`tradingagents/llm_clients/openai_client.py`) and attached the same way (`extra_body.options.num_ctx`),
-so a short analyst prompt gets a small `num_ctx` and a long Portfolio Manager prompt with a full debate
+This is computed fresh for every call (`NormalizedChatOllama._chat_params` in
+`tradingagents/llm_clients/ollama_client.py` — issue #169 re-pointed this from
+`OllamaChatOpenAI._get_request_payload` on the now-removed OpenAI-compatible client) and attached
+the same way (`options.num_ctx` on the outgoing request), so a short analyst prompt gets a small
+`num_ctx` and a long Portfolio Manager prompt with a full debate
 history gets a bigger one — every agent's prompt reaches Ollama untruncated instead of only the ones
 that happen to fit under one static value picked for the whole run. `ollama_num_ctx_max` (default
 `32768`, env `TRADINGAGENTS_OLLAMA_NUM_CTX_MAX`) is the ceiling on the derived value, and
@@ -219,7 +229,7 @@ The TradingAgents pipeline writes contexts of varying sizes depending on the ana
    - `ticker` and `date` the call belongs to
    - `run_id` and `agent` (the LangGraph node that made the call)
    - `model`, `message_count`, `prompt_chars`, `prompt_tokens_estimated` (chars/4 heuristic)
-   - `input_tokens` / `output_tokens` (provider-reported, when available; e.g. Ollama's OpenAI-compatible endpoint supplies these)
+   - `input_tokens` / `output_tokens` (provider-reported, when available; e.g. Ollama's native `/api/chat` endpoint supplies these)
    - `duration_seconds`
    - `error` — `null` for a successful call, otherwise a `"TypeName: message"` string for a failed call (failed calls are logged too, via `on_llm_error`, with null token counts)
 

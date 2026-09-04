@@ -135,7 +135,21 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
-    "ollama_think": False,              # enable think mode for Ollama models
+    # Ollama think/reasoning mode (issue #155, re-pointed at the native /api/chat
+    # endpoint's `think` field by issue #169): a three-state knob forwarded to
+    # ChatOllama's `reasoning` field --
+    #   True  -> think mode on   (`think: true` sent; reasoning captured separately)
+    #   False -> think mode off  (`think: false` sent explicitly -- the default
+    #            below, a deliberate behaviour change from pre-#169: the old
+    #            OpenAI-compatible endpoint silently dropped `think` entirely, so
+    #            a reasoning-capable model like qwen3.5:9b defaulted to burning
+    #            1-3k tokens per call on reasoning regardless of this setting)
+    #   None  -> no `think` field sent at all (model's own default behaviour)
+    # Only True/False are reachable via TRADINGAGENTS_OLLAMA_THINK (env-var
+    # coercion is boolean, driven by this default's type -- see _ENV_OVERRIDES/
+    # _coerce above); None is a config-only value for programmatic callers that
+    # want to defer entirely to the model.
+    "ollama_think": False,
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run
     # variation on models that honor it; reasoning models largely ignore it
