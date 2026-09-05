@@ -1255,13 +1255,21 @@ def test_response_with_no_finish_reason_recorded_as_null(tmp_path):
     assert record["error"] is None
 
 
-def test_truncated_response_abort_enabled_raises_exception(tmp_path):
-    """When truncated_response_abort_enabled=True (default), finish_reason='length' raises."""
+def test_truncated_response_abort_enabled_writes_error_record_but_does_not_raise_itself(tmp_path):
+    """LLMCallLogHandler.on_llm_end alone must never raise (issue #171 design review).
+
+    ``LLMCallLogHandler`` never sets ``raise_error = True`` -- that guarantee is
+    the whole point of splitting the abort into a separate ``TruncationGuardHandler``
+    (see ``test_truncation_guard_aborts_through_the_callback_manager`` below for the
+    test that exercises the actual abort path). Calling ``on_llm_end`` directly, the
+    way the pre-fix tests did, must NOT raise; it must instead write one completed
+    record with ``error`` populated (the same shape a failed call gets) and stash the
+    constructed ``LLMResponseTruncatedError`` for a guard handler to retrieve.
+    """
     from unittest.mock import patch
 
     from tradingagents.llm_call_log import LLMResponseTruncatedError
 
-    # Enable abort (default)
     with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": True}):
         handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
         run_id = uuid.uuid4()
@@ -1273,26 +1281,35 @@ def test_truncated_response_abort_enabled_raises_exception(tmp_path):
             metadata={"langgraph_node": "Market Analyst"},
         )
 
-        with pytest.raises(LLMResponseTruncatedError) as exc_info:
-            handler.on_llm_end(
-                _chat_result("truncated", input_tokens=100, output_tokens=200, finish_reason="length"),
-                run_id=run_id,
-            )
+        # Must not raise.
+        handler.on_llm_end(
+            _chat_result("truncated", input_tokens=100, output_tokens=200, finish_reason="length"),
+            run_id=run_id,
+        )
 
-        error = exc_info.value
-        assert error.agent == "Market Analyst"
-        assert error.model == "gpt-4o-mini"
-        assert error.finish_reason == "length"
-        assert error.input_tokens == 100
-        assert error.output_tokens == 200
-
-        # The error should be in JSONL
+        # Exactly one record, with error populated -- not a second "precheck" record.
         records = handler.get_records()
         assert len(records) == 1
         error_record = records[0]
         assert error_record["finish_reason"] == "length"
         assert error_record["agent"] == "Market Analyst"
         assert "LLMResponseTruncatedError" in error_record["error"]
+
+        # The pending _pending[run_id] entry must not leak (issue #171 finding #3):
+        # _finish() always pops it now, on every path.
+        assert str(run_id) not in handler._pending
+
+        # The constructed error is stashed for a guard handler to pop and raise.
+        error = handler.pop_pending_truncation_error(run_id)
+        assert isinstance(error, LLMResponseTruncatedError)
+        assert error.agent == "Market Analyst"
+        assert error.model == "gpt-4o-mini"
+        assert error.finish_reason == "length"
+        assert error.input_tokens == 100
+        assert error.output_tokens == 200
+
+        # Popped exactly once -- a second pop finds nothing (no leak either way).
+        assert handler.pop_pending_truncation_error(run_id) is None
 
 
 def test_truncated_response_abort_disabled_logs_warning(tmp_path, caplog):
@@ -1325,3 +1342,186 @@ def test_truncated_response_abort_disabled_logs_warning(tmp_path, caplog):
 
     # Should have logged a warning
     assert any("truncated" in msg.lower() for msg in caplog.text.splitlines())
+
+    # Nothing stashed for a guard handler to raise when abort is disabled.
+    assert handler.pop_pending_truncation_error(run_id) is None
+
+
+# -- truncation abort actually propagates through the callback manager --------
+# (issue #171 design-review finding #1: the pre-fix tests all called
+# handler.on_llm_end(...) directly, bypassing langchain_core's callback-manager
+# try/except entirely -- which is exactly how they missed that the abort was
+# being silently swallowed in real runs. These go through the real
+# CallbackManager/handle_event path instead.)
+
+
+def _build_callback_manager(tmp_path, agent="Market Analyst"):
+    """Return (callback_manager, log_handler) wired the same way TradingAgentsGraph wires them.
+
+    LLMCallLogHandler first (writes the record), TruncationGuardHandler second
+    (raises) -- see TradingAgentsGraph.__init__ / _build_truncation_guard.
+    """
+    from langchain_core.callbacks.manager import CallbackManager
+
+    from tradingagents.llm_call_log import TruncationGuardHandler
+
+    log_handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    guard_handler = TruncationGuardHandler(log_handler=log_handler)
+    cm = CallbackManager(handlers=[log_handler, guard_handler], metadata={"langgraph_node": agent})
+    return cm, log_handler
+
+
+def test_truncation_guard_aborts_through_the_callback_manager(tmp_path):
+    """A truncated free-text call actually aborts when driven through the real callback manager.
+
+    This is the test the design review asked for: it exercises
+    ``langchain_core.callbacks.manager.handle_event`` (via ``CallbackManager``) --
+    the exact code path that swallowed the exception in the pre-fix commit,
+    because ``LLMCallLogHandler.raise_error`` is (correctly) ``False`` and only
+    ``TruncationGuardHandler.raise_error = True`` propagates.
+    """
+    from unittest.mock import patch
+
+    from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+
+    from tradingagents.llm_call_log import LLMResponseTruncatedError
+
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": True}):
+        cm, log_handler = _build_callback_manager(tmp_path)
+
+        run_managers: list[CallbackManagerForLLMRun] = cm.on_chat_model_start(
+            {"kwargs": {"model_name": "gpt-4o-mini"}},
+            [[HumanMessage(content="hello")]],
+        )
+        run_manager = run_managers[0]
+
+        with pytest.raises(LLMResponseTruncatedError) as exc_info:
+            run_manager.on_llm_end(
+                _chat_result("truncated", input_tokens=100, output_tokens=200, finish_reason="length"),
+            )
+
+        assert exc_info.value.agent == "Market Analyst"
+        assert exc_info.value.model == "gpt-4o-mini"
+
+        # The record was still written (by LLMCallLogHandler, which ran first).
+        records = log_handler.get_records()
+        assert len(records) == 1
+        assert records[0]["finish_reason"] == "length"
+        assert "LLMResponseTruncatedError" in records[0]["error"]
+
+        # Nothing left dangling for a later call to (mis)pick up.
+        assert log_handler.pop_pending_truncation_error(run_manager.run_id) is None
+
+
+def test_truncation_guard_does_not_abort_through_callback_manager_when_disabled(tmp_path):
+    """The warn-and-continue configuration also holds through the real callback manager."""
+    from unittest.mock import patch
+
+    with patch("tradingagents.llm_call_log.get_config", return_value={"truncated_response_abort_enabled": False}):
+        cm, log_handler = _build_callback_manager(tmp_path)
+
+        run_managers = cm.on_chat_model_start(
+            {"kwargs": {"model_name": "ministral-3:3b"}},
+            [[HumanMessage(content="hello")]],
+        )
+        run_manager = run_managers[0]
+
+        # Must not raise.
+        run_manager.on_llm_end(
+            _chat_result("incomplete", input_tokens=10, output_tokens=20, finish_reason="length"),
+        )
+
+        records = log_handler.get_records()
+        assert len(records) == 1
+        assert records[0]["finish_reason"] == "length"
+        assert records[0]["error"] is None
+
+
+def test_normal_and_tool_call_finish_reasons_do_not_abort_through_callback_manager(tmp_path):
+    """A legitimate tool-calling / stop finish reason must never trip the guard."""
+    cm, log_handler = _build_callback_manager(tmp_path)
+
+    for finish_reason in ("stop", "tool_calls"):
+        run_id = uuid.uuid4()
+        run_managers = cm.on_chat_model_start(
+            {"kwargs": {"model_name": "gpt-4o-mini"}},
+            [[HumanMessage(content="hello")]],
+            run_id=run_id,
+        )
+        # Must not raise for any non-length finish reason.
+        run_managers[0].on_llm_end(
+            _chat_result("done", input_tokens=5, output_tokens=5, finish_reason=finish_reason),
+        )
+
+    records = log_handler.get_records()
+    assert [r["finish_reason"] for r in records] == ["stop", "tool_calls"]
+    assert all(r["error"] is None for r in records)
+
+
+# -- scoping away from structured-output calls (issue #171 finding #2) --------
+
+
+def _structured_output_kwargs() -> dict:
+    """Kwargs a real LangChain ``with_structured_output`` call carries on start.
+
+    Mirrors the ``options={"ls_structured_output_format": {...}}`` shape
+    ``BaseChatModel.generate``/``.stream`` build from the ``ls_structured_output_format``
+    bind kwarg that ``langchain_openai``/``langchain_anthropic``/
+    ``langchain_google_genai``/``langchain_ollama``'s ``with_structured_output``
+    implementations all attach -- see ``_is_structured_output_call``.
+    """
+    return {"options": {"stop": None, "ls_structured_output_format": {"kwargs": {"method": "function_calling"}}}}
+
+
+def test_structured_output_truncation_is_not_treated_as_an_abort(tmp_path):
+    """A truncated structured-output call is recorded but never queued for abort.
+
+    Per issue #171's "out of scope": the #153/#162 structured-output recovery
+    ladder owns truncated structured calls; this check must not preempt it.
+    """
+    handler = LLMCallLogHandler(tmp_path / "llm_calls.jsonl")
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content="hello")]],
+        run_id=run_id,
+        metadata={"langgraph_node": "Portfolio Manager"},
+        **_structured_output_kwargs(),
+    )
+    handler.on_llm_end(
+        _chat_result("{\"rating\": \"Buy\"", input_tokens=100, output_tokens=200, finish_reason="length"),
+        run_id=run_id,
+    )
+
+    record = handler.get_records()[0]
+    assert record["finish_reason"] == "length"
+    assert record["error"] is None  # not treated as a failure/abort record
+
+    # No truncation error was queued for a guard handler to raise.
+    assert handler.pop_pending_truncation_error(run_id) is None
+
+
+def test_structured_output_truncation_does_not_abort_through_callback_manager(tmp_path):
+    """End-to-end: a truncated structured call passes straight through the real guard, unmolested.
+
+    Also covers the issue's "no double-abort / duplicate error record" edge
+    case: exactly one record is written, and it is not an error record.
+    """
+    cm, log_handler = _build_callback_manager(tmp_path, agent="Portfolio Manager")
+
+    run_managers = cm.on_chat_model_start(
+        {"kwargs": {"model_name": "gpt-4o-mini"}},
+        [[HumanMessage(content="hello")]],
+        **_structured_output_kwargs(),
+    )
+
+    # Must not raise.
+    run_managers[0].on_llm_end(
+        _chat_result("{\"rating\": \"Buy\"", input_tokens=100, output_tokens=200, finish_reason="length"),
+    )
+
+    records = log_handler.get_records()
+    assert len(records) == 1
+    assert records[0]["finish_reason"] == "length"
+    assert records[0]["error"] is None

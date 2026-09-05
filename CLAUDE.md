@@ -537,20 +537,49 @@ and portfolio manager with no indication that the analysis was incomplete, produ
 on partial information.
 
 - **`truncated_response_abort_enabled`** (env: `TRADINGAGENTS_TRUNCATED_RESPONSE_ABORT_ENABLED`,
-  default `True`): when enabled, the run aborts with `LLMResponseTruncatedError` if any LLM response
-  is detected as truncated. When disabled, the truncation is logged at WARNING level and the run
-  continues — the pre-#171 behavior (not recommended).
+  default `True`): when enabled, the run aborts with `LLMResponseTruncatedError` if a free-text LLM
+  response is detected as truncated. When disabled, the truncation is logged at WARNING level and the
+  run continues — the pre-#171 behavior (not recommended).
 - **`finish_reason` field in `llm_calls.jsonl`** (added by issue #171): every JSONL record now includes
   a `finish_reason` field carrying the provider's completion-stopping reason (`"stop"`, `"length"`,
   `"tool_calls"`, etc.) or `null` if the provider doesn't report it. Covers both OpenAI-compatible
   `finish_reason` and Ollama-native `done_reason` shapes. This field is the key for auditing truncation
   events after the fact: a record with `finish_reason='length'` and `error=null` is a truncation the
-  abort didn't catch (because abort was disabled); one with `finish_reason='length'` and an error
-  containing `LLMResponseTruncatedError` is one the abort caught and halted for.
+  abort didn't catch (because abort was disabled, or the call was a structured-output call — see
+  below); one with `finish_reason='length'` and an error containing `LLMResponseTruncatedError` is one
+  the abort caught and halted for.
 
-The detection runs in the `LLMCallLogHandler.on_llm_end` callback (before the call is logged), so a
-truncated response triggers the abort as part of the normal callback path — no agent-specific wiring
-required. When abort is enabled and truncation is detected, the exception propagates to
+**Handler wiring (`tradingagents/llm_call_log.py`).** Detection and the JSONL write both happen in
+`LLMCallLogHandler.on_llm_end`, but that handler never raises — like `ContextWindowGuardHandler`
+(issue #149), `LLMCallLogHandler`'s whole design is that logging must never break a run, so it never
+sets `raise_error = True`. The actual abort is a second, dedicated handler, `TruncationGuardHandler`
+(`raise_error = True`, following the exact same "guard that must abort" precedent as
+`ContextWindowGuardHandler`), which `TradingAgentsGraph.__init__` appends to `self.callbacks` *after*
+whichever `LLMCallLogHandler` the caller passed in (`_build_truncation_guard`, mirroring
+`_build_context_window_guard`'s lookup-by-type). When a call is truncated and abort is enabled,
+`LLMCallLogHandler.on_llm_end` writes the one completed-call record with `error` populated (no second
+"precheck" record — unlike the oversize-prompt guard, truncation is only knowable after the call
+completes) and stashes the already-built `LLMResponseTruncatedError` via
+`pop_pending_truncation_error`; `TruncationGuardHandler.on_llm_end`, registered later in the callbacks
+list, pops that same instance and raises it. LangChain's callback manager
+(`langchain_core.callbacks.manager.handle_event`) runs handlers in registration order and only
+re-raises a handler's exception when that handler's `raise_error` is `True` — calling
+`handler.on_llm_end(...)` directly, bypassing the callback manager, does **not** exercise this path
+(see `tests/test_llm_call_log.py`'s callback-manager-driven tests, which do). This two-handler split
+exists because an earlier attempt (commit `eb473252`) had `LLMCallLogHandler.on_llm_end` raise
+directly; since that class never sets `raise_error`, the callback manager logged and swallowed the
+exception and the run continued as if nothing had happened.
+
+**Structured-output calls are out of scope** (per the issue): a completed call bound via
+`with_structured_output` (detected through the `ls_structured_output_format` bind kwarg LangChain
+surfaces on `on_chat_model_start`/`on_llm_start` via the `options` kwarg — the same convention across
+`langchain_openai`/`langchain_anthropic`/`langchain_google_genai`/`langchain_ollama`) never triggers
+the truncation abort, even when its `finish_reason` is `"length"`; `finish_reason` is still recorded
+on its JSONL record. Truncated structured calls keep going through their existing recovery ladder (the
+#153 schema-repair retry, then #162 text extraction) undisturbed — aborting here would preempt that
+ladder before it ever runs, which is explicitly out of scope for this check.
+
+When abort is enabled and a free-text call is truncated, the exception propagates to
 `run_trading_agents.py`'s per-ticker `except Exception` handler like any other run-aborting error
 (flushes the call log, prints the error, exits).
 

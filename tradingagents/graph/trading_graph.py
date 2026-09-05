@@ -29,6 +29,7 @@ from tradingagents.llm_call_log import (
     ContextWindowGuardHandler,
     LLMCallLogHandler,
     OllamaNumCtxDerivation,
+    TruncationGuardHandler,
 )
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.memory.mcp_client import MemoryMCPClient
@@ -94,6 +95,16 @@ class TradingAgentsGraph:
         # window is known for the configured models (context_windows empty)
         # or when context_window_check_enabled is False.
         self.callbacks = [*self.callbacks, self._build_context_window_guard()]
+
+        # Truncated-response enforcement (issue #171): a second dedicated
+        # callback handler, following the exact same "guard that must
+        # actually abort" precedent as the context-window guard above -- see
+        # llm_call_log.py's "truncated-response enforcement" section. Must be
+        # appended *after* whichever LLMCallLogHandler the caller passed in
+        # (found by type, same as _build_context_window_guard does) so that
+        # handler's completed-call JSONL record is always written before this
+        # one raises -- see TruncationGuardHandler's docstring.
+        self.callbacks = [*self.callbacks, self._build_truncation_guard()]
 
         # Update the interface's config
         set_config(self.config)
@@ -303,6 +314,24 @@ class TradingAgentsGraph:
             log_handler=log_handler,
             ollama_num_ctx_derivation=ollama_num_ctx_derivation,
         )
+
+    def _build_truncation_guard(self) -> TruncationGuardHandler:
+        """Build the issue #171 truncated-response guard.
+
+        Detection and the JSONL audit write live in whichever
+        ``LLMCallLogHandler`` is present in ``self.callbacks`` (found by
+        type, same lookup ``_build_context_window_guard`` uses) --
+        ``TruncationGuardHandler``'s only job is reading the
+        ``LLMResponseTruncatedError`` that handler stashed for a given call
+        and re-raising it, so the two can't produce inconsistent records.
+        ``None`` when no such handler was passed in: the guard is then a
+        no-op, since there is nothing for it to consult (see
+        ``TruncationGuardHandler``'s docstring).
+        """
+        log_handler = next(
+            (cb for cb in self.callbacks if isinstance(cb, LLMCallLogHandler)), None
+        )
+        return TruncationGuardHandler(log_handler=log_handler)
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""

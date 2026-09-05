@@ -374,6 +374,31 @@ def _extract_usage(response: LLMResult) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _is_structured_output_call(kwargs: dict[str, Any]) -> bool:
+    """Whether this LLM call was bound via ``with_structured_output`` (issue #171).
+
+    LangChain's own tracing convention -- verified in ``langchain_core`` and
+    consistently followed by ``langchain_openai``, ``langchain_anthropic``,
+    ``langchain_google_genai``, and ``langchain_ollama``'s
+    ``with_structured_output`` implementations -- tags every request built by
+    ``with_structured_output`` with an ``ls_structured_output_format`` bind
+    kwarg. ``BaseChatModel.generate``/``.stream`` pop that kwarg out of the
+    outgoing request params and instead surface it via the ``options`` kwarg
+    passed to ``on_chat_model_start``/``on_llm_start`` callbacks -- so its
+    presence there is a reliable, provider-independent signal that this call
+    is part of a structured-output attempt.
+
+    Used to keep the #171 truncation-abort check scoped to the free-text path
+    the issue describes: a truncated structured call already has its own
+    recovery ladder (#153 schema-repair retry, #162 text extraction), which
+    the issue explicitly lists as out of scope for this check to disturb.
+    """
+    options = kwargs.get("options")
+    if isinstance(options, dict):
+        return bool(options.get("ls_structured_output_format"))
+    return False
+
+
 def _extract_finish_reason(response: LLMResult) -> str | None:
     """Return the finish_reason or done_reason from the response, else ``None``.
 
@@ -494,6 +519,17 @@ class LLMCallLogHandler(BaseCallbackHandler):
         self._records: list[dict[str, Any]] = []
         self._ticker = ticker
         self._date = date
+        # issue #171: run_id (str(UUID)) -> LLMResponseTruncatedError, stashed
+        # by on_llm_end when a free-text call is truncated and
+        # truncated_response_abort_enabled is True, immediately before that
+        # same event's completed JSONL record is written. This handler never
+        # raises it (see class docstring's "never break a run" guarantee);
+        # TruncationGuardHandler -- a dedicated, raise_error=True handler
+        # registered after this one in TradingAgentsGraph.callbacks -- pops
+        # and re-raises it via pop_pending_truncation_error() so the audit
+        # record and the abort share exactly one LLMResponseTruncatedError
+        # instance and can't drift out of sync.
+        self._pending_truncation_errors: dict[str, LLMResponseTruncatedError] = {}
         # issue #154: when set (by TradingAgentsGraph, once it finds this
         # handler among its callbacks), successful-call records get an
         # "ollama_num_ctx" field naming the num_ctx value actually derived
@@ -565,6 +601,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
         token_count_method: str,
         messages: list[BaseMessage] | None = None,
         ollama_num_ctx: int | None = None,
+        is_structured_output: bool = False,
     ) -> None:
         with self._lock:
             self._pending[str(run_id)] = {
@@ -577,6 +614,9 @@ class LLMCallLogHandler(BaseCallbackHandler):
                 "token_count_method": token_count_method,
                 "messages": messages if self.dump_prompts else None,
                 "ollama_num_ctx": ollama_num_ctx,
+                # issue #171: whether this call was bound via
+                # with_structured_output -- see _is_structured_output_call.
+                "is_structured_output": is_structured_output,
             }
 
     def on_chat_model_start(
@@ -608,6 +648,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             token_count_method=token_count_method,
             messages=flat_messages if self.dump_prompts else None,
             ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count, agent=agent),
+            is_structured_output=_is_structured_output_call(kwargs),
         )
 
     def on_llm_start(
@@ -641,6 +682,7 @@ class LLMCallLogHandler(BaseCallbackHandler):
             token_count_method=token_count_method,
             messages=messages,
             ollama_num_ctx=self._derive_ollama_num_ctx(model, token_count, agent=agent),
+            is_structured_output=_is_structured_output_call(kwargs),
         )
 
     # -- call-end handlers ----------------------------------------------------
@@ -727,43 +769,64 @@ class LLMCallLogHandler(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        """Record the completed call, detecting truncation (issue #171).
+
+        This method never raises (see class docstring's "never break a run"
+        guarantee) -- ``raise_error`` stays ``False`` on this class. When a
+        free-text call's response was truncated (``finish_reason == "length"``)
+        and ``truncated_response_abort_enabled`` is ``True``, the constructed
+        ``LLMResponseTruncatedError`` is (a) written into *this same call's*
+        completed record below via ``_finish`` (so it is auditable with the
+        same error-record shape a failed call gets -- no second record) and
+        (b) stashed in ``self._pending_truncation_errors`` for
+        ``TruncationGuardHandler`` -- a dedicated, ``raise_error = True``
+        handler registered after this one -- to pop and actually raise. See
+        that class's docstring for why the raise lives there instead of here.
+
+        Structured-output calls (``_is_structured_output_call``) are
+        deliberately excluded from the truncation check entirely: a truncated
+        structured call already has its own recovery ladder (#153 schema-
+        repair retry, #162 text extraction), which issue #171 explicitly
+        lists as out of scope to disturb.
+        """
         if not self.enabled:
             return
         input_tokens, output_tokens = _extract_usage(response)
         finish_reason = _extract_finish_reason(response)
 
-        # Check for truncation (issue #171). Extract the pending start info so
-        # we can report the agent/model in the error.
+        error: str | None = None
         if finish_reason == "length":
             with self._lock:
                 start = self._pending.get(str(run_id))
-            if start is not None and get_config().get("truncated_response_abort_enabled", True):
-                error = LLMResponseTruncatedError(
+            if start is not None and start.get("is_structured_output"):
+                logger.debug(
+                    "%s (model '%s'): structured-output call truncated "
+                    "(finish_reason='length'); leaving recovery to the "
+                    "structured-output ladder (issues #153/#162), not aborting.",
+                    start["agent"], start["model"],
+                )
+            elif start is not None:
+                truncation_error = LLMResponseTruncatedError(
                     agent=start["agent"],
                     model=start["model"],
                     finish_reason=finish_reason,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
-                self._abort_truncated(
-                    error,
-                    agent=start["agent"],
-                    model=start["model"],
-                    message_count=start["message_count"],
-                    prompt_chars=start["prompt_chars"],
-                    prompt_tokens_estimated=start["token_count"],
-                    token_count_method=start["token_count_method"],
-                )
-            elif start is not None:
-                # Abort is disabled: log warning and continue
-                logger.warning(
-                    "%s (model '%s'): LLM response truncated (finish_reason='length'), "
-                    "input=%s tokens, output=%s tokens. "
-                    "Continuing with truncated response (truncated_response_abort_enabled=False).",
-                    start["agent"], start["model"], input_tokens, output_tokens,
-                )
+                if get_config().get("truncated_response_abort_enabled", True):
+                    error = _format_error(truncation_error)
+                    with self._lock:
+                        self._pending_truncation_errors[str(run_id)] = truncation_error
+                else:
+                    # Abort is disabled: log warning and continue.
+                    logger.warning(
+                        "%s (model '%s'): LLM response truncated (finish_reason='length'), "
+                        "input=%s tokens, output=%s tokens. "
+                        "Continuing with truncated response (truncated_response_abort_enabled=False).",
+                        start["agent"], start["model"], input_tokens, output_tokens,
+                    )
 
-        self._finish(run_id, input_tokens, output_tokens, error=None, finish_reason=finish_reason)
+        self._finish(run_id, input_tokens, output_tokens, error=error, finish_reason=finish_reason)
 
     def on_llm_error(
         self,
@@ -787,62 +850,24 @@ class LLMCallLogHandler(BaseCallbackHandler):
 
     # -- truncation detection (issue #171) -----------------------------------
 
-    def _abort_truncated(
-        self,
-        error: LLMResponseTruncatedError,
-        *,
-        agent: str,
-        model: str,
-        message_count: int,
-        prompt_chars: int,
-        prompt_tokens_estimated: int,
-        token_count_method: str,
-    ) -> None:
-        """Write a truncation error record to JSONL then raise ``error``.
+    def pop_pending_truncation_error(self, run_id: Any) -> LLMResponseTruncatedError | None:
+        """Pop and return the pending truncation error for ``run_id``, if any.
 
-        Mirrors ``ContextWindowGuardHandler._abort`` (issue #149) so the
-        truncation abort is auditable in llm_calls.jsonl just like an
-        oversize-prompt abort.
+        Populated by ``on_llm_end`` when a free-text call's response is
+        detected as truncated and ``truncated_response_abort_enabled`` is
+        ``True``, immediately before that same event's completed JSONL record
+        is written via ``_finish``. Read by ``TruncationGuardHandler`` (see
+        its docstring) so the audit record and the abort share exactly one
+        ``LLMResponseTruncatedError`` instance and can't drift out of sync,
+        while this handler's own ``on_llm_end`` never raises. Returns
+        ``None`` when there is nothing pending for ``run_id`` -- e.g. no
+        truncation occurred, abort is disabled, or no ``TruncationGuardHandler``
+        ever calls this (in which case the entry simply sits here unread,
+        matching how a run with no such guard attached behaves as if the
+        check does not exist).
         """
-        if not self.enabled:
-            raise error
-        try:
-            with self._lock:
-                ticker, date = self._ticker, self._date
-                log_path = self.log_path
-
-            record = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "run_id": None,
-                "ticker": ticker,
-                "date": date,
-                "agent": agent,
-                "model": model,
-                "message_count": message_count,
-                "prompt_chars": prompt_chars,
-                "prompt_tokens_estimated": prompt_tokens_estimated,
-                "token_count_method": token_count_method,
-                "input_tokens": error.input_tokens,
-                "output_tokens": error.output_tokens,
-                "duration_seconds": 0.0,
-                "error": _format_error(error),
-                "prompt_dump_path": None,
-                "ollama_num_ctx": None,
-                "finish_reason": error.finish_reason,
-            }
-
-            with self._lock:
-                self._records.append(record)
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-        except Exception:
-            logger.warning(
-                "LLMCallLogHandler: failed to write truncation error record to "
-                "llm_calls.jsonl; aborting the run anyway.",
-                exc_info=True,
-            )
-
-        raise error
+        with self._lock:
+            return self._pending_truncation_errors.pop(str(run_id), None)
 
     # -- pre-dispatch abort (issue #149) --------------------------------------
 
@@ -1428,3 +1453,87 @@ class ContextWindowGuardHandler(BaseCallbackHandler):
             prompt_text=prompt_text,
             llm_type=_extract_llm_type(kwargs),
         )
+
+
+# -- truncated-response enforcement (issue #171) ------------------------------
+#
+# Mirrors the oversize-prompt enforcement section above: #147 made the
+# per-call log trustworthy, this section makes a completed-but-truncated
+# response loud instead of silent. Unlike the oversize-prompt guard, whether
+# a response was truncated is only knowable *after* the call completes (the
+# provider's finish_reason/done_reason on the response), never before
+# dispatch -- so there is no pre-dispatch analogue to ContextWindowGuardHandler
+# here, and no second "precheck" JSONL record: the one record ``_finish``
+# already writes for a completed call is where the failure gets audited
+# (``error`` populated, mirroring a failed call's record shape).
+#
+# The design-review finding that sent this back from haiku to sonnet: the
+# first attempt (commit eb473252) had ``LLMCallLogHandler.on_llm_end`` raise
+# ``LLMResponseTruncatedError`` directly. ``LLMCallLogHandler`` never sets
+# ``raise_error = True`` (by design -- see its class docstring), so LangChain's
+# callback manager (``handle_event`` in ``langchain_core.callbacks.manager``)
+# caught that exception, logged it at WARNING, and swallowed it -- the run
+# continued as if nothing had happened, the exact opposite of the issue's
+# goal. The fix follows the same precedent ``ContextWindowGuardHandler``
+# already established for "a guard that must actually abort": a dedicated,
+# minimal handler with ``raise_error = True``. The one wrinkle relative to
+# that precedent is that the abort here needs data (`agent`/`model`/token
+# counts) that only ``LLMCallLogHandler`` tracks, and that data is popped
+# from ``_pending`` by the time a second handler's ``on_llm_end`` would run
+# for the same event -- ``pop_pending_truncation_error`` bridges that by
+# having ``LLMCallLogHandler.on_llm_end`` stash the already-constructed
+# ``LLMResponseTruncatedError`` for this handler to retrieve and raise,
+# instead of a second, independent detection pass.
+
+
+class TruncationGuardHandler(BaseCallbackHandler):
+    """Callback handler that aborts a run when a free-text LLM response was truncated.
+
+    A deliberately separate, minimal handler rather than folding the abort
+    into ``LLMCallLogHandler`` -- the same reasoning as
+    ``ContextWindowGuardHandler`` above (see its docstring): logging must
+    never break a run, so ``LLMCallLogHandler`` never sets ``raise_error``.
+    This handler's entire purpose is the opposite -- to raise, on purpose,
+    exactly when a completed response was cut off mid-answer -- so it gets
+    its own class with ``raise_error = True`` instead of weakening the
+    logging handler's guarantee.
+
+    Detection and the JSONL audit write both happen inside
+    ``LLMCallLogHandler.on_llm_end`` (see that method's docstring): there is
+    exactly one record per call either way, with ``error`` populated for the
+    aborting case. This handler's only job is the raise: it reads the
+    ``LLMResponseTruncatedError`` ``LLMCallLogHandler`` stashed for this
+    ``run_id`` (via ``pop_pending_truncation_error``) and re-raises it.
+    LangChain's callback manager (``langchain_core.callbacks.manager.
+    handle_event``) invokes handlers in the order they were registered and
+    re-raises a handler's exception immediately when that handler's
+    ``raise_error`` is ``True`` (instead of logging-and-swallowing it, the
+    default for every other handler) -- ``TradingAgentsGraph`` registers this
+    handler *after* the ``LLMCallLogHandler`` it shares (see
+    ``_build_truncation_guard``), so the completed-call record is always
+    written before the abort fires, and never written twice.
+
+    A ``None`` ``log_handler`` makes this a no-op: with no
+    ``LLMCallLogHandler`` to consult, there is nothing to raise on.
+    """
+
+    raise_error = True
+
+    def __init__(self, log_handler: LLMCallLogHandler | None = None) -> None:
+        super().__init__()
+        self.log_handler = log_handler
+
+    def on_llm_end(
+        self,
+        response: LLMResult,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if self.log_handler is None:
+            return
+        error = self.log_handler.pop_pending_truncation_error(run_id)
+        if error is not None:
+            raise error
